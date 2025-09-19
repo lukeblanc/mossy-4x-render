@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: mossy-4x
+    env: python
+    plan: starter
+    autoDeploy: true
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -m app.main"
+    envVars:
+      - key: MODE
+        value: demo
+      - key: TZ
+        value: Australia/Perth
+      - key: HEARTBEAT_SECONDS
+        value: "30"
+      - key: DECISION_SECONDS
+        value: "60"
+      - key: OANDA_API_KEY
+        sync: false
+      - key: OANDA_ACCOUNT_ID
+        sync: false
