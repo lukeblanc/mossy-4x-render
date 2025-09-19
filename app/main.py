@@ -9,17 +9,11 @@ from app.broker import Broker
 broker = Broker()
 
 async def heartbeat():
-    print(
-        f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}",
-        flush=True,
-    )
+    print(f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}", flush=True)
 
 async def decision_tick():
     sig = decide()
-    print(
-        f"[DECISION] {datetime.now().isoformat()} signal={sig}",
-        flush=True,
-    )
+    print(f"[DECISION] {datetime.now().isoformat()} signal={sig}", flush=True)
     if sig in ("BUY", "SELL"):
         broker.place_order(sig, size=1.0)
 
