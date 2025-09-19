@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from app.config import settings
 from app.strategy import decide
 from app.broker import Broker
@@ -8,12 +9,18 @@ from app.broker import Broker
 broker = Broker()
 
 async def heartbeat():
-print(f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}", flush=True)
+    print(
+        f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}",
+        flush=True,
+    )
 
 async def decision_tick():
-    sig = dectestide()
-print(f"[DECISION] {datetime.now().isoformat()} signal={sig}", flush=True)
-    if sig in ("BUY","SELL"):
+    sig = decide()
+    print(
+        f"[DECISION] {datetime.now().isoformat()} signal={sig}",
+        flush=True,
+    )
+    if sig in ("BUY", "SELL"):
         broker.place_order(sig, size=1.0)
 
 async def runner():
@@ -29,7 +36,7 @@ async def runner():
 
 def main():
     try:
-        import uvloop
+        import uvloop  # optional, will fail gracefully on 3.13
         uvloop.install()
     except Exception:
         pass
