@@ -25,7 +25,7 @@ async def decision_tick():
         f"[DECISION] {datetime.now().isoformat()} signal={sig}",
         flush=True,
     )
-    if sig in ("BUY", "SELL"):
+if sig in ("BUY", "SELL"):
         broker.place_order(sig, size=1.0)
 
 async def runner():
