@@ -13,13 +13,18 @@ def _startup_checks():
     # harmless in demo; proves keys if provided
     broker.connectivity_check()
 
-
 async def heartbeat():
-    print(f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}", flush=True)
+    print(
+        f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}",
+        flush=True,
+    )
 
 async def decision_tick():
     sig = decide()
-    print(f"[DECISION] {datetime.now().isoformat()} signal={sig}", flush=True)
+    print(
+        f"[DECISION] {datetime.now().isoformat()} signal={sig}",
+        flush=True,
+    )
     if sig in ("BUY", "SELL"):
         broker.place_order(sig, size=1.0)
 
@@ -36,11 +41,11 @@ async def runner():
 
 def main():
     try:
-        import uvloop  # optional, will fail gracefully on 3.13
+        import uvloop  # optional; ignored if not supported
         uvloop.install()
     except Exception:
-       _startup_checks()  # call this before starting the scheduler
-_
+        pass
+    _startup_checks()  # call this before starting the scheduler
     asyncio.run(runner())
 
 if __name__ == "__main__":
