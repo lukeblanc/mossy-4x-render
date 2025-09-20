@@ -40,7 +40,7 @@ def main():
         uvloop.install()
     except Exception:
         pass
-            _startup_checks()
+_startup_checks()
     asyncio.run(runner())
 
 if __name__ == "__main__":
