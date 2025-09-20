@@ -10,10 +10,9 @@ broker = Broker()
 
 # Startup connectivity check
 def _startup_checks():
-       # harmless in demo; proves keys if provided
+    # harmless in demo; proves keys if provided
     broker.connectivity_check()
-    # TEMP: prove order path once (demo only)
-    broker.place_order("BUY", size=1.0)
+
 async def heartbeat():
     print(
         f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}",
@@ -26,7 +25,7 @@ async def decision_tick():
         f"[DECISION] {datetime.now().isoformat()} signal={sig}",
         flush=True,
     )
-if sig in ("BUY", "SELL"):
+    if sig in ("BUY", "SELL"):
         broker.place_order(sig, size=1.0)
 
 async def runner():
