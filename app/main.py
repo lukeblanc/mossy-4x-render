@@ -8,6 +8,12 @@ from app.broker import Broker
 
 broker = Broker()
 
+# Startup connectivity check
+def _startup_checks():
+    # harmless in demo; proves keys if provided
+    broker.connectivity_check()
+
+
 async def heartbeat():
     print(f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}", flush=True)
 
@@ -34,6 +40,7 @@ def main():
         uvloop.install()
     except Exception:
         pass
+            _startup_checks()
     asyncio.run(runner())
 
 if __name__ == "__main__":
