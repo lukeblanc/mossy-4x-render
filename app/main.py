@@ -39,8 +39,8 @@ def main():
         import uvloop  # optional, will fail gracefully on 3.13
         uvloop.install()
     except Exception:
-        pass
-_startup_checks()
+       _startup_checks()  # call this before starting the scheduler
+_
     asyncio.run(runner())
 
 if __name__ == "__main__":
