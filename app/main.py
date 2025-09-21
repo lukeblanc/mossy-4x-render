@@ -1,52 +1,66 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import settings
 from app.strategy import decide
 from app.broker import Broker
+from app.health import watchdog
 
 broker = Broker()
 
-# Startup connectivity check
+# Startup connectivity checks
 def _startup_checks():
-    # harmless in demo; proves keys if provided
+    """Connectivity checks to verify credentials if provided."""
     broker.connectivity_check()
 
 async def heartbeat():
-    print(
-        f"[HEARTBEAT] {datetime.now().isoformat()} tz={settings.TZ} mode={settings.MODE}",
-        flush=True,
-    )
+    """Send a heartbeat and update watchdog timestamp."""
+    # update heartbeat timestamp (UTC)
+    watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
+    ts_local = datetime.now(timezone.utc).astimezone().isoformat()
+    print(f"[HEARTBEAT] {ts_local} tz={settings.TZ} mode={settings.MODE}", flush=True)
 
 async def decision_tick():
-    sig = decide()
-    print(
-        f"[DECISION] {datetime.now().isoformat()} signal={sig}",
-        flush=True,
-    )
-    if sig in ("BUY", "SELL"):
-        broker.place_order(sig, size=1.0)
+    """Run the strategy decision, log diagnostics, and place demo orders."""
+    ts_local = datetime.now(timezone.utc).astimezone()
+    try:
+        signal, reason, diag = await decide()
+    except Exception as e:
+        watchdog.record_error()
+        err_ts = datetime.now(timezone.utc).astimezone().isoformat()
+        print(f"[ERROR] {err_ts} error={e}", flush=True)
+        return
+    # update last decision timestamp
+    watchdog.last_decision_ts = datetime.now(timezone.utc)
+    log = {
+        "ts": ts_local.isoformat(),
+        "instrument": settings.INSTRUMENT,
+        "ema_fast": diag.get("ema_fast"),
+        "ema_slow": diag.get("ema_slow"),
+        "rsi": diag.get("rsi"),
+        "atr": diag.get("atr"),
+        "signal": signal,
+        "reason": reason,
+        "mode": settings.MODE,
+        "size": settings.ORDER_SIZE,
+    }
+    print(f"[DECISION] {log}", flush=True)
+    if signal in ("BUY", "SELL"):
+        broker.place_order(settings.INSTRUMENT, signal, settings.ORDER_SIZE)
 
 async def runner():
-    scheduler = AsyncIOScheduler(timezone=settings.TZ)
-    scheduler.add_job(heartbeat, "interval", seconds=settings.HEARTBEAT_SECONDS, id="heartbeat")
-    scheduler.add_job(decision_tick, "interval", seconds=settings.DECISION_SECONDS, id="decision")
+    """Main runner scheduling heartbeat and decision tasks and running watchdog."""
+    _startup_checks()
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(heartbeat, "interval", seconds=settings.HEARTBEAT_SECONDS)
+    scheduler.add_job(decision_tick, "interval", seconds=settings.DECISION_SECONDS)
     scheduler.start()
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        scheduler.shutdown()
-
-def main():
-    try:
-        import uvloop  # optional; ignored if not supported
-        uvloop.install()
-    except Exception:
-        pass
-    _startup_checks()  # call this before starting the scheduler
-    asyncio.run(runner())
+    asyncio.create_task(watchdog.run())
+    await heartbeat()
+    await decision_tick()
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(runner())
