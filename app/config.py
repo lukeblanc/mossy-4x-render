@@ -1,6 +1,5 @@
 import os
 from pydantic import BaseModel
-from typing import Optional
 
 class Settings(BaseModel):
     # Core
@@ -12,11 +11,11 @@ class Settings(BaseModel):
     # Health / alerts
     MAX_SILENCE_SECONDS: int = int(os.getenv("MAX_SILENCE_SECONDS", "180"))
     ERROR_BURST_THRESHOLD: int = int(os.getenv("ERROR_BURST_THRESHOLD", "3"))
-    ALERT_EMAIL: Optional[str] = os.getenv("ALERT_EMAIL")
-    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST")
+    ALERT_EMAIL: str | None = os.getenv("ALERT_EMAIL")
+    SMTP_HOST: str | None = os.getenv("SMTP_HOST")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: Optional[str] = os.getenv("SMTP_USER")
-    SMTP_PASS: Optional[str] = os.getenv("SMTP_PASS")
+    SMTP_USER: str | None = os.getenv("SMTP_USER")
+    SMTP_PASS: str | None = os.getenv("SMTP_PASS")
 
     # Trading
     INSTRUMENT: str = os.getenv("INSTRUMENT", "EUR_USD")
@@ -34,9 +33,9 @@ class Settings(BaseModel):
     MIN_ATR: float = float(os.getenv("MIN_ATR", "0.00005"))
 
     # Risk
-    RISK_PCT: float = float(os.getenv("RISK_PCT", "0.01"))
-    SL_R: float = float(os.getenv("SL_R", "1.0"))
-    TP_R: float = float(os.getenv("TP_R", "1.5"))
+        RISK_PCT: float = float(os.getenv("RISK_PCT", "0.01"))
+        SL_R: float = float(os.getenv("SL_R", "1.0"))
+            TP_R: float = float(os.getenv("TP_R", "1.5"))
     MAX_DD_DAY: float = float(os.getenv("MAX_DD_DAY", "0.05"))
 
 settings = Settings()
