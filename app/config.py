@@ -19,6 +19,8 @@ class Settings(BaseModel):
     SMTP_PASS: Optional[str] = os.getenv("SMTP_PASS")
 
     # Trading
+        OANDA_API_KEY: Optional[str] = os.getenv("OANDA_API_KEY")
+    OANDA_ACCOUNT_ID: Optional[str] = os.getenv("OANDA_ACCOUNT_ID")
     INSTRUMENT: str = os.getenv("INSTRUMENT", "EUR_USD")
     ORDER_SIZE: float = float(os.getenv("ORDER_SIZE", "1000"))
 
