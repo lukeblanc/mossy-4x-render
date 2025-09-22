@@ -1,6 +1,6 @@
-import os
-from typing import Optional
+iimport os
 from pydantic import BaseModel
+from typing import Optional
 
 class Settings(BaseModel):
     # Core
@@ -8,6 +8,7 @@ class Settings(BaseModel):
     TZ: str = os.getenv("TZ", "Australia/Perth")
     HEARTBEAT_SECONDS: int = int(os.getenv("HEARTBEAT_SECONDS", "30"))
     DECISION_SECONDS: int = int(os.getenv("DECISION_SECONDS", "60"))
+
     # Health / alerts
     MAX_SILENCE_SECONDS: int = int(os.getenv("MAX_SILENCE_SECONDS", "180"))
     ERROR_BURST_THRESHOLD: int = int(os.getenv("ERROR_BURST_THRESHOLD", "3"))
@@ -16,6 +17,7 @@ class Settings(BaseModel):
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
     SMTP_USER: Optional[str] = os.getenv("SMTP_USER")
     SMTP_PASS: Optional[str] = os.getenv("SMTP_PASS")
+
     # Trading
     INSTRUMENT: str = os.getenv("INSTRUMENT", "EUR_USD")
     ORDER_SIZE: float = float(os.getenv("ORDER_SIZE", "1000"))
@@ -36,6 +38,5 @@ class Settings(BaseModel):
     SL_R: float = float(os.getenv("SL_R", "1.0"))
     TP_R: float = float(os.getenv("TP_R", "1.5"))
     MAX_DD_DAY: float = float(os.getenv("MAX_DD_DAY", "0.05"))
-settings = Settings()
 
 settings = Settings()
