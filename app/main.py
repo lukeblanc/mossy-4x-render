@@ -24,7 +24,7 @@ async def heartbeat():
 async def decision_tick():
     """Run the strategy decision, log diagnostics, and place demo orders."""
     ts_local = datetime.now(timezone.utc).astimezone()
-    try:d
+    try:
         signal, reason, diag =     decide()  # decide() is synchronous()
     except Exception as e:
         watchdog.record_error()
