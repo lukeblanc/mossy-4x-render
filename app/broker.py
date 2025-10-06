@@ -69,4 +69,38 @@ class Broker:
                     return {"status":"ERROR", "code": r.status_code, "text": r.text}
         except Exception as e:
             print(f"[BROKER] LIVE order exception: {e}", flush=True)
-            return {"status":"ERROR", "error": str(e)}
+           return {"status":"ERROR", "error": str(
+            
+    def place_order(self, instrument: str, signal: str, units: float):
+        side = signal.upper()
+        if side not in ("BUY", "SELL"):
+            print(f"[BROKER] Ignoring unknown signal: {signal}", flush=True)
+            return {"status": "IGNORED"}
+
+        if self.mode.lower() != "live" or not (self.key and self.account):
+            print(f"[BROKER] {self.mode.upper()} SIMULATED {side} order for {instrument} size={units}", flush=True)
+            return {"status": "SIMULATED"}
+
+        trade_units = str(int(units if side == "BUY" else -units))
+        payload = {
+            "order": {
+                "type": "MARKET",
+                "instrument": instrument,
+                "units": trade_units,
+            }
+        }
+
+        try:
+            with self._client() as c:
+                r = c.post(f"/v3/accounts/{self.account}/orders", json=payload)
+                if r.status_code in (200, 201):
+                    print(f"[BROKER] LIVE {side} sent order for {instrument} size={units} resp={r.status_code}", flush=True)
+                    return {"status": "SENT", "resp": r.json()}
+                else:
+                    print(f"[BROKER] LIVE order error {r.status_code}: {r.text}", flush=True)
+                    return {"status": "ERROR", "code": r.status_code, "text": r.text}
+        except Exception as e:
+            print(f"[BROKER] LIVE order exception: {e}", flush=True)
+            return {"status": "ERROR", "error": str(e)}
+e)}
+            
