@@ -66,7 +66,8 @@ def place_order(self, instrument: str, signal: str, units: float):
             else:
                 print(f"[BROKER] LIVE order error {r.status_code}: {r.text}", flush=True)
                 return {"status": "ERROR", "code": r.status_code, "text": r.text}
-    except Exception as e:
-        print(f"[BROKER] LIVE order exception: {e}", flush=True)
-        return {"status": "ERROR", "error": str(e)}    return {"status":"ERROR", "error": str(
+        except Exception as e:
+            print(f"[BROKER] LIVE order exception: {e}", flush=True)
+    return {"status": "ERROR", "error": str(e)}
+
             
