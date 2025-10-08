@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import httpx
-from datetime import datetime, timezone
 from typing import List, Dict, Tuple
 
 from app.config import settings
@@ -33,16 +32,20 @@ def _fetch_candles(count: int = 200) -> List[Dict]:
         resp.raise_for_status()
         data = resp.json()
         candles: List[Dict] = []
-        for c in data.get("candles", []):
-            mids = c.get("mid", {})
-            candles.append(
-                {
-                    "o": float(mids.get("o")),
-                    "h": float(mids.get("h")),
-                    "l": float(mids.get("l")),
-                    "c": float(mids.get("c")),
-                }
-            )
+        for candle in data.get("candles", []):
+            mids = candle.get("mid", {})
+            try:
+                candles.append(
+                    {
+                        "o": float(mids["o"]),
+                        "h": float(mids["h"]),
+                        "l": float(mids["l"]),
+                        "c": float(mids["c"]),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                # Skip malformed candles rather than failing the entire fetch.
+                continue
         return candles
     except Exception as e:
         # Log and return empty list if fetching fails
