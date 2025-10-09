@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -7,7 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from app.health import watchdog
+
 from src.decision_engine import DecisionEngine
+from src.decision_engine import Evaluation
+from src import main
 
 
 @pytest.fixture()
@@ -84,3 +89,80 @@ def test_skips_inactive_markets(capfd, sample_config):
     assert all("signal=HOLD" in line for line in output_lines)
     assert all("rsi=n/a" in line for line in output_lines)
     assert all("atr=n/a" in line for line in output_lines)
+
+
+def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
+    class DummyEngine:
+        def __init__(self) -> None:
+            self.marked: List[str] = []
+
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={},
+                    reason="trend",
+                    market_active=True,
+                )
+            ]
+
+        def position_size(self, instrument: str, diagnostics: Dict) -> int:
+            return 1
+
+        def mark_trade(self, instrument: str) -> None:
+            self.marked.append(instrument)
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, str]] = []
+
+        def place_order(self, instrument: str, signal: str, units: int) -> Dict[str, str]:
+            self.calls.append({"instrument": instrument, "signal": signal, "units": units})
+            return {"status": "SENT"}
+
+    dummy_engine = DummyEngine()
+    dummy_broker = DummyBroker()
+    monkeypatch.setattr(main, "engine", dummy_engine)
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+
+    before = datetime.now(timezone.utc) - timedelta(hours=1)
+    original_ts = watchdog.last_decision_ts
+    watchdog.last_decision_ts = before
+
+    asyncio.run(main.decision_cycle())
+
+    try:
+        assert dummy_engine.marked == ["EUR_USD"]
+        assert dummy_broker.calls == [{"instrument": "EUR_USD", "signal": "BUY", "units": 1}]
+        assert watchdog.last_decision_ts > before
+    finally:
+        watchdog.last_decision_ts = original_ts
+
+
+def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
+    class FailingEngine:
+        def evaluate_all(self) -> List[Evaluation]:
+            raise RuntimeError("boom")
+
+    events: Dict[str, bool] = {"error": False}
+
+    def record_error() -> None:
+        events["error"] = True
+
+    failing_engine = FailingEngine()
+    monkeypatch.setattr(main, "engine", failing_engine)
+    monkeypatch.setattr(main.watchdog, "record_error", record_error)
+
+    before = datetime.now(timezone.utc) - timedelta(hours=1)
+    original_ts = watchdog.last_decision_ts
+    watchdog.last_decision_ts = before
+
+    asyncio.run(main.decision_cycle())
+
+    try:
+        assert events["error"] is True
+        assert watchdog.last_decision_ts > before
+    finally:
+        watchdog.last_decision_ts = original_ts
