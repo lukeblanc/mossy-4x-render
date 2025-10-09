@@ -86,24 +86,28 @@ async def decision_cycle() -> None:
         ts = datetime.now(timezone.utc).astimezone().isoformat()
         print(f"[ERROR] {ts} decision-cycle failure error={exc}", flush=True)
         return
+    else:
+        open_trades = _open_trades_state()
+        for evaluation in evaluations:
+            if not _should_place_trade(open_trades, evaluation):
+                continue
 
-    open_trades = _open_trades_state()
-    for evaluation in evaluations:
-        if not _should_place_trade(open_trades, evaluation):
-            continue
-
-        diagnostics = evaluation.diagnostics or {}
-        units = engine.position_size(evaluation.instrument, diagnostics)
-        result = broker.place_order(evaluation.instrument, evaluation.signal, units)
-        if result.get("status") == "SENT":
-            engine.mark_trade(evaluation.instrument)
-            open_trades.append({"instrument": evaluation.instrument})
-        else:
-            print(
-                f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"
-                f" response={result}",
-                flush=True,
+            diagnostics = evaluation.diagnostics or {}
+            units = engine.position_size(evaluation.instrument, diagnostics)
+            result = broker.place_order(
+                evaluation.instrument, evaluation.signal, units
             )
+            if result.get("status") == "SENT":
+                engine.mark_trade(evaluation.instrument)
+                open_trades.append({"instrument": evaluation.instrument})
+            else:
+                print(
+                    f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"
+                    f" response={result}",
+                    flush=True,
+                )
+    finally:
+        watchdog.last_decision_ts = datetime.now(timezone.utc)
 
 
 async def runner() -> None:
