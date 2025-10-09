@@ -111,4 +111,20 @@ class Broker:
                 print(f"[BROKER] LIVE order exception: {exc}", flush=True)
             return {"status": "ERROR", "error": str(exc)}
 
-            
+    def list_open_trades(self) -> list:
+        """Return currently open trades for the configured account."""
+        if self.mode == "simulation" or not (self.key and self.account):
+            return []
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/openTrades")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("trades", [])
+                print(
+                    f"[OANDA] Failed to read open trades status={resp.status_code} body={resp.text}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
+        return []

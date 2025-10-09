@@ -1,0 +1,25 @@
+{
+  "heartbeat_seconds": 30,
+  "decision_seconds": 60,
+  "timeframe": "M5",
+  "candles_to_fetch": 200,
+  "order_size": 1000,
+  "account_balance": 10000,
+  "ema_fast": 10,
+  "ema_slow": 20,
+  "rsi_length": 14,
+  "rsi_buy": 55,
+  "rsi_sell": 45,
+  "atr_length": 14,
+  "min_atr": 0.00005,
+  "instruments": [
+    "EUR_USD",
+    "AUD_USD",
+    "XAU_USD",
+    "GBP_USD",
+    "USD_JPY"
+  ],
+  "max_open_trades": 3,
+  "risk_per_trade": 0.02,
+  "cooldown_minutes": 2
+}
