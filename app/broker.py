@@ -12,7 +12,12 @@ class Broker:
         self.mode = (settings.MODE or "demo").lower()
         self.account = settings.OANDA_ACCOUNT_ID
         self.key = settings.OANDA_API_KEY
-        self.base_url = PRACTICE if self.mode == "demo" else LIVE
+        if self.mode == "demo":
+            self.base_url = PRACTICE
+        elif self.mode == "live":
+            self.base_url = LIVE
+        else:
+            self.base_url = PRACTICE
         self._headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
 
     def _client(self) -> httpx.Client:
@@ -50,12 +55,19 @@ class Broker:
             print(f"[BROKER] Ignoring unknown signal: {signal}", flush=True)
             return {"status": "IGNORED", "reason": "unknown-signal"}
 
-        if self.mode != "live" or not (self.key and self.account):
+        if self.mode == "simulation":
             print(
                 f"[BROKER] {self.mode.upper()} SIMULATED {side} order for {instrument} size={units}",
                 flush=True,
             )
             return {"status": "SIMULATED"}
+
+        if not (self.key and self.account):
+            print(
+                f"[BROKER] {self.mode.upper()} order failed: missing credentials.",
+                flush=True,
+            )
+            return {"status": "ERROR", "reason": "missing-creds"}
 
         trade_units = int(units if side == "BUY" else -units)
         payload = {
@@ -70,18 +82,54 @@ class Broker:
             with self._client() as client:
                 resp = client.post(f"/v3/accounts/{self.account}/orders", json=payload)
                 if resp.status_code in (200, 201):
+                    data = resp.json()
+                    if self.mode == "demo":
+                        order_id = (
+                            data.get("orderCreateTransaction", {}).get("id")
+                            or data.get("orderFillTransaction", {}).get("id")
+                            or data.get("lastTransactionID")
+                        )
+                        print(
+                            f"[OANDA] DEMO ORDER SENT id={order_id} instrument={instrument}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[BROKER] LIVE {side} sent order for {instrument} size={units} resp={resp.status_code}",
+                            flush=True,
+                        )
+                    return {"status": "SENT", "response": data}
+                if self.mode == "demo":
+                    print(f"[OANDA] DEMO ORDER FAILED {resp.text}", flush=True)
+                else:
                     print(
-                        f"[BROKER] LIVE {side} sent order for {instrument} size={units} resp={resp.status_code}",
+                        f"[BROKER] LIVE order error {resp.status_code}: {resp.text}",
                         flush=True,
                     )
-                    return {"status": "SENT", "response": resp.json()}
-                print(
-                    f"[BROKER] LIVE order error {resp.status_code}: {resp.text}",
-                    flush=True,
-                )
                 return {"status": "ERROR", "code": resp.status_code, "text": resp.text}
         except Exception as exc:
-            print(f"[BROKER] LIVE order exception: {exc}", flush=True)
+            if self.mode == "demo":
+                print(f"[OANDA] DEMO ORDER FAILED {exc}", flush=True)
+            else:
+                print(f"[BROKER] LIVE order exception: {exc}", flush=True)
             return {"status": "ERROR", "error": str(exc)}
+
+    def list_open_trades(self) -> list:
+        """Return currently open trades for the configured account."""
+        if self.mode == "simulation" or not (self.key and self.account):
+            return []
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/openTrades")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("trades", [])
+                print(
+                    f"[OANDA] Failed to read open trades status={resp.status_code} body={resp.text}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
+        return []
 
             
