@@ -131,5 +131,3 @@ class Broker:
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
         return []
-
-            
