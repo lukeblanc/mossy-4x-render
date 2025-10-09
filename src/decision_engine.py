@@ -162,8 +162,14 @@ class DecisionEngine:
         resolved: List[str] = []
         seen = set()
 
-        if configured:
-            for entry in configured:
+        if configured is not None:
+            entries: Iterable[str]
+            if isinstance(configured, str):
+                entries = [configured]
+            else:
+                entries = configured
+
+            for entry in entries:
                 if not isinstance(entry, str):
                     continue
                 symbol = entry.strip().upper()
@@ -171,11 +177,13 @@ class DecisionEngine:
                     continue
                 resolved.append(symbol)
                 seen.add(symbol)
+            return resolved
 
         for symbol in DEFAULT_INSTRUMENTS:
-            if symbol not in seen:
-                resolved.append(symbol)
-                seen.add(symbol)
+            if symbol in seen:
+                continue
+            resolved.append(symbol)
+            seen.add(symbol)
 
         return resolved
 
