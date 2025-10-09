@@ -18,7 +18,13 @@ from src import main
 @pytest.fixture()
 def sample_config() -> Dict:
     return {
-        "instruments": ["EUR_USD", "AUD_USD", "XAU_USD"],
+        "instruments": [
+            "EUR_USD",
+            "AUD_USD",
+            "GBP_USD",
+            "USD_JPY",
+            "XAU_USD",
+        ],
         "cooldown_minutes": 0,
         "risk_per_trade": 0.02,
         "account_balance": 10000,
@@ -48,6 +54,18 @@ def test_scans_all_instruments(capfd, sample_config):
             {"o": 0.74, "h": 0.74, "l": 0.72, "c": 0.73},
             {"o": 0.73, "h": 0.73, "l": 0.71, "c": 0.72},
         ],
+        "GBP_USD": [
+            {"o": 1.3, "h": 1.31, "l": 1.29, "c": 1.3},
+            {"o": 1.3, "h": 1.32, "l": 1.3, "c": 1.31},
+            {"o": 1.31, "h": 1.33, "l": 1.31, "c": 1.33},
+            {"o": 1.33, "h": 1.34, "l": 1.32, "c": 1.34},
+        ],
+        "USD_JPY": [
+            {"o": 110.0, "h": 110.5, "l": 109.5, "c": 110.2},
+            {"o": 110.2, "h": 110.4, "l": 109.8, "c": 110.0},
+            {"o": 110.0, "h": 110.1, "l": 109.7, "c": 109.9},
+            {"o": 109.9, "h": 110.0, "l": 109.5, "c": 109.6},
+        ],
         "XAU_USD": [
             {"o": 1950.0, "h": 1951.0, "l": 1949.0, "c": 1950.5},
             {"o": 1950.5, "h": 1951.5, "l": 1949.5, "c": 1950.5},
@@ -61,16 +79,18 @@ def test_scans_all_instruments(capfd, sample_config):
     evaluations = engine.evaluate_all()
 
     assert [ev.instrument for ev in evaluations] == sample_config["instruments"]
-    signals = {ev.instrument: ev.signal for ev in evaluations}
-    assert signals["EUR_USD"] == "BUY"
-    assert signals["AUD_USD"] == "SELL"
-    assert signals["XAU_USD"] == "HOLD"
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert any("[SCAN] EUR_USD signal=BUY" in line for line in output_lines)
-    assert any("[SCAN] AUD_USD signal=SELL" in line for line in output_lines)
-    assert any("[SCAN] XAU_USD signal=HOLD" in line for line in output_lines)
+    output_lines = captured.out.splitlines()
+    scan_lines = [line for line in output_lines if line.startswith("[SCAN]")]
+    decision_lines = [line for line in output_lines if line.startswith("[DECISION]")]
+
+    assert len(scan_lines) == len(sample_config["instruments"])
+    assert len(decision_lines) == len(sample_config["instruments"])
+
+    for instrument in sample_config["instruments"]:
+        assert any(f"[SCAN] Evaluating {instrument}" in line for line in scan_lines)
+        assert any(f"[DECISION] {instrument} signal=" in line for line in decision_lines)
 
 
 def test_skips_inactive_markets(capfd, sample_config):

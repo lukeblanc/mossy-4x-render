@@ -79,6 +79,15 @@ async def heartbeat() -> None:
 
 
 async def decision_cycle() -> None:
+    instruments = getattr(engine, "instruments", [])
+    if instruments:
+        instrument_list = ", ".join(instruments)
+        print(
+            f"[CYCLE] Running decision cycle for {len(instruments)} instruments: {instrument_list}",
+            flush=True,
+        )
+    else:
+        print("[CYCLE] Running decision cycle", flush=True)
     try:
         evaluations = engine.evaluate_all()
     except Exception as exc:  # pragma: no cover - defensive logging
