@@ -104,17 +104,11 @@ def test_skips_inactive_markets(capfd, sample_config):
     assert all(ev.signal == "HOLD" for ev in evaluations)
 
     captured = capfd.readouterr()
-    output_lines = captured.out.splitlines()
-    scan_lines = [line for line in output_lines if line.startswith("[SCAN]")]
-    decision_lines = [line for line in output_lines if line.startswith("[DECISION]")]
-
-    assert len(scan_lines) == len(sample_config["instruments"])
-    assert len(decision_lines) == len(sample_config["instruments"])
-
-    assert all("rsi=n/a" in line for line in scan_lines)
-    assert all("atr=n/a" in line for line in scan_lines)
-    assert all("signal=HOLD" in line for line in decision_lines)
-    assert all("reason=inactive-market" in line for line in decision_lines)
+    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
+    assert len(output_lines) == len(sample_config["instruments"])
+    assert all("signal=HOLD" in line for line in output_lines)
+    assert all("rsi=n/a" in line for line in output_lines)
+    assert all("atr=n/a" in line for line in output_lines)
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):

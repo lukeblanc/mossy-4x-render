@@ -89,10 +89,7 @@ class Broker:
                             or data.get("orderFillTransaction", {}).get("id")
                             or data.get("lastTransactionID")
                         )
-                        print(
-                            f"[OANDA] DEMO ORDER SENT id={order_id} instrument={instrument}",
-                            flush=True,
-                        )
+                        print(f"[OANDA] DEMO ORDER SENT id={order_id}", flush=True)
                     else:
                         print(
                             f"[BROKER] LIVE {side} sent order for {instrument} size={units} resp={resp.status_code}",

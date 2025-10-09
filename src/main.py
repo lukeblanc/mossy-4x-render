@@ -115,9 +115,6 @@ async def decision_cycle() -> None:
                     f" response={result}",
                     flush=True,
                 )
-        print(
-            f"[CYCLE] Completed decision cycle for {len(evaluations)} instruments", flush=True
-        )
     finally:
         watchdog.last_decision_ts = datetime.now(timezone.utc)
 
