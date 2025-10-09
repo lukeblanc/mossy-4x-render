@@ -10,7 +10,7 @@ import pytest
 
 from app.health import watchdog
 
-from src.decision_engine import DecisionEngine
+from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine
 from src.decision_engine import Evaluation
 from src import main
 
@@ -93,6 +93,103 @@ def test_scans_all_instruments(capfd, sample_config):
         assert any(f"[DECISION] {instrument} signal=" in line for line in decision_lines)
 
 
+def test_respects_configured_instrument_subset(capfd, sample_config):
+    subset = ["EUR_USD", "USD_JPY"]
+    config = dict(sample_config)
+    config["instruments"] = subset
+    config["merge_default_instruments"] = False
+
+    prices: Dict[str, List[Dict[str, float]]] = {
+        symbol: [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+        for symbol in subset
+    }
+
+    def fetcher(instrument: str, **kwargs):
+        return prices[instrument]
+
+    engine = DecisionEngine(config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert [ev.instrument for ev in evaluations] == subset
+
+    captured = capfd.readouterr()
+    output_lines = captured.out.splitlines()
+    scan_lines = [line for line in output_lines if line.startswith("[SCAN]")]
+    decision_lines = [line for line in output_lines if line.startswith("[DECISION]")]
+
+    assert len(scan_lines) == len(subset)
+    assert len(decision_lines) == len(subset)
+
+    for instrument in subset:
+        assert any(f"[SCAN] Evaluating {instrument}" in line for line in scan_lines)
+        assert any(f"[DECISION] {instrument} signal=" in line for line in decision_lines)
+
+
+def test_can_merge_default_instruments_with_subset(capfd, sample_config):
+    subset = ["EUR_USD", "USD_JPY"]
+    config = dict(sample_config)
+    config["instruments"] = subset
+    config["merge_default_instruments"] = True
+
+    prices: Dict[str, List[Dict[str, float]]] = {
+        symbol: [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+        for symbol in subset + [sym for sym in DEFAULT_INSTRUMENTS if sym not in subset]
+    }
+
+    def fetcher(instrument: str, **kwargs):
+        return prices[instrument]
+
+    engine = DecisionEngine(config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    expected = subset[:]
+    for symbol in DEFAULT_INSTRUMENTS:
+        if symbol not in expected:
+            expected.append(symbol)
+
+    assert [ev.instrument for ev in evaluations] == expected
+
+    captured = capfd.readouterr()
+    output_lines = captured.out.splitlines()
+    scan_lines = [line for line in output_lines if line.startswith("[SCAN]")]
+    decision_lines = [line for line in output_lines if line.startswith("[DECISION]")]
+
+    assert len(scan_lines) == len(expected)
+    assert len(decision_lines) == len(expected)
+
+    for instrument in expected:
+        assert any(f"[SCAN] Evaluating {instrument}" in line for line in scan_lines)
+        assert any(f"[DECISION] {instrument} signal=" in line for line in decision_lines)
+
+
+def test_allows_empty_instrument_configuration(capfd, sample_config):
+    config = dict(sample_config)
+    config["instruments"] = []
+
+    calls: List[str] = []
+
+    def fetcher(instrument: str, **kwargs):  # pragma: no cover - defensive
+        calls.append(instrument)
+        return []
+
+    engine = DecisionEngine(config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert evaluations == []
+    assert calls == []
+
+    captured = capfd.readouterr()
+    assert captured.out.strip() == ""
+
+
 def test_skips_inactive_markets(capfd, sample_config):
     def fetcher(instrument: str, **kwargs):
         return [{"o": 1.0, "h": 1.0, "l": 1.0, "c": None}]
@@ -104,11 +201,13 @@ def test_skips_inactive_markets(capfd, sample_config):
     assert all(ev.signal == "HOLD" for ev in evaluations)
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert len(output_lines) == len(sample_config["instruments"])
-    assert all("signal=HOLD" in line for line in output_lines)
-    assert all("rsi=n/a" in line for line in output_lines)
-    assert all("atr=n/a" in line for line in output_lines)
+    scan_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
+    decision_lines = [line for line in captured.out.splitlines() if line.startswith("[DECISION]")]
+    assert len(scan_lines) == len(sample_config["instruments"])
+    assert len(decision_lines) == len(sample_config["instruments"])
+    assert all("rsi=n/a" in line for line in scan_lines)
+    assert all("atr=n/a" in line for line in scan_lines)
+    assert all("signal=HOLD" in line for line in decision_lines)
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):

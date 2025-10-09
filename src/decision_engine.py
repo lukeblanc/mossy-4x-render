@@ -68,8 +68,15 @@ class DecisionEngine:
         self._fetcher = candle_fetcher or _default_fetcher
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
-        self._instruments = self._resolve_instruments(config.get("instruments"))
+        merge_defaults = config.get("merge_default_instruments")
+        if merge_defaults is None:
+            merge_defaults = True
+
+        self._instruments = self._resolve_instruments(
+            config.get("instruments"), merge_defaults=bool(merge_defaults)
+        )
         self.config["instruments"] = list(self._instruments)
+        self.config["merge_default_instruments"] = bool(merge_defaults)
 
     # ------------------------------------------------------------------
     # Public API
@@ -158,12 +165,20 @@ class DecisionEngine:
             market_active=True,
         )
 
-    def _resolve_instruments(self, configured: Optional[Iterable[str]]) -> List[str]:
+    def _resolve_instruments(
+        self, configured: Optional[Iterable[str]], *, merge_defaults: bool
+    ) -> List[str]:
         resolved: List[str] = []
         seen = set()
 
-        if configured:
-            for entry in configured:
+        if configured is not None:
+            entries: Iterable[str]
+            if isinstance(configured, str):
+                entries = [configured]
+            else:
+                entries = configured
+
+            for entry in entries:
                 if not isinstance(entry, str):
                     continue
                 symbol = entry.strip().upper()
@@ -172,10 +187,20 @@ class DecisionEngine:
                 resolved.append(symbol)
                 seen.add(symbol)
 
+            if merge_defaults and resolved:
+                for symbol in DEFAULT_INSTRUMENTS:
+                    if symbol in seen:
+                        continue
+                    resolved.append(symbol)
+                    seen.add(symbol)
+
+            return resolved
+
         for symbol in DEFAULT_INSTRUMENTS:
-            if symbol not in seen:
-                resolved.append(symbol)
-                seen.add(symbol)
+            if symbol in seen:
+                continue
+            resolved.append(symbol)
+            seen.add(symbol)
 
         return resolved
 
