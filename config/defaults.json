@@ -15,9 +15,9 @@
   "instruments": [
     "EUR_USD",
     "AUD_USD",
-    "XAU_USD",
     "GBP_USD",
-    "USD_JPY"
+    "USD_JPY",
+    "XAU_USD"
   ],
   "max_open_trades": 3,
   "risk_per_trade": 0.02,

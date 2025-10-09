@@ -10,6 +10,14 @@ import httpx
 
 PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
 
+DEFAULT_INSTRUMENTS: List[str] = [
+    "EUR_USD",
+    "AUD_USD",
+    "GBP_USD",
+    "USD_JPY",
+    "XAU_USD",
+]
+
 
 @dataclass
 class Evaluation:
@@ -60,17 +68,22 @@ class DecisionEngine:
         self._fetcher = candle_fetcher or _default_fetcher
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
+        self._instruments = self._resolve_instruments(config.get("instruments"))
+        self.config["instruments"] = list(self._instruments)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def evaluate_all(self) -> List[Evaluation]:
-        instruments: Iterable[str] = self.config.get("instruments", [])
         results: List[Evaluation] = []
-        for instrument in instruments:
+        for instrument in self._instruments:
             evaluation = self._evaluate_instrument(instrument)
             results.append(evaluation)
         return results
+
+    @property
+    def instruments(self) -> List[str]:
+        return list(self._instruments)
 
     def mark_trade(self, instrument: str) -> None:
         cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
@@ -104,7 +117,14 @@ class DecisionEngine:
         )
         normalized = self._normalize_candles(raw_candles)
         if not normalized:
-            self._log_scan(instrument, "HOLD", rsi=None, atr=None)
+            self._log_scan(instrument, diagnostics=None)
+            self._log_decision(
+                instrument,
+                signal="HOLD",
+                reason="inactive-market",
+                diagnostics=None,
+                market_active=False,
+            )
             return Evaluation(
                 instrument=instrument,
                 signal="HOLD",
@@ -114,6 +134,8 @@ class DecisionEngine:
             )
 
         diagnostics = self._build_indicators(normalized)
+        self._log_scan(instrument, diagnostics=diagnostics)
+
         signal, reason = self._generate_signal(diagnostics)
 
         cooldown_until = self._cooldowns.get(instrument)
@@ -121,7 +143,13 @@ class DecisionEngine:
             signal = "HOLD"
             reason = "cooldown"
 
-        self._log_scan(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
+        self._log_decision(
+            instrument,
+            signal=signal,
+            reason=reason,
+            diagnostics=diagnostics,
+            market_active=True,
+        )
         return Evaluation(
             instrument=instrument,
             signal=signal,
@@ -130,16 +158,72 @@ class DecisionEngine:
             market_active=True,
         )
 
-    def _log_scan(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
-        if rsi is None or math.isnan(rsi):
-            rsi_str = "n/a"
-        else:
-            rsi_str = f"{rsi:.2f}"
-        if atr is None or math.isnan(atr):
-            atr_str = "n/a"
-        else:
-            atr_str = f"{atr:.5f}"
-        print(f"[SCAN] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
+    def _resolve_instruments(self, configured: Optional[Iterable[str]]) -> List[str]:
+        resolved: List[str] = []
+        seen = set()
+
+        if configured:
+            for entry in configured:
+                if not isinstance(entry, str):
+                    continue
+                symbol = entry.strip().upper()
+                if not symbol or symbol in seen:
+                    continue
+                resolved.append(symbol)
+                seen.add(symbol)
+
+        for symbol in DEFAULT_INSTRUMENTS:
+            if symbol not in seen:
+                resolved.append(symbol)
+                seen.add(symbol)
+
+        return resolved
+
+    def _log_scan(self, instrument: str, diagnostics: Optional[Dict[str, float]]) -> None:
+        diag = diagnostics or {}
+        ema_fast = self._format_value(diag.get("ema_fast"), decimals=5)
+        ema_slow = self._format_value(diag.get("ema_slow"), decimals=5)
+        rsi = self._format_value(diag.get("rsi"), decimals=2)
+        atr = self._format_value(diag.get("atr"), decimals=5)
+        print(
+            (
+                f"[SCAN] Evaluating {instrument} "
+                f"ema_fast={ema_fast} ema_slow={ema_slow} rsi={rsi} atr={atr}"
+            ),
+            flush=True,
+        )
+
+    def _log_decision(
+        self,
+        instrument: str,
+        *,
+        signal: str,
+        reason: str,
+        diagnostics: Optional[Dict[str, float]],
+        market_active: bool,
+    ) -> None:
+        diag = diagnostics or {}
+        ema_fast = self._format_value(diag.get("ema_fast"), decimals=5)
+        ema_slow = self._format_value(diag.get("ema_slow"), decimals=5)
+        rsi = self._format_value(diag.get("rsi"), decimals=2)
+        atr = self._format_value(diag.get("atr"), decimals=5)
+        print(
+            (
+                f"[DECISION] {instrument} signal={signal} reason={reason} "
+                f"market_active={market_active} "
+                f"ema_fast={ema_fast} ema_slow={ema_slow} rsi={rsi} atr={atr}"
+            ),
+            flush=True,
+        )
+
+    def _format_value(self, value: Optional[float], *, decimals: int) -> str:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return "n/a"
+        format_spec = f"{{:.{decimals}f}}"
+        try:
+            return format_spec.format(value)
+        except (TypeError, ValueError):
+            return "n/a"
 
     def _normalize_candles(self, candles: List[Dict]) -> List[Dict[str, float]]:
         normalized: List[Dict[str, float]] = []
