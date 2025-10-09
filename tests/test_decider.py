@@ -10,7 +10,7 @@ import pytest
 
 from app.health import watchdog
 
-from src.decision_engine import DecisionEngine
+from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine
 from src.decision_engine import Evaluation
 from src import main
 
@@ -166,3 +166,33 @@ def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
         assert watchdog.last_decision_ts > before
     finally:
         watchdog.last_decision_ts = original_ts
+
+
+def test_resolve_instruments_from_set():
+    config = {"instruments": {"eur_usd", "aud_usd"}}
+    engine = DecisionEngine(config)
+    assert engine.instruments == ["EUR_USD", "AUD_USD"]
+
+
+def test_resolve_instruments_with_whitespace_and_duplicates():
+    config = {"instruments": [" eur_usd ", "", "GBP_USD", "eur_usd"]}
+    engine = DecisionEngine(config)
+    assert engine.instruments == ["EUR_USD", "GBP_USD"]
+
+
+def test_missing_instruments_defaults_when_merge_enabled():
+    config = {"merge_default_instruments": True}
+    engine = DecisionEngine(config)
+    assert engine.instruments == DEFAULT_INSTRUMENTS
+
+
+def test_empty_instruments_defaults_when_merge_enabled():
+    config = {"instruments": [], "merge_default_instruments": True}
+    engine = DecisionEngine(config)
+    assert engine.instruments == DEFAULT_INSTRUMENTS
+
+
+def test_empty_instruments_without_merge_returns_empty():
+    config = {"instruments": [], "merge_default_instruments": False}
+    engine = DecisionEngine(config)
+    assert engine.instruments == []

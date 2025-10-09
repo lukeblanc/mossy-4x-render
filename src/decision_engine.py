@@ -4,11 +4,19 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import httpx
 
 PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
+
+DEFAULT_INSTRUMENTS: List[str] = [
+    "EUR_USD",
+    "AUD_USD",
+    "XAU_USD",
+    "GBP_USD",
+    "USD_JPY",
+]
 
 
 @dataclass
@@ -61,11 +69,23 @@ class DecisionEngine:
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
 
+        merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
+        resolved_instruments = self._resolve_instruments(
+            self.config.get("instruments"), merge_default
+        )
+        self.instruments: List[str] = resolved_instruments
+        self.config["instruments"] = resolved_instruments
+        print(
+            "[CONFIG] instruments resolved="
+            f"{resolved_instruments} merge_default_instruments={'true' if merge_default else 'false'}",
+            flush=True,
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def evaluate_all(self) -> List[Evaluation]:
-        instruments: Iterable[str] = self.config.get("instruments", [])
+        instruments: Iterable[str] = self.instruments
         results: List[Evaluation] = []
         for instrument in instruments:
             evaluation = self._evaluate_instrument(instrument)
@@ -140,6 +160,64 @@ class DecisionEngine:
         else:
             atr_str = f"{atr:.5f}"
         print(f"[SCAN] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
+
+    def _resolve_instruments(
+        self, instruments: Optional[Iterable[str]], merge_default_instruments: bool
+    ) -> List[str]:
+        provided: Sequence = []
+        if instruments is None:
+            provided = []
+        elif isinstance(instruments, str):
+            provided = [instruments]
+        elif isinstance(instruments, (set, frozenset)):
+            provided = sorted(instruments, key=self._instrument_sort_key)
+        else:
+            try:
+                provided = list(instruments)  # type: ignore[arg-type]
+            except TypeError:
+                provided = [instruments]  # type: ignore[list-item]
+
+        normalized: List[str] = []
+        seen = set()
+
+        for entry in provided:
+            if not isinstance(entry, str):
+                continue
+            candidate = entry.strip().upper()
+            if not candidate:
+                continue
+            if candidate in seen:
+                continue
+            normalized.append(candidate)
+            seen.add(candidate)
+
+        if merge_default_instruments:
+            for default in DEFAULT_INSTRUMENTS:
+                if default not in seen:
+                    normalized.append(default)
+                    seen.add(default)
+
+        return normalized
+
+    def _instrument_sort_key(self, instrument: Optional[str]) -> tuple[int, str]:
+        candidate = ""
+        if isinstance(instrument, str):
+            candidate = instrument.strip().upper()
+        index = self._default_instrument_index(candidate)
+        return index, candidate
+
+    @staticmethod
+    def _default_instrument_index(instrument: str) -> int:
+        try:
+            return DEFAULT_INSTRUMENTS.index(instrument)
+        except ValueError:
+            return len(DEFAULT_INSTRUMENTS)
+
+    @staticmethod
+    def _as_bool(value: object) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+        return bool(value)
 
     def _normalize_candles(self, candles: List[Dict]) -> List[Dict[str, float]]:
         normalized: List[Dict[str, float]] = []
@@ -259,4 +337,4 @@ class DecisionEngine:
         return sum(true_ranges) / length
 
 
-__all__ = ["DecisionEngine", "Evaluation"]
+__all__ = ["DecisionEngine", "Evaluation", "DEFAULT_INSTRUMENTS"]
