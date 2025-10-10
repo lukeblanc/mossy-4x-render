@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
@@ -64,6 +65,9 @@ class DecisionEngine:
         self._fetcher = candle_fetcher or _default_fetcher
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
+        self._last_scan_success: Dict[str, bool] = {}
+        self._fetch_retry_attempts = max(1, int(self.config.get("fetch_retry_attempts", 3)))
+        self._fetch_retry_backoff = max(0.0, float(self.config.get("fetch_retry_backoff", 0.0)))
 
         merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
         resolved_instruments = self._resolve_instruments(
@@ -83,6 +87,7 @@ class DecisionEngine:
     def evaluate_all(self) -> List[Evaluation]:
         instruments: List[str] = list(self.instruments)
         results: List[Evaluation] = []
+        self._last_scan_success.clear()
         for instrument in instruments:
             evaluation = self._evaluate_instrument(instrument)
             results.append(evaluation)
