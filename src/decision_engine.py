@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
@@ -65,6 +66,8 @@ class DecisionEngine:
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
         self._last_scan_success: Dict[str, bool] = {}
+        self._fetch_retry_attempts = max(1, int(self.config.get("fetch_retry_attempts", 3)))
+        self._fetch_retry_backoff = max(0.0, float(self.config.get("fetch_retry_backoff", 0.0)))
 
         merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
         resolved_instruments = self._resolve_instruments(
@@ -159,27 +162,47 @@ class DecisionEngine:
         granularity: str,
     ) -> List[Dict]:
         """Retrieve candles for a single instrument to avoid aggregated 400 errors."""
-        try:
-            candles = self._fetcher(
-                instrument,
-                count=candle_count,
-                granularity=granularity,
-                api_key=self._api_key,
-            )
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response else "unknown"
-            print(f"[WARN] {instrument} fetch failed {status_code} – skipping", flush=True)
-            self._last_scan_success[instrument] = False
-            return []
-        except Exception as exc:
-            print(f"[WARN] {instrument} fetch failed {exc} – skipping", flush=True)
-            self._last_scan_success[instrument] = False
-            return []
+        attempts = self._fetch_retry_attempts
+        last_error: Optional[BaseException] = None
 
-        candle_list = list(candles or [])
-        print(f"[SCAN] {instrument} OK ({len(candle_list)} bars)", flush=True)
-        self._last_scan_success[instrument] = True
-        return candle_list
+        for attempt in range(1, attempts + 1):
+            try:
+                candles = self._fetcher(
+                    instrument,
+                    count=candle_count,
+                    granularity=granularity,
+                    api_key=self._api_key,
+                )
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status_code = exc.response.status_code if exc.response else "unknown"
+                action = "skipping" if attempt == attempts else "retrying"
+                print(
+                    f"[WARN] {instrument} fetch failed {status_code} – {action}"
+                    f" (attempt {attempt}/{attempts})",
+                    flush=True,
+                )
+            except Exception as exc:
+                last_error = exc
+                action = "skipping" if attempt == attempts else "retrying"
+                print(
+                    f"[WARN] {instrument} fetch failed {exc} – {action}"
+                    f" (attempt {attempt}/{attempts})",
+                    flush=True,
+                )
+            else:
+                candle_list = list(candles or [])
+                print(f"[SCAN] {instrument} OK ({len(candle_list)} bars)", flush=True)
+                self._last_scan_success[instrument] = True
+                return candle_list
+
+            if attempt < attempts and self._fetch_retry_backoff > 0:
+                time.sleep(self._fetch_retry_backoff)
+
+        self._last_scan_success[instrument] = False
+        if last_error is not None:
+            return []
+        return []
 
     def _log_signal(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
         if rsi is None or math.isnan(rsi):

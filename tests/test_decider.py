@@ -149,6 +149,37 @@ def test_does_not_print_verified_if_fetch_fails(capfd, sample_config):
     assert "✅ Multi-Pair Candle Fetch Verified" not in captured.out
 
 
+def test_fetch_retries_until_success(capfd, sample_config):
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(400, request=request)
+    attempts: Dict[str, int] = {}
+
+    def fetcher(instrument: str, **kwargs):
+        count = attempts.get(instrument, 0) + 1
+        attempts[instrument] = count
+        if instrument == "EUR_USD" and count == 1:
+            raise httpx.HTTPStatusError("bad", request=request, response=response)
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.1, "h": 1.1, "l": 1.1, "c": 1.1},
+        ]
+
+    config = {**sample_config, "fetch_retry_attempts": 2}
+    engine = DecisionEngine(config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert len(evaluations) == len(sample_config["instruments"])
+    assert attempts["EUR_USD"] == 2
+
+    captured = capfd.readouterr()
+    out_lines = captured.out.splitlines()
+    warn_lines = [line for line in out_lines if line.startswith("[WARN]")]
+    retry_lines = [line for line in warn_lines if "retrying" in line]
+    assert retry_lines
+    assert any("attempt 1/2" in line for line in retry_lines)
+    assert "✅ Multi-Pair Candle Fetch Verified" in captured.out
+
+
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
     class DummyEngine:
         def __init__(self) -> None:
