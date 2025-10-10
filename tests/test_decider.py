@@ -12,8 +12,12 @@ import pytest
 
 from app.health import watchdog
 
-from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine
-from src.decision_engine import Evaluation
+from src.decision_engine import (
+    DEFAULT_INSTRUMENTS,
+    PRACTICE_BASE_URL,
+    DecisionEngine,
+)
+from src.decision_engine import Evaluation, _default_fetcher
 from src import main
 
 
@@ -119,6 +123,7 @@ def test_fetches_each_instrument_individually(capfd, sample_config):
     assert len(fetch_logs) == len(instruments)
     assert all("OK (2 bars)" in line for line in fetch_logs)
     assert "400 Bad Request" not in captured.out
+    assert "✅ Multi-Pair Candle Fetch Verified" in captured.out
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
@@ -196,6 +201,118 @@ def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
         assert watchdog.last_decision_ts > before
     finally:
         watchdog.last_decision_ts = original_ts
+
+
+def test_default_fetcher_uses_instrument_path(monkeypatch):
+    requests: List[Dict[str, object]] = []
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.base_url = kwargs.get("base_url")
+            self.headers = dict(kwargs.get("headers") or {})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, path: str, params: Dict[str, str]):
+            url = f"{self.base_url}{path}"
+            requests.append({"url": url, "params": params, "headers": dict(self.headers)})
+            request = httpx.Request("GET", url, headers=self.headers)
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "candles": [
+                        {"mid": {"o": "1.0", "h": "1.0", "l": "1.0", "c": "1.0"}}
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    candles = _default_fetcher("EUR_USD", count=10, granularity="M1", api_key="token")
+
+    assert len(candles) == 1
+    assert requests
+    request_info = requests[0]
+    assert request_info["url"] == f"{PRACTICE_BASE_URL}/instruments/EUR_USD/candles"
+    assert request_info["params"] == {"count": "10", "granularity": "M1", "price": "M"}
+    assert request_info["headers"].get("Authorization") == "Bearer token"
+
+
+def test_fetch_candles_retries_on_transient_error(capfd, sample_config):
+    attempts = {"count": 0}
+
+    def fetcher(**kwargs):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            response = httpx.Response(
+                500,
+                request=httpx.Request("GET", "https://retry.test"),
+            )
+            raise httpx.HTTPStatusError("server error", request=response.request, response=response)
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+
+    config = {
+        **sample_config,
+        "fetch_retry_attempts": 3,
+        "fetch_retry_backoff": 0,
+    }
+
+    engine = DecisionEngine(config, candle_fetcher=lambda instrument, **kw: fetcher(**kw))
+    candles = engine._fetch_candles("EUR_USD", candle_count=2, granularity="M1")
+
+    assert attempts["count"] == 3
+    assert len(candles) == 1
+
+    captured = capfd.readouterr().out
+    warn_lines = [line for line in captured.splitlines() if line.startswith("[WARN]")]
+    assert any("attempt 1 failed 500" in line for line in warn_lines)
+    assert "[SCAN] EUR_USD OK" in captured
+
+
+def test_fetch_candles_does_not_retry_on_client_error(capfd, sample_config):
+    attempts = {"count": 0}
+
+    def fetcher(**kwargs):
+        attempts["count"] += 1
+        response = httpx.Response(
+            400,
+            request=httpx.Request("GET", "https://client-error.test"),
+        )
+        raise httpx.HTTPStatusError("bad request", request=response.request, response=response)
+
+    config = {
+        **sample_config,
+        "fetch_retry_attempts": 3,
+        "fetch_retry_backoff": 0,
+    }
+
+    engine = DecisionEngine(config, candle_fetcher=lambda instrument, **kw: fetcher(**kw))
+    candles = engine._fetch_candles("EUR_USD", candle_count=2, granularity="M1")
+
+    assert attempts["count"] == 1
+    assert candles == []
+
+    captured = capfd.readouterr().out
+    assert "[WARN] EUR_USD fetch failed 400 – skipping" in captured
+
+
+def test_resolve_instruments_normalizes_input(sample_config):
+    config = {
+        **sample_config,
+        "instruments": " eur_usd, gbp_usd usd_jpy  eur_usd ",
+        "merge_default_instruments": False,
+    }
+
+    engine = DecisionEngine(config, candle_fetcher=lambda *args, **kwargs: [])
+
+    assert engine.instruments == ["EUR_USD", "GBP_USD", "USD_JPY"]
 
 
 def test_resolve_instruments_from_set():
