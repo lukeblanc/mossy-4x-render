@@ -46,5 +46,15 @@
       "start": "04:55",
       "end": "05:05"
     }
+  },
+  "risk_scaler": {
+    "enabled": true,
+    "tiers": [
+      {"min": 0, "max": 2000, "risk_pct": 0.25},
+      {"min": 2000, "max": 4000, "risk_pct": 0.5},
+      {"min": 4000, "max": 6000, "risk_pct": 0.75},
+      {"min": 6000, "max": 10000, "risk_pct": 1.0},
+      {"min": 10000, "max": 999999, "risk_pct": 1.25}
+    ]
   }
 }

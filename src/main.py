@@ -86,6 +86,19 @@ async def heartbeat() -> None:
 async def decision_cycle() -> None:
     now_utc = datetime.now(timezone.utc)
     equity = broker.account_equity()
+    risk_pct, scaler = position_sizer.resolve_risk_pct(
+        config,
+        equity,
+        fallback=risk.risk_per_trade_pct,
+    )
+    tier = scaler.last_tier
+    tier_label = f"{tier.name}({tier.range_label})" if tier else "Fixed"
+    display_pct = scaler.to_percent(risk_pct)
+    print(
+        f"[STEADY] eq={equity:.2f} risk={display_pct:.2f}% tier={tier_label}",
+        flush=True,
+    )
+    risk.risk_per_trade_pct = risk_pct
     try:
         risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
     except AttributeError:
@@ -132,7 +145,7 @@ async def decision_cycle() -> None:
                 equity,
                 entry_price or 0.0,
                 sl_distance,
-                risk.risk_per_trade_pct,
+                risk_pct,
             )
             if units <= 0:
                 print(
