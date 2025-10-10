@@ -42,17 +42,13 @@ def _default_fetcher(
     headers: Dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        with httpx.Client(base_url=PRACTICE_BASE_URL, headers=headers, timeout=15.0) as client:
-            response = client.get(
-                f"/instruments/{instrument}/candles",
-                params={"count": str(count), "granularity": granularity, "price": "M"},
-            )
-            response.raise_for_status()
-            return response.json().get("candles", [])
-    except Exception as exc:  # pragma: no cover - network failure logging path
-        print(f"[OANDA] Failed to fetch candles for {instrument}: {exc}", flush=True)
-        return []
+    with httpx.Client(base_url=PRACTICE_BASE_URL, headers=headers, timeout=15.0) as client:
+        response = client.get(
+            f"/instruments/{instrument}/candles",
+            params={"count": str(count), "granularity": granularity, "price": "M"},
+        )
+        response.raise_for_status()
+        return response.json().get("candles", [])
 
 
 class DecisionEngine:
@@ -68,6 +64,7 @@ class DecisionEngine:
         self._fetcher = candle_fetcher or _default_fetcher
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
+        self._last_scan_success: Dict[str, bool] = {}
 
         merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
         resolved_instruments = self._resolve_instruments(
@@ -85,11 +82,16 @@ class DecisionEngine:
     # Public API
     # ------------------------------------------------------------------
     def evaluate_all(self) -> List[Evaluation]:
-        instruments: Iterable[str] = self.instruments
+        instruments: List[str] = list(self.instruments)
         results: List[Evaluation] = []
+        self._last_scan_success.clear()
         for instrument in instruments:
             evaluation = self._evaluate_instrument(instrument)
             results.append(evaluation)
+        if results and len(results) == len(instruments) and all(
+            self._last_scan_success.get(instrument, False) for instrument in instruments
+        ):
+            print("✅ Multi-Pair Candle Fetch Verified", flush=True)
         return results
 
     def mark_trade(self, instrument: str) -> None:
@@ -116,15 +118,14 @@ class DecisionEngine:
     def _evaluate_instrument(self, instrument: str) -> Evaluation:
         granularity = self.config.get("timeframe", "M5")
         candle_count = int(self.config.get("candles_to_fetch", 200))
-        raw_candles = self._fetcher(
+        raw_candles = self._fetch_candles(
             instrument,
-            count=candle_count,
+            candle_count=candle_count,
             granularity=granularity,
-            api_key=self._api_key,
         )
         normalized = self._normalize_candles(raw_candles)
         if not normalized:
-            self._log_scan(instrument, "HOLD", rsi=None, atr=None)
+            self._log_signal(instrument, "HOLD", rsi=None, atr=None)
             return Evaluation(
                 instrument=instrument,
                 signal="HOLD",
@@ -141,7 +142,7 @@ class DecisionEngine:
             signal = "HOLD"
             reason = "cooldown"
 
-        self._log_scan(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
+        self._log_signal(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
         return Evaluation(
             instrument=instrument,
             signal=signal,
@@ -150,7 +151,36 @@ class DecisionEngine:
             market_active=True,
         )
 
-    def _log_scan(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
+    def _fetch_candles(
+        self,
+        instrument: str,
+        *,
+        candle_count: int,
+        granularity: str,
+    ) -> List[Dict]:
+        try:
+            candles = self._fetcher(
+                instrument,
+                count=candle_count,
+                granularity=granularity,
+                api_key=self._api_key,
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response else "unknown"
+            print(f"[WARN] {instrument} fetch failed {status_code} – skipping", flush=True)
+            self._last_scan_success[instrument] = False
+            return []
+        except Exception as exc:
+            print(f"[WARN] {instrument} fetch failed {exc} – skipping", flush=True)
+            self._last_scan_success[instrument] = False
+            return []
+
+        candle_list = list(candles or [])
+        print(f"[SCAN] {instrument} OK ({len(candle_list)} bars)", flush=True)
+        self._last_scan_success[instrument] = True
+        return candle_list
+
+    def _log_signal(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
         if rsi is None or math.isnan(rsi):
             rsi_str = "n/a"
         else:
@@ -159,7 +189,7 @@ class DecisionEngine:
             atr_str = "n/a"
         else:
             atr_str = f"{atr:.5f}"
-        print(f"[SCAN] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
+        print(f"[SIGNAL] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
 
     def _resolve_instruments(
         self, instruments: Optional[Iterable[str]], merge_default_instruments: bool
