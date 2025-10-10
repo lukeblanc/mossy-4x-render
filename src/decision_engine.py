@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,9 +15,9 @@ PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
 DEFAULT_INSTRUMENTS: List[str] = [
     "EUR_USD",
     "AUD_USD",
-    "XAU_USD",
     "GBP_USD",
     "USD_JPY",
+    "XAU_USD",
 ]
 
 
@@ -43,13 +44,18 @@ def _default_fetcher(
     headers: Dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+
+    url_path = f"/instruments/{instrument}/candles"
+    params = {"count": str(count), "granularity": granularity, "price": "M"}
+
     with httpx.Client(base_url=PRACTICE_BASE_URL, headers=headers, timeout=15.0) as client:
-        response = client.get(
-            f"/instruments/{instrument}/candles",
-            params={"count": str(count), "granularity": granularity, "price": "M"},
-        )
+        response = client.get(url_path, params=params)
         response.raise_for_status()
-        return response.json().get("candles", [])
+        payload = response.json()
+        candles = payload.get("candles", [])
+        if not isinstance(candles, list):
+            return []
+        return candles
 
 
 class DecisionEngine:
@@ -67,7 +73,7 @@ class DecisionEngine:
         self._api_key = os.getenv("OANDA_API_KEY")
         self._last_scan_success: Dict[str, bool] = {}
         self._fetch_retry_attempts = max(1, int(self.config.get("fetch_retry_attempts", 3)))
-        self._fetch_retry_backoff = max(0.0, float(self.config.get("fetch_retry_backoff", 0.0)))
+        self._fetch_retry_backoff = max(0.0, float(self.config.get("fetch_retry_backoff", 1.0)))
 
         merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
         resolved_instruments = self._resolve_instruments(
@@ -91,7 +97,7 @@ class DecisionEngine:
         for instrument in instruments:
             evaluation = self._evaluate_instrument(instrument)
             results.append(evaluation)
-        if results and len(results) == len(instruments):
+        if instruments and all(self._last_scan_success.get(inst) for inst in instruments):
             print("✅ Multi-Pair Candle Fetch Verified", flush=True)
         return results
 
@@ -159,24 +165,72 @@ class DecisionEngine:
         candle_count: int,
         granularity: str,
     ) -> List[Dict]:
-        try:
-            candles = self._fetcher(
-                instrument,
-                count=candle_count,
-                granularity=granularity,
-                api_key=self._api_key,
-            )
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response else "unknown"
-            print(f"[WARN] {instrument} fetch failed {status_code} – skipping", flush=True)
-            return []
-        except Exception as exc:
-            print(f"[WARN] {instrument} fetch failed {exc} – skipping", flush=True)
-            return []
+        attempts = self._fetch_retry_attempts
+        backoff = self._fetch_retry_backoff
+        last_error: Optional[str] = None
 
-        candle_list = list(candles or [])
-        print(f"[SCAN] {instrument} OK ({len(candle_list)} bars)", flush=True)
-        return candle_list
+        for attempt in range(1, attempts + 1):
+            try:
+                candles = self._fetcher(
+                    instrument,
+                    count=candle_count,
+                    granularity=granularity,
+                    api_key=self._api_key,
+                )
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response else "unknown"
+                transient = isinstance(status_code, int) and (
+                    status_code == 429 or 500 <= status_code < 600
+                )
+                last_error = f"{status_code}"
+                if transient and attempt < attempts:
+                    print(
+                        f"[WARN] {instrument} fetch attempt {attempt} failed {status_code} – retrying",
+                        flush=True,
+                    )
+                    if backoff > 0:
+                        time.sleep(backoff)
+                    continue
+                print(
+                    f"[WARN] {instrument} fetch failed {status_code} – skipping",
+                    flush=True,
+                )
+                self._last_scan_success[instrument] = False
+                return []
+            except httpx.RequestError as exc:
+                last_error = str(exc)
+                if attempt < attempts:
+                    print(
+                        f"[WARN] {instrument} fetch attempt {attempt} failed network-error – retrying",
+                        flush=True,
+                    )
+                    if backoff > 0:
+                        time.sleep(backoff)
+                    continue
+                print(
+                    f"[WARN] {instrument} fetch failed network-error – skipping",
+                    flush=True,
+                )
+                self._last_scan_success[instrument] = False
+                return []
+            except Exception as exc:
+                last_error = str(exc)
+                print(f"[WARN] {instrument} fetch failed {exc} – skipping", flush=True)
+                self._last_scan_success[instrument] = False
+                return []
+
+            candle_list = list(candles or [])
+            print(f"[SCAN] {instrument} OK ({len(candle_list)} bars)", flush=True)
+            self._last_scan_success[instrument] = True
+            return candle_list
+
+        if last_error:
+            print(
+                f"[WARN] {instrument} fetch failed after {attempts} attempts ({last_error})",
+                flush=True,
+            )
+        self._last_scan_success[instrument] = False
+        return []
 
     def _log_signal(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
         if rsi is None or math.isnan(rsi):
@@ -295,11 +349,13 @@ class DecisionEngine:
         rsi_val = self._rsi(closes, rsi_len)
         atr_val = self._atr(highs, lows, closes, atr_len)
 
+        last_close = closes[-1] if closes else math.nan
         return {
             "ema_fast": ema_fast,
             "ema_slow": ema_slow,
             "rsi": rsi_val,
             "atr": atr_val,
+            "close": last_close,
         }
 
     def _generate_signal(self, diagnostics: Dict[str, float]) -> (str, str):
