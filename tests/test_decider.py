@@ -1,8 +1,10 @@
-import asyncio
-from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 from typing import Dict, List
+
+import asyncio
+import httpx
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -67,10 +69,10 @@ def test_scans_all_instruments(capfd, sample_config):
     assert signals["XAU_USD"] == "HOLD"
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert any("[SCAN] EUR_USD signal=BUY" in line for line in output_lines)
-    assert any("[SCAN] AUD_USD signal=SELL" in line for line in output_lines)
-    assert any("[SCAN] XAU_USD signal=HOLD" in line for line in output_lines)
+    signal_lines = [line for line in captured.out.splitlines() if line.startswith("[SIGNAL]")]
+    assert any("[SIGNAL] EUR_USD signal=BUY" in line for line in signal_lines)
+    assert any("[SIGNAL] AUD_USD signal=SELL" in line for line in signal_lines)
+    assert any("[SIGNAL] XAU_USD signal=HOLD" in line for line in signal_lines)
 
 
 def test_skips_inactive_markets(capfd, sample_config):
@@ -84,11 +86,123 @@ def test_skips_inactive_markets(capfd, sample_config):
     assert all(ev.signal == "HOLD" for ev in evaluations)
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert len(output_lines) == len(sample_config["instruments"])
-    assert all("signal=HOLD" in line for line in output_lines)
-    assert all("rsi=n/a" in line for line in output_lines)
-    assert all("atr=n/a" in line for line in output_lines)
+    signal_lines = [line for line in captured.out.splitlines() if line.startswith("[SIGNAL]")]
+    assert len(signal_lines) == len(sample_config["instruments"])
+    assert all("signal=HOLD" in line for line in signal_lines)
+    assert all("rsi=n/a" in line for line in signal_lines)
+    assert all("atr=n/a" in line for line in signal_lines)
+
+
+def test_fetches_each_instrument_individually(capfd, sample_config):
+    instruments = ["EUR_USD", "AUD_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+    sample_config = {**sample_config, "instruments": instruments}
+
+    requested: List[str] = []
+
+    def fetcher(instrument: str, **kwargs):
+        requested.append(instrument)
+        assert "," not in instrument
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+
+    engine = DecisionEngine(sample_config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert len(evaluations) == len(instruments)
+    assert requested == instruments
+
+    captured = capfd.readouterr()
+    out_lines = captured.out.splitlines()
+    fetch_logs = [line for line in out_lines if line.startswith("[SCAN]")]
+    assert len(fetch_logs) == len(instruments)
+    assert all("OK (2 bars)" in line for line in fetch_logs)
+    assert "400 Bad Request" not in captured.out
+    assert "✅ Multi-Pair Candle Fetch Verified" in captured.out
+
+
+def test_parses_comma_separated_instrument_config(capfd, sample_config):
+    config = {
+        **sample_config,
+        "instruments": "EUR_USD, AUD_USD\nGBP_USD\tUSD_JPY",
+    }
+
+    requested: List[str] = []
+
+    def fetcher(instrument: str, **kwargs):
+        requested.append(instrument)
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+
+    engine = DecisionEngine(config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    engine.evaluate_all()
+
+    assert requested == ["EUR_USD", "AUD_USD", "GBP_USD", "USD_JPY"]
+    captured = capfd.readouterr()
+    fetch_logs = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
+    assert len(fetch_logs) == 4
+    assert all("," not in line.split()[1] for line in fetch_logs)
+
+
+def test_does_not_print_verified_if_fetch_fails(capfd, sample_config):
+    instruments = sample_config["instruments"]
+    failures = {"AUD_USD"}
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(400, request=request)
+
+    def fetcher(instrument: str, **kwargs):
+        if instrument in failures:
+            raise httpx.HTTPStatusError("bad", request=request, response=response)
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+
+    engine = DecisionEngine(sample_config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert len(evaluations) == len(instruments)
+
+    captured = capfd.readouterr()
+    out_lines = captured.out.splitlines()
+    warn_lines = [line for line in out_lines if line.startswith("[WARN]")]
+    assert warn_lines
+    assert any("AUD_USD" in line for line in warn_lines)
+    assert "✅ Multi-Pair Candle Fetch Verified" not in captured.out
+
+
+def test_fetch_retries_until_success(capfd, sample_config):
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(400, request=request)
+    attempts: Dict[str, int] = {}
+
+    def fetcher(instrument: str, **kwargs):
+        count = attempts.get(instrument, 0) + 1
+        attempts[instrument] = count
+        if instrument == "EUR_USD" and count == 1:
+            raise httpx.HTTPStatusError("bad", request=request, response=response)
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.1, "h": 1.1, "l": 1.1, "c": 1.1},
+        ]
+
+    config = {**sample_config, "fetch_retry_attempts": 2}
+    engine = DecisionEngine(config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert len(evaluations) == len(sample_config["instruments"])
+    assert attempts["EUR_USD"] == 2
+
+    captured = capfd.readouterr()
+    out_lines = captured.out.splitlines()
+    warn_lines = [line for line in out_lines if line.startswith("[WARN]")]
+    retry_lines = [line for line in warn_lines if "retrying" in line]
+    assert retry_lines
+    assert any("attempt 1/2" in line for line in retry_lines)
+    assert "✅ Multi-Pair Candle Fetch Verified" in captured.out
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):

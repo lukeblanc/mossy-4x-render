@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import os
+import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
@@ -42,17 +44,13 @@ def _default_fetcher(
     headers: Dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        with httpx.Client(base_url=PRACTICE_BASE_URL, headers=headers, timeout=15.0) as client:
-            response = client.get(
-                f"/instruments/{instrument}/candles",
-                params={"count": str(count), "granularity": granularity, "price": "M"},
-            )
-            response.raise_for_status()
-            return response.json().get("candles", [])
-    except Exception as exc:  # pragma: no cover - network failure logging path
-        print(f"[OANDA] Failed to fetch candles for {instrument}: {exc}", flush=True)
-        return []
+    with httpx.Client(base_url=PRACTICE_BASE_URL, headers=headers, timeout=15.0) as client:
+        response = client.get(
+            f"/instruments/{instrument}/candles",
+            params={"count": str(count), "granularity": granularity, "price": "M"},
+        )
+        response.raise_for_status()
+        return response.json().get("candles", [])
 
 
 class DecisionEngine:
@@ -68,6 +66,9 @@ class DecisionEngine:
         self._fetcher = candle_fetcher or _default_fetcher
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
+        self._last_scan_success: Dict[str, bool] = {}
+        self._fetch_retry_attempts = max(1, int(self.config.get("fetch_retry_attempts", 3)))
+        self._fetch_retry_backoff = max(0.0, float(self.config.get("fetch_retry_backoff", 0.0)))
 
         merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
         resolved_instruments = self._resolve_instruments(
@@ -85,11 +86,16 @@ class DecisionEngine:
     # Public API
     # ------------------------------------------------------------------
     def evaluate_all(self) -> List[Evaluation]:
-        instruments: Iterable[str] = self.instruments
+        instruments: List[str] = list(self.instruments)
         results: List[Evaluation] = []
+        self._last_scan_success.clear()
         for instrument in instruments:
             evaluation = self._evaluate_instrument(instrument)
             results.append(evaluation)
+        if results and len(results) == len(instruments) and all(
+            self._last_scan_success.get(instrument, False) for instrument in instruments
+        ):
+            print("✅ Multi-Pair Candle Fetch Verified", flush=True)
         return results
 
     def mark_trade(self, instrument: str) -> None:
@@ -116,15 +122,14 @@ class DecisionEngine:
     def _evaluate_instrument(self, instrument: str) -> Evaluation:
         granularity = self.config.get("timeframe", "M5")
         candle_count = int(self.config.get("candles_to_fetch", 200))
-        raw_candles = self._fetcher(
+        raw_candles = self._fetch_candles(
             instrument,
-            count=candle_count,
+            candle_count=candle_count,
             granularity=granularity,
-            api_key=self._api_key,
         )
         normalized = self._normalize_candles(raw_candles)
         if not normalized:
-            self._log_scan(instrument, "HOLD", rsi=None, atr=None)
+            self._log_signal(instrument, "HOLD", rsi=None, atr=None)
             return Evaluation(
                 instrument=instrument,
                 signal="HOLD",
@@ -141,7 +146,7 @@ class DecisionEngine:
             signal = "HOLD"
             reason = "cooldown"
 
-        self._log_scan(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
+        self._log_signal(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
         return Evaluation(
             instrument=instrument,
             signal=signal,
@@ -150,7 +155,67 @@ class DecisionEngine:
             market_active=True,
         )
 
-    def _log_scan(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
+    def _fetch_candles(
+        self,
+        instrument: str,
+        *,
+        candle_count: int,
+        granularity: str,
+    ) -> List[Dict]:
+        """Retrieve candles for a single instrument to avoid aggregated 400 errors."""
+        attempts = self._fetch_retry_attempts
+        last_error: Optional[BaseException] = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                candles = self._fetcher(
+                    instrument,
+                    count=candle_count,
+                    granularity=granularity,
+                    api_key=self._api_key,
+                )
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status_code = exc.response.status_code if exc.response else "unknown"
+                if attempt == attempts:
+                    print(
+                        f"[WARN] {instrument} failed {status_code} – skipping",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[WARN] {instrument} failed {status_code} – retrying"
+                        f" (attempt {attempt}/{attempts})",
+                        flush=True,
+                    )
+            except Exception as exc:
+                last_error = exc
+                if attempt == attempts:
+                    print(
+                        f"[WARN] {instrument} failed {exc} – skipping",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[WARN] {instrument} failed {exc} – retrying"
+                        f" (attempt {attempt}/{attempts})",
+                        flush=True,
+                    )
+            else:
+                candle_list = list(candles or [])
+                print(f"[SCAN] {instrument} OK ({len(candle_list)} bars)", flush=True)
+                self._last_scan_success[instrument] = True
+                return candle_list
+
+            if attempt < attempts and self._fetch_retry_backoff > 0:
+                time.sleep(self._fetch_retry_backoff)
+
+        self._last_scan_success[instrument] = False
+        if last_error is not None:
+            return []
+        return []
+
+    def _log_signal(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
         if rsi is None or math.isnan(rsi):
             rsi_str = "n/a"
         else:
@@ -159,7 +224,7 @@ class DecisionEngine:
             atr_str = "n/a"
         else:
             atr_str = f"{atr:.5f}"
-        print(f"[SCAN] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
+        print(f"[SIGNAL] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
 
     def _resolve_instruments(
         self, instruments: Optional[Iterable[str]], merge_default_instruments: bool
@@ -168,7 +233,12 @@ class DecisionEngine:
         if instruments is None:
             provided = []
         elif isinstance(instruments, str):
-            provided = [instruments]
+            tokens = [
+                token.strip()
+                for token in re.split(r"[,\s]+", instruments)
+                if token.strip()
+            ]
+            provided = tokens
         elif isinstance(instruments, (set, frozenset)):
             provided = sorted(instruments, key=self._instrument_sort_key)
         else:
