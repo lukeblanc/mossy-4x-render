@@ -196,7 +196,12 @@ class DecisionEngine:
         if instruments is None:
             provided = []
         elif isinstance(instruments, str):
-            provided = [instruments]
+            tokens = [
+                token.strip()
+                for token in re.split(r"[,\s]+", instruments)
+                if token.strip()
+            ]
+            provided = tokens
         elif isinstance(instruments, (set, frozenset)):
             provided = sorted(instruments, key=self._instrument_sort_key)
         else:
