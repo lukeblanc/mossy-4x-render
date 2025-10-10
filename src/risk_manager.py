@@ -32,6 +32,18 @@ def _from_iso(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _sanitize_equity(equity: Optional[float]) -> Optional[float]:
+    if equity is None:
+        return None
+    try:
+        value = float(equity)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0.0:
+        return None
+    return value
+
+
 @dataclass
 class RiskState:
     day_id: Optional[str] = None
@@ -258,27 +270,28 @@ class RiskManager:
         iso_cal = awst_now.isocalendar()
         week_id = f"{iso_cal.year}-W{iso_cal.week:02d}"
         changed = False
+        valid_equity = _sanitize_equity(equity)
 
         if self.state.day_id != day_id:
             self.state.day_id = day_id
-            self.state.day_start_equity = float(equity)
+            self.state.day_start_equity = valid_equity
             self.state.daily_realized_pl = 0.0
             changed = True
 
         if self.state.week_id != week_id:
             self.state.week_id = week_id
-            self.state.week_start_equity = float(equity)
+            self.state.week_start_equity = valid_equity
             self.state.weekly_realized_pl = 0.0
             self.state.has_hit_weekly_target = False
             self.state.live_halted_on_equity_floor = False
             changed = True
 
-        if self.state.day_start_equity is None:
-            self.state.day_start_equity = float(equity)
+        if self.state.day_start_equity is None and valid_equity is not None:
+            self.state.day_start_equity = valid_equity
             changed = True
 
-        if self.state.week_start_equity is None:
-            self.state.week_start_equity = float(equity)
+        if self.state.week_start_equity is None and valid_equity is not None:
+            self.state.week_start_equity = valid_equity
             changed = True
 
         if changed:
