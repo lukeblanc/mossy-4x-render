@@ -158,6 +158,7 @@ class DecisionEngine:
         candle_count: int,
         granularity: str,
     ) -> List[Dict]:
+        """Retrieve candles for a single instrument to avoid aggregated 400 errors."""
         try:
             candles = self._fetcher(
                 instrument,
