@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
@@ -11,6 +12,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.broker import Broker
 from app.health import watchdog
 from src.decision_engine import DecisionEngine, Evaluation
+from src.risk_manager import RiskManager
+from src import position_sizer
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 
@@ -23,6 +26,8 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
 config = load_config()
 broker = Broker()
 engine = DecisionEngine(config)
+risk_mode = os.getenv("MODE", config.get("mode", "paper")).lower()
+risk = RiskManager(config.get("risk", {}), mode=risk_mode)
 
 
 def _startup_checks() -> None:
@@ -79,6 +84,13 @@ async def heartbeat() -> None:
 
 
 async def decision_cycle() -> None:
+    now_utc = datetime.now(timezone.utc)
+    equity = broker.account_equity()
+    try:
+        risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
+    except AttributeError:
+        pass
+
     try:
         evaluations = engine.evaluate_all()
     except Exception as exc:  # pragma: no cover - defensive logging
@@ -93,13 +105,52 @@ async def decision_cycle() -> None:
                 continue
 
             diagnostics = evaluation.diagnostics or {}
-            units = engine.position_size(evaluation.instrument, diagnostics)
+            spread_pips = None
+            try:
+                spread_pips = broker.current_spread(evaluation.instrument)
+            except AttributeError:
+                spread_pips = None
+
+            ok_to_open, reason = risk.should_open(
+                now_utc,
+                equity,
+                open_trades,
+                evaluation.instrument,
+                spread_pips,
+            )
+            if not ok_to_open:
+                print(
+                    f"[TRADE] Skipping {evaluation.instrument} due to {reason}",
+                    flush=True,
+                )
+                continue
+
+            atr_val = diagnostics.get("atr")
+            sl_distance = risk.sl_distance_from_atr(atr_val)
+            entry_price = diagnostics.get("close")
+            units = position_sizer.units_for_risk(
+                equity,
+                entry_price or 0.0,
+                sl_distance,
+                risk.risk_per_trade_pct,
+            )
+            if units <= 0:
+                print(
+                    f"[TRADE] Skipping {evaluation.instrument} due to zero position size",
+                    flush=True,
+                )
+                continue
+
             result = broker.place_order(
-                evaluation.instrument, evaluation.signal, units
+                evaluation.instrument,
+                evaluation.signal,
+                units,
+                sl_distance=sl_distance,
             )
             if result.get("status") == "SENT":
                 engine.mark_trade(evaluation.instrument)
                 open_trades.append({"instrument": evaluation.instrument})
+                risk.register_entry(now_utc)
             else:
                 print(
                     f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"
