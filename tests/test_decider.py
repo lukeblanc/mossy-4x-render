@@ -121,12 +121,38 @@ def test_fetches_each_instrument_individually(capfd, sample_config):
     out_lines = captured.out.splitlines()
     fetch_logs = [line for line in out_lines if line.startswith("[SCAN]")]
     assert len(fetch_logs) == len(instruments)
-    assert all("OK (2 bars)" in line for line in fetch_logs)
+    for instrument in instruments:
+        assert any(
+            line.startswith(f"[SCAN] {instrument} OK (") for line in fetch_logs
+        ), f"missing scan OK log for {instrument}"
     assert "400 Bad Request" not in captured.out
     assert "✅ Multi-Pair Candle Fetch Verified" in captured.out
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+
+        def __init__(self) -> None:
+            self.entries: List[datetime] = []
+
+        def enforce_equity_floor(self, *args, **kwargs) -> None:
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr):
+            if atr is None:
+                return 0.0
+            return atr * 1.5
+
+        def register_entry(self, now_utc):
+            self.entries.append(now_utc)
+
+        def register_exit(self, realized_pl: float) -> None:
+            pass
+
     class DummyEngine:
         def __init__(self) -> None:
             self.marked: List[str] = []
@@ -136,7 +162,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                 Evaluation(
                     instrument="EUR_USD",
                     signal="BUY",
-                    diagnostics={},
+                    diagnostics={"atr": 0.01, "close": 1.2345},
                     reason="trend",
                     market_active=True,
                 )
@@ -150,17 +176,47 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
 
     class DummyBroker:
         def __init__(self) -> None:
-            self.calls: List[Dict[str, str]] = []
+            self.calls: List[Dict[str, object]] = []
 
-        def place_order(self, instrument: str, signal: str, units: int) -> Dict[str, str]:
-            self.calls.append({"instrument": instrument, "signal": signal, "units": units})
+        def place_order(
+            self,
+            instrument: str,
+            signal: str,
+            units: int,
+            *,
+            sl_distance: float | None = None,
+        ) -> Dict[str, str]:
+            self.calls.append(
+                {
+                    "instrument": instrument,
+                    "signal": signal,
+                    "units": units,
+                    "sl_distance": sl_distance,
+                }
+            )
             return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+        def close_all_positions(self) -> None:
+            pass
 
     dummy_engine = DummyEngine()
     dummy_broker = DummyBroker()
+    dummy_risk = DummyRisk()
     monkeypatch.setattr(main, "engine", dummy_engine)
     monkeypatch.setattr(main, "broker", dummy_broker)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main, "risk", dummy_risk)
+    monkeypatch.setattr(
+        main.position_sizer,
+        "units_for_risk",
+        lambda equity, entry_price, stop_distance, risk_pct: 100,
+    )
 
     before = datetime.now(timezone.utc) - timedelta(hours=1)
     original_ts = watchdog.last_decision_ts
@@ -170,7 +226,16 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
 
     try:
         assert dummy_engine.marked == ["EUR_USD"]
-        assert dummy_broker.calls == [{"instrument": "EUR_USD", "signal": "BUY", "units": 1}]
+        expected_sl = dummy_risk.sl_distance_from_atr(0.01)
+        assert dummy_broker.calls == [
+            {
+                "instrument": "EUR_USD",
+                "signal": "BUY",
+                "units": 100,
+                "sl_distance": expected_sl,
+            }
+        ]
+        assert dummy_risk.entries
         assert watchdog.last_decision_ts > before
     finally:
         watchdog.last_decision_ts = original_ts
@@ -186,9 +251,28 @@ def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
     def record_error() -> None:
         events["error"] = True
 
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr):
+            return 0.01
+
+        def register_entry(self, *args, **kwargs):
+            pass
+
+        def register_exit(self, *args, **kwargs):
+            pass
+
     failing_engine = FailingEngine()
     monkeypatch.setattr(main, "engine", failing_engine)
     monkeypatch.setattr(main.watchdog, "record_error", record_error)
+    monkeypatch.setattr(main, "risk", DummyRisk())
 
     before = datetime.now(timezone.utc) - timedelta(hours=1)
     original_ts = watchdog.last_decision_ts

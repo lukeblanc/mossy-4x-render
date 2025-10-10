@@ -15,9 +15,9 @@ PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
 DEFAULT_INSTRUMENTS: List[str] = [
     "EUR_USD",
     "AUD_USD",
-    "XAU_USD",
     "GBP_USD",
     "USD_JPY",
+    "XAU_USD",
 ]
 
 
@@ -349,11 +349,13 @@ class DecisionEngine:
         rsi_val = self._rsi(closes, rsi_len)
         atr_val = self._atr(highs, lows, closes, atr_len)
 
+        last_close = closes[-1] if closes else math.nan
         return {
             "ema_fast": ema_fast,
             "ema_slow": ema_slow,
             "rsi": rsi_val,
             "atr": atr_val,
+            "close": last_close,
         }
 
     def _generate_signal(self, diagnostics: Dict[str, float]) -> (str, str):

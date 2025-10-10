@@ -15,11 +15,36 @@
   "instruments": [
     "EUR_USD",
     "AUD_USD",
-    "XAU_USD",
     "GBP_USD",
-    "USD_JPY"
+    "USD_JPY",
+    "XAU_USD"
   ],
-  "max_open_trades": 3,
-  "risk_per_trade": 0.02,
-  "cooldown_minutes": 2
+  "max_open_trades": 1,
+  "risk_per_trade": 0.0025,
+  "cooldown_minutes": 45,
+  "risk": {
+    "weekly_profit_target": 250.0,
+    "no_giveback_below_target": true,
+    "allow_trading_above_target": true,
+    "equity_floor": 1000.0,
+    "risk_per_trade_pct": 0.0025,
+    "max_concurrent_positions": 1,
+    "cooldown_minutes": 45,
+    "daily_loss_cap_pct": 0.01,
+    "weekly_loss_cap_pct": 0.03,
+    "atr_stop_mult": 1.5,
+    "atr_period": 14,
+    "spread_pips_limit": {
+      "EUR_USD": 1.5,
+      "AUD_USD": 1.8,
+      "GBP_USD": 2.0,
+      "USD_JPY": 2.0,
+      "XAU_USD": 5.0
+    },
+    "default_spread_pips_limit": 2.5,
+    "rollover_quiet_awst": {
+      "start": "04:55",
+      "end": "05:05"
+    }
+  }
 }

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import httpx
 
+from typing import Dict
+
 from app.config import settings
 
 PRACTICE = "https://api-fxpractice.oanda.com"
@@ -49,7 +51,14 @@ class Broker:
             print(f"[OANDA] Connectivity exception: {exc}", flush=True)
             return {"ok": False, "error": str(exc)}
 
-    def place_order(self, instrument: str, signal: str, units: float) -> dict:
+    def place_order(
+        self,
+        instrument: str,
+        signal: str,
+        units: float,
+        *,
+        sl_distance: float | None = None,
+    ) -> dict:
         side = signal.upper()
         if side not in ("BUY", "SELL"):
             print(f"[BROKER] Ignoring unknown signal: {signal}", flush=True)
@@ -70,13 +79,19 @@ class Broker:
             return {"status": "ERROR", "reason": "missing-creds"}
 
         trade_units = int(units if side == "BUY" else -units)
-        payload = {
-            "order": {
-                "type": "MARKET",
-                "instrument": instrument,
-                "units": str(trade_units),
-            }
+        order_payload = {
+            "type": "MARKET",
+            "instrument": instrument,
+            "units": str(trade_units),
         }
+
+        if sl_distance is not None and sl_distance > 0:
+            order_payload["stopLossOnFill"] = {
+                "timeInForce": "GTC",
+                "distance": f"{sl_distance:.5f}",
+            }
+
+        payload = {"order": order_payload}
 
         try:
             with self._client() as client:
@@ -128,3 +143,91 @@ class Broker:
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
         return []
+
+    def account_equity(self) -> float:
+        if not (self.key and self.account):
+            return 0.0
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/summary")
+                if resp.status_code == 200:
+                    data = resp.json().get("account", {})
+                    nav = data.get("NAV") or data.get("balance")
+                    try:
+                        return float(nav)
+                    except (TypeError, ValueError):
+                        return 0.0
+        except Exception as exc:
+            print(f"[OANDA] Exception fetching equity: {exc}", flush=True)
+        return 0.0
+
+    def current_spread(self, instrument: str) -> float:
+        if not (self.key and self.account):
+            return 0.0
+        try:
+            with self._client() as client:
+                resp = client.get(
+                    f"/v3/accounts/{self.account}/pricing",
+                    params={"instruments": instrument},
+                )
+                if resp.status_code != 200:
+                    return 0.0
+                data = resp.json().get("prices", [])
+                if not data:
+                    return 0.0
+                price = data[0]
+                bids = price.get("bids") or []
+                asks = price.get("asks") or []
+                if not bids or not asks:
+                    return 0.0
+                try:
+                    bid = float(bids[0]["price"])
+                    ask = float(asks[0]["price"])
+                except (KeyError, TypeError, ValueError):
+                    return 0.0
+                spread = ask - bid
+                pip_size = self._pip_size(instrument)
+                if pip_size <= 0:
+                    return 0.0
+                return spread / pip_size
+        except Exception as exc:
+            print(f"[OANDA] Exception fetching spread for {instrument}: {exc}", flush=True)
+            return 0.0
+
+    def close_all_positions(self) -> None:
+        if not (self.key and self.account):
+            return
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/openPositions")
+                if resp.status_code != 200:
+                    return
+                for position in resp.json().get("positions", []):
+                    instrument = position.get("instrument")
+                    if not instrument:
+                        continue
+                    payload: Dict[str, str] = {}
+                    long_units = position.get("long", {}).get("units")
+                    short_units = position.get("short", {}).get("units")
+                    if long_units and float(long_units) != 0:
+                        payload["longUnits"] = "ALL"
+                    if short_units and float(short_units) != 0:
+                        payload["shortUnits"] = "ALL"
+                    if not payload:
+                        continue
+                    client.put(
+                        f"/v3/accounts/{self.account}/positions/{instrument}/close",
+                        json=payload,
+                    )
+        except Exception as exc:
+            print(f"[OANDA] Exception closing positions: {exc}", flush=True)
+
+    @staticmethod
+    def _pip_size(instrument: str) -> float:
+        if instrument.endswith("JPY"):
+            return 0.01
+        if instrument.startswith("XAU"):
+            return 0.1
+        if instrument.startswith("XAG"):
+            return 0.01
+        return 0.0001
