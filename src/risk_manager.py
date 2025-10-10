@@ -272,6 +272,13 @@ class RiskManager:
         changed = False
         valid_equity = _sanitize_equity(equity)
 
+        if valid_equity is None:
+            # Avoid seeding rollover baselines with invalid reads (e.g. transient
+            # broker failures returning 0.0) which would effectively disable loss
+            # caps for the rest of the period. We'll retry on the next
+            # decision-cycle once a real equity value is available.
+            return
+
         if self.state.day_id != day_id:
             self.state.day_id = day_id
             self.state.day_start_equity = valid_equity
