@@ -10,7 +10,7 @@ import pytest
 
 from app.health import watchdog
 
-from src.decision_engine import DecisionEngine
+from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine
 from src.decision_engine import Evaluation
 from src import main
 
@@ -71,6 +71,73 @@ def test_scans_all_instruments(capfd, sample_config):
     assert any("[SCAN] EUR_USD signal=BUY" in line for line in output_lines)
     assert any("[SCAN] AUD_USD signal=SELL" in line for line in output_lines)
     assert any("[SCAN] XAU_USD signal=HOLD" in line for line in output_lines)
+
+
+def test_fetch_candles_handles_errors(capfd, sample_config):
+    calls: List[str] = []
+
+    def fetcher(instrument: str, **kwargs):
+        calls.append(instrument)
+        if instrument == "AUD_USD":
+            raise RuntimeError("boom")
+        return [{"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.0}]
+
+    engine = DecisionEngine(sample_config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    capfd.readouterr()
+
+    candles = engine.fetch_candles(count=3, granularity="M1")
+
+    assert calls == sample_config["instruments"]
+    assert candles["AUD_USD"] == []
+    captured = capfd.readouterr()
+    assert "[OANDA] Candle fetch failed instrument=AUD_USD error=boom" in captured.out
+
+
+def test_evaluate_all_continues_on_fetch_failure(capfd, sample_config):
+    candle_map: Dict[str, List[Dict[str, float]]] = {
+        "EUR_USD": [
+            {"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.05},
+            {"o": 1.05, "h": 1.15, "l": 0.95, "c": 1.1},
+            {"o": 1.1, "h": 1.2, "l": 1.0, "c": 1.15},
+            {"o": 1.15, "h": 1.25, "l": 1.05, "c": 1.2},
+        ],
+        "XAU_USD": [
+            {"o": 1950.0, "h": 1951.0, "l": 1949.5, "c": 1950.5},
+            {"o": 1950.5, "h": 1952.0, "l": 1949.0, "c": 1951.0},
+            {"o": 1951.0, "h": 1953.0, "l": 1950.0, "c": 1952.5},
+            {"o": 1952.5, "h": 1954.0, "l": 1951.5, "c": 1953.0},
+        ],
+    }
+
+    def fetcher(instrument: str, **kwargs):
+        if instrument == "AUD_USD":
+            raise RuntimeError("fetch-failed")
+        return candle_map[instrument]
+
+    engine = DecisionEngine(sample_config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    capfd.readouterr()
+
+    evaluations = engine.evaluate_all()
+    signals = {ev.instrument: ev.signal for ev in evaluations}
+
+    assert signals["AUD_USD"] == "HOLD"
+    assert signals["EUR_USD"] in {"BUY", "SELL", "HOLD"}
+    assert signals["XAU_USD"] in {"BUY", "SELL", "HOLD"}
+
+    captured = capfd.readouterr()
+    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
+    assert any("[SCAN] AUD_USD signal=HOLD" in line for line in output_lines)
+    assert "[OANDA] Candle fetch failed instrument=AUD_USD error=fetch-failed" in captured.out
+
+
+def test_default_instrument_basket_order():
+    assert DEFAULT_INSTRUMENTS == [
+        "EUR_USD",
+        "AUD_USD",
+        "GBP_USD",
+        "USD_JPY",
+        "XAU_USD",
+    ]
 
 
 def test_skips_inactive_markets(capfd, sample_config):
@@ -166,3 +233,33 @@ def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
         assert watchdog.last_decision_ts > before
     finally:
         watchdog.last_decision_ts = original_ts
+
+
+def test_resolve_instruments_from_set():
+    config = {"instruments": {"eur_usd", "aud_usd"}}
+    engine = DecisionEngine(config)
+    assert engine.instruments == ["EUR_USD", "AUD_USD"]
+
+
+def test_resolve_instruments_with_whitespace_and_duplicates():
+    config = {"instruments": [" eur_usd ", "", "GBP_USD", "eur_usd"]}
+    engine = DecisionEngine(config)
+    assert engine.instruments == ["EUR_USD", "GBP_USD"]
+
+
+def test_missing_instruments_defaults_when_merge_enabled():
+    config = {"merge_default_instruments": True}
+    engine = DecisionEngine(config)
+    assert engine.instruments == DEFAULT_INSTRUMENTS
+
+
+def test_empty_instruments_defaults_when_merge_enabled():
+    config = {"instruments": [], "merge_default_instruments": True}
+    engine = DecisionEngine(config)
+    assert engine.instruments == DEFAULT_INSTRUMENTS
+
+
+def test_empty_instruments_without_merge_returns_empty():
+    config = {"instruments": [], "merge_default_instruments": False}
+    engine = DecisionEngine(config)
+    assert engine.instruments == []

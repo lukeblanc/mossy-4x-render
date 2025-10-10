@@ -4,11 +4,19 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import httpx
 
 PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
+
+DEFAULT_INSTRUMENTS: List[str] = [
+    "EUR_USD",
+    "AUD_USD",
+    "GBP_USD",
+    "USD_JPY",
+    "XAU_USD",
+]
 
 
 @dataclass
@@ -61,16 +69,70 @@ class DecisionEngine:
         self._cooldowns: Dict[str, datetime] = {}
         self._api_key = os.getenv("OANDA_API_KEY")
 
+        merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
+        resolved_instruments = self._resolve_instruments(
+            self.config.get("instruments"), merge_default
+        )
+        self.instruments: List[str] = resolved_instruments
+        self.config["instruments"] = resolved_instruments
+        print(
+            "[CONFIG] instruments resolved="
+            f"{resolved_instruments} merge_default_instruments={str(merge_default).lower()}",
+            flush=True,
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def evaluate_all(self) -> List[Evaluation]:
-        instruments: Iterable[str] = self.config.get("instruments", [])
+        candle_count = int(self.config.get("candles_to_fetch", 200))
+        granularity = self.config.get("timeframe", "M5")
+        batched_candles = self.fetch_candles(
+            count=candle_count,
+            granularity=granularity,
+        )
+
+        instruments: Iterable[str] = self.instruments
         results: List[Evaluation] = []
         for instrument in instruments:
-            evaluation = self._evaluate_instrument(instrument)
+            raw_candles = batched_candles.get(instrument, [])
+            evaluation = self._evaluate_instrument(instrument, raw_candles)
             results.append(evaluation)
         return results
+
+    def fetch_candles(
+        self,
+        instruments: Optional[Iterable[str]] = None,
+        *,
+        count: Optional[int] = None,
+        granularity: Optional[str] = None,
+    ) -> Dict[str, List[Dict]]:
+        targets = list(instruments or self.instruments)
+        candle_count = int(count if count is not None else self.config.get("candles_to_fetch", 200))
+        timeframe = granularity or self.config.get("timeframe", "M5")
+
+        aggregated: Dict[str, List[Dict]] = {}
+        for instrument in targets:
+            try:
+                candles = self._fetcher(
+                    instrument,
+                    count=candle_count,
+                    granularity=timeframe,
+                    api_key=self._api_key,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                print(
+                    f"[OANDA] Candle fetch failed instrument={instrument} error={exc}",
+                    flush=True,
+                )
+                candles = []
+
+            if not isinstance(candles, list):
+                candles = []
+
+            aggregated[instrument] = candles
+
+        return aggregated
 
     def mark_trade(self, instrument: str) -> None:
         cooldown_minutes = int(self.config.get("cooldown_minutes", 0))
@@ -93,16 +155,14 @@ class DecisionEngine:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-    def _evaluate_instrument(self, instrument: str) -> Evaluation:
-        granularity = self.config.get("timeframe", "M5")
-        candle_count = int(self.config.get("candles_to_fetch", 200))
-        raw_candles = self._fetcher(
-            instrument,
-            count=candle_count,
-            granularity=granularity,
-            api_key=self._api_key,
-        )
-        normalized = self._normalize_candles(raw_candles)
+    def _evaluate_instrument(
+        self, instrument: str, raw_candles: Optional[Sequence[Dict]] = None
+    ) -> Evaluation:
+        if raw_candles is None:
+            single_instrument = self.fetch_candles([instrument])
+            raw_candles = single_instrument.get(instrument, [])
+
+        normalized = self._normalize_candles(list(raw_candles or []))
         if not normalized:
             self._log_scan(instrument, "HOLD", rsi=None, atr=None)
             return Evaluation(
@@ -140,6 +200,64 @@ class DecisionEngine:
         else:
             atr_str = f"{atr:.5f}"
         print(f"[SCAN] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
+
+    def _resolve_instruments(
+        self, instruments: Optional[Iterable[str]], merge_default_instruments: bool
+    ) -> List[str]:
+        provided: Sequence = []
+        if instruments is None:
+            provided = []
+        elif isinstance(instruments, str):
+            provided = [instruments]
+        elif isinstance(instruments, (set, frozenset)):
+            provided = sorted(instruments, key=self._instrument_sort_key)
+        else:
+            try:
+                provided = list(instruments)  # type: ignore[arg-type]
+            except TypeError:
+                provided = [instruments]  # type: ignore[list-item]
+
+        normalized: List[str] = []
+        seen = set()
+
+        for entry in provided:
+            if not isinstance(entry, str):
+                continue
+            candidate = entry.strip().upper()
+            if not candidate:
+                continue
+            if candidate in seen:
+                continue
+            normalized.append(candidate)
+            seen.add(candidate)
+
+        if merge_default_instruments:
+            for default in DEFAULT_INSTRUMENTS:
+                if default not in seen:
+                    normalized.append(default)
+                    seen.add(default)
+
+        return normalized
+
+    def _instrument_sort_key(self, instrument: Optional[str]) -> tuple[int, str]:
+        candidate = ""
+        if isinstance(instrument, str):
+            candidate = instrument.strip().upper()
+        index = self._default_instrument_index(candidate)
+        return index, candidate
+
+    @staticmethod
+    def _default_instrument_index(instrument: str) -> int:
+        try:
+            return DEFAULT_INSTRUMENTS.index(instrument)
+        except ValueError:
+            return len(DEFAULT_INSTRUMENTS)
+
+    @staticmethod
+    def _as_bool(value: object) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+        return bool(value)
 
     def _normalize_candles(self, candles: List[Dict]) -> List[Dict[str, float]]:
         normalized: List[Dict[str, float]] = []
@@ -259,4 +377,4 @@ class DecisionEngine:
         return sum(true_ranges) / length
 
 
-__all__ = ["DecisionEngine", "Evaluation"]
+__all__ = ["DecisionEngine", "Evaluation", "DEFAULT_INSTRUMENTS"]

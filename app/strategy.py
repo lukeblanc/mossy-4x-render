@@ -16,7 +16,18 @@ def _fetch_candles(count: int = 200) -> List[Dict]:
     Uses the practice API when in demo mode. On failure returns an empty list.
     """
     base_url = "https://api-fxpractice.oanda.com/v3"
-    instrument = settings.INSTRUMENT
+    raw_instrument = settings.INSTRUMENT
+    instruments = [part.strip() for part in raw_instrument.split(",") if part.strip()]
+    if not instruments:
+        print("[ERROR] No valid instrument configured for legacy strategy", flush=True)
+        return []
+
+    instrument = instruments[0]
+    if len(instruments) > 1:
+        print(
+            f"[CONFIG] Multiple instruments configured; legacy strategy using primary {instrument}",
+            flush=True,
+        )
     granularity = settings.STRAT_TIMEFRAME or "M1"
     params = {"count": str(count), "granularity": granularity, "price": "M"}
     headers: Dict[str, str] = {}
