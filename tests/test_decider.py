@@ -67,10 +67,10 @@ def test_scans_all_instruments(capfd, sample_config):
     assert signals["XAU_USD"] == "HOLD"
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert any("[SCAN] EUR_USD signal=BUY" in line for line in output_lines)
-    assert any("[SCAN] AUD_USD signal=SELL" in line for line in output_lines)
-    assert any("[SCAN] XAU_USD signal=HOLD" in line for line in output_lines)
+    signal_lines = [line for line in captured.out.splitlines() if line.startswith("[SIGNAL]")]
+    assert any("[SIGNAL] EUR_USD signal=BUY" in line for line in signal_lines)
+    assert any("[SIGNAL] AUD_USD signal=SELL" in line for line in signal_lines)
+    assert any("[SIGNAL] XAU_USD signal=HOLD" in line for line in signal_lines)
 
 
 def test_skips_inactive_markets(capfd, sample_config):
@@ -84,11 +84,39 @@ def test_skips_inactive_markets(capfd, sample_config):
     assert all(ev.signal == "HOLD" for ev in evaluations)
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert len(output_lines) == len(sample_config["instruments"])
-    assert all("signal=HOLD" in line for line in output_lines)
-    assert all("rsi=n/a" in line for line in output_lines)
-    assert all("atr=n/a" in line for line in output_lines)
+    signal_lines = [line for line in captured.out.splitlines() if line.startswith("[SIGNAL]")]
+    assert len(signal_lines) == len(sample_config["instruments"])
+    assert all("signal=HOLD" in line for line in signal_lines)
+    assert all("rsi=n/a" in line for line in signal_lines)
+    assert all("atr=n/a" in line for line in signal_lines)
+
+
+def test_fetches_each_instrument_individually(capfd, sample_config):
+    instruments = ["EUR_USD", "AUD_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+    sample_config = {**sample_config, "instruments": instruments}
+
+    requested: List[str] = []
+
+    def fetcher(instrument: str, **kwargs):
+        requested.append(instrument)
+        assert "," not in instrument
+        return [
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+            {"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0},
+        ]
+
+    engine = DecisionEngine(sample_config, candle_fetcher=fetcher, now_fn=lambda: datetime.now(timezone.utc))
+    evaluations = engine.evaluate_all()
+
+    assert len(evaluations) == len(instruments)
+    assert requested == instruments
+
+    captured = capfd.readouterr()
+    out_lines = captured.out.splitlines()
+    fetch_logs = [line for line in out_lines if line.startswith("[SCAN]")]
+    assert len(fetch_logs) == len(instruments)
+    assert all("OK (2 bars)" in line for line in fetch_logs)
+    assert "400 Bad Request" not in captured.out
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
