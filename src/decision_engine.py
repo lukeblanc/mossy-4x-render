@@ -113,6 +113,7 @@ class DecisionEngine:
 
         aggregated: Dict[str, List[Dict]] = {}
         for instrument in targets:
+            print(f"[SCAN] Fetching candles for {instrument}", flush=True)
             try:
                 candles = self._fetcher(
                     instrument,
@@ -122,7 +123,7 @@ class DecisionEngine:
                 )
             except Exception as exc:  # pragma: no cover - defensive logging
                 print(
-                    f"[OANDA] Candle fetch failed instrument={instrument} error={exc}",
+                    f"[WARN] Candle fetch failed instrument={instrument} error={exc}",
                     flush=True,
                 )
                 candles = []
@@ -130,6 +131,10 @@ class DecisionEngine:
             if not isinstance(candles, list):
                 candles = []
 
+            print(
+                f"[SCAN] Done {instrument} ({len(candles)} bars)",
+                flush=True,
+            )
             aggregated[instrument] = candles
 
         return aggregated
@@ -164,7 +169,7 @@ class DecisionEngine:
 
         normalized = self._normalize_candles(list(raw_candles or []))
         if not normalized:
-            self._log_scan(instrument, "HOLD", rsi=None, atr=None)
+            self._log_decision(instrument, "HOLD", rsi=None, atr=None)
             return Evaluation(
                 instrument=instrument,
                 signal="HOLD",
@@ -181,7 +186,7 @@ class DecisionEngine:
             signal = "HOLD"
             reason = "cooldown"
 
-        self._log_scan(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
+        self._log_decision(instrument, signal, diagnostics.get("rsi"), diagnostics.get("atr"))
         return Evaluation(
             instrument=instrument,
             signal=signal,
@@ -190,7 +195,9 @@ class DecisionEngine:
             market_active=True,
         )
 
-    def _log_scan(self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]) -> None:
+    def _log_decision(
+        self, instrument: str, signal: str, rsi: Optional[float], atr: Optional[float]
+    ) -> None:
         if rsi is None or math.isnan(rsi):
             rsi_str = "n/a"
         else:
@@ -199,7 +206,10 @@ class DecisionEngine:
             atr_str = "n/a"
         else:
             atr_str = f"{atr:.5f}"
-        print(f"[SCAN] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
+        print(
+            f"[DECISION] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}",
+            flush=True,
+        )
 
     def _resolve_instruments(
         self, instruments: Optional[Iterable[str]], merge_default_instruments: bool

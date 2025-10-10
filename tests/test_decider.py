@@ -67,10 +67,19 @@ def test_scans_all_instruments(capfd, sample_config):
     assert signals["XAU_USD"] == "HOLD"
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert any("[SCAN] EUR_USD signal=BUY" in line for line in output_lines)
-    assert any("[SCAN] AUD_USD signal=SELL" in line for line in output_lines)
-    assert any("[SCAN] XAU_USD signal=HOLD" in line for line in output_lines)
+    lines = captured.out.splitlines()
+
+    for instrument in sample_config["instruments"]:
+        assert f"[SCAN] Fetching candles for {instrument}" in lines
+        assert any(
+            line == f"[SCAN] Done {instrument} ({len(prices[instrument])} bars)"
+            for line in lines
+        )
+
+    decision_lines = [line for line in lines if line.startswith("[DECISION]")]
+    assert any("[DECISION] EUR_USD signal=BUY" in line for line in decision_lines)
+    assert any("[DECISION] AUD_USD signal=SELL" in line for line in decision_lines)
+    assert any("[DECISION] XAU_USD signal=HOLD" in line for line in decision_lines)
 
 
 def test_fetch_candles_handles_errors(capfd, sample_config):
@@ -90,7 +99,14 @@ def test_fetch_candles_handles_errors(capfd, sample_config):
     assert calls == sample_config["instruments"]
     assert candles["AUD_USD"] == []
     captured = capfd.readouterr()
-    assert "[OANDA] Candle fetch failed instrument=AUD_USD error=boom" in captured.out
+    lines = captured.out.splitlines()
+    assert "[SCAN] Fetching candles for EUR_USD" in lines
+    assert "[SCAN] Fetching candles for AUD_USD" in lines
+    assert "[SCAN] Fetching candles for XAU_USD" in lines
+    assert "[SCAN] Done EUR_USD (1 bars)" in lines
+    assert "[SCAN] Done AUD_USD (0 bars)" in lines
+    assert "[SCAN] Done XAU_USD (1 bars)" in lines
+    assert "[WARN] Candle fetch failed instrument=AUD_USD error=boom" in captured.out
 
 
 def test_evaluate_all_continues_on_fetch_failure(capfd, sample_config):
@@ -125,9 +141,10 @@ def test_evaluate_all_continues_on_fetch_failure(capfd, sample_config):
     assert signals["XAU_USD"] in {"BUY", "SELL", "HOLD"}
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert any("[SCAN] AUD_USD signal=HOLD" in line for line in output_lines)
-    assert "[OANDA] Candle fetch failed instrument=AUD_USD error=fetch-failed" in captured.out
+    lines = captured.out.splitlines()
+    decision_lines = [line for line in lines if line.startswith("[DECISION]")]
+    assert any("[DECISION] AUD_USD signal=HOLD" in line for line in decision_lines)
+    assert "[WARN] Candle fetch failed instrument=AUD_USD error=fetch-failed" in captured.out
 
 
 def test_default_instrument_basket_order():
@@ -151,11 +168,12 @@ def test_skips_inactive_markets(capfd, sample_config):
     assert all(ev.signal == "HOLD" for ev in evaluations)
 
     captured = capfd.readouterr()
-    output_lines = [line for line in captured.out.splitlines() if line.startswith("[SCAN]")]
-    assert len(output_lines) == len(sample_config["instruments"])
-    assert all("signal=HOLD" in line for line in output_lines)
-    assert all("rsi=n/a" in line for line in output_lines)
-    assert all("atr=n/a" in line for line in output_lines)
+    lines = captured.out.splitlines()
+    decision_lines = [line for line in lines if line.startswith("[DECISION]")]
+    assert len(decision_lines) == len(sample_config["instruments"])
+    assert all("signal=HOLD" in line for line in decision_lines)
+    assert all("rsi=n/a" in line for line in decision_lines)
+    assert all("atr=n/a" in line for line in decision_lines)
 
 
 def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
