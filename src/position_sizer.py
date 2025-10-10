@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from typing import Any, Mapping, Optional, Tuple
+
+from src.risk_scaler import RiskScaler
+
+
+def resolve_risk_pct(
+    config: Optional[Mapping[str, Any]],
+    equity: float,
+    *,
+    fallback: Optional[float] = None,
+) -> Tuple[float, RiskScaler]:
+    scaler = RiskScaler(config, default_risk_pct=fallback)
+    return scaler.get_risk_pct(equity), scaler
+
+
 def units_for_risk(
     equity: float,
     entry_price: float,
