@@ -14,7 +14,10 @@
   "min_atr": 0.00005,
   "instruments": [
     "EUR_USD",
-    "NZD_USD"
+    "AUD_USD",
+    "GBP_USD",
+    "USD_JPY",
+    "XAU_USD"
   ],
   "max_open_trades": 1,
   "risk_per_trade": 0.0025,
