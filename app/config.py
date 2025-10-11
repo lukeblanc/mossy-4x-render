@@ -1,85 +1,66 @@
-import os
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _env_str(key: str, default: Optional[str] = None) -> Optional[str]:
-    value = os.getenv(key)
-    return value if value is not None else default
+class Settings(BaseSettings):
+    """Configuration for the Mossy 4X trading bot."""
 
-
-def _env_int(key: str, default: int) -> int:
-    raw = os.getenv(key)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _env_float(key: str, default: float) -> float:
-    raw = os.getenv(key)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-class Settings(BaseModel):
-    # Core
-    MODE: str = os.getenv("MODE", "demo")
-    TZ: str = os.getenv("TZ", "Australia/Perth")
-    HEARTBEAT_SECONDS: int = int(os.getenv("HEARTBEAT_SECONDS", "30"))
-    DECISION_SECONDS: int = int(os.getenv("DECISION_SECONDS", "60"))
+    # Core runtime configuration
+    MODE: str = Field("demo", description="Run mode for the bot: demo or live")
+    TZ: str = Field("Australia/Perth", description="Local timezone for logging")
+    HEARTBEAT_SECONDS: int = Field(30, description="Heartbeat interval in seconds")
+    DECISION_SECONDS: int = Field(60, description="Decision engine interval in seconds")
 
     # Health / alerts
-    MAX_SILENCE_SECONDS: int = int(os.getenv("MAX_SILENCE_SECONDS", "180"))
-    ERROR_BURST_THRESHOLD: int = int(os.getenv("ERROR_BURST_THRESHOLD", "3"))
-    ALERT_EMAIL: Optional[str] = os.getenv("ALERT_EMAIL")
-    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST")
-    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: Optional[str] = os.getenv("SMTP_USER")
-    SMTP_PASS: Optional[str] = os.getenv("SMTP_PASS")
+    MAX_SILENCE_SECONDS: int = Field(180, description="Alert threshold for missing heartbeats")
+    ERROR_BURST_THRESHOLD: int = Field(3, description="Number of consecutive errors before alerting")
+    ALERT_EMAIL: Optional[str] = Field(default=None, description="Destination email for alerts")
+    SMTP_HOST: Optional[str] = Field(default=None, description="SMTP host for alert emails")
+    SMTP_PORT: int = Field(587, description="SMTP port for alert emails")
+    SMTP_USER: Optional[str] = Field(default=None, description="SMTP username")
+    SMTP_PASS: Optional[str] = Field(default=None, description="SMTP password")
 
-    # Trading
-    OANDA_API_KEY: Optional[str] = os.getenv("OANDA_API_KEY")
-    OANDA_ACCOUNT_ID: Optional[str] = os.getenv("OANDA_ACCOUNT_ID")
-    INSTRUMENT: str = os.getenv("INSTRUMENT", "EUR_USD")
-    ORDER_SIZE: float = float(os.getenv("ORDER_SIZE", "1000"))
+    # Trading configuration
+    OANDA_API_KEY: Optional[str] = Field(default=None, description="OANDA API key")
+    OANDA_ACCOUNT_ID: Optional[str] = Field(default=None, description="OANDA account identifier")
+    INSTRUMENT: str = Field("EUR_USD", description="Default trading instrument")
+    ORDER_SIZE: float = Field(1000.0, description="Default trade size")
 
     # Strategy parameters
-    STRAT_EMA_FAST: int = int(os.getenv("STRAT_EMA_FAST", "10"))
-    STRAT_EMA_SLOW: int = int(os.getenv("STRAT_EMA_SLOW", "20"))
-    STRAT_RSI_LEN: int = int(os.getenv("STRAT_RSI_LEN", "14"))
-    STRAT_RSI_BUY: int = int(os.getenv("STRAT_RSI_BUY", "55"))
-    STRAT_RSI_SELL: int = int(os.getenv("STRAT_RSI_SELL", "45"))
-    STRAT_TIMEFRAME: str = os.getenv("STRAT_TIMEFRAME", "M5")
-    STRAT_COOLDOWN_BARS: int = int(os.getenv("STRAT_COOLDOWN_BARS", "2"))
-    ATR_LEN: int = int(os.getenv("ATR_LEN", "14"))
-            # Additional rule variables
-        MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
-        DAILY_LOSS_CAP: float = float(os.getenv("DAILY_LOSS_CAP", "0.05"))
-        DRAWDOWN_CAP: float = float(os.getenv("DRAWDOWN_CAP", "0.10"))
-        NEWS_GUARD_MINUTES: int = int(os.getenv("NEWS_GUARD_MINUTES", "60"))
-        EXIT_LOGIC: str = os.getenv("EXIT_LOGIC", "chandelier")
-        MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", "3"))
-        ADX_FILTER: int = int(os.getenv("ADX_FILTER", "25"))
-        MTF_ALIGN: bool = os.getenv("MTF_ALIGN", "True").lower() == "true"
-        RULES_VERSION: str = os.getenv("RULES_VERSION", "V1.6")
+    STRAT_EMA_FAST: int = Field(10, description="Fast EMA length")
+    STRAT_EMA_SLOW: int = Field(20, description="Slow EMA length")
+    STRAT_RSI_LEN: int = Field(14, description="RSI length")
+    STRAT_RSI_BUY: int = Field(55, description="RSI threshold for buy signals")
+    STRAT_RSI_SELL: int = Field(45, description="RSI threshold for sell signals")
+    STRAT_TIMEFRAME: str = Field("M5", description="Primary strategy timeframe")
+    STRAT_COOLDOWN_BARS: int = Field(2, description="Bars to wait before emitting a new signal")
+    ATR_LEN: int = Field(14, description="ATR lookback for volatility checks")
 
-    MIN_ATR: float = float(os.getenv("MIN_ATR", "0.00005"))
+    # Additional rule variables
+    MAX_RISK_PER_TRADE: float = Field(0.02, description="Maximum risk per trade as a fraction of equity")
+    DAILY_LOSS_CAP: float = Field(0.05, description="Daily loss cap as a fraction of equity")
+    DRAWDOWN_CAP: float = Field(0.10, description="Maximum drawdown before pausing trading")
+    NEWS_GUARD_MINUTES: int = Field(60, description="Minutes to avoid trading around news events")
+    EXIT_LOGIC: str = Field("chandelier", description="Exit logic identifier")
+    MAX_OPEN_TRADES: int = Field(3, description="Maximum number of open trades")
+    ADX_FILTER: int = Field(25, description="Minimum ADX value to enable trades")
+    MTF_ALIGN: bool = Field(True, description="Require multi-timeframe alignment")
+    RULES_VERSION: str = Field("V1.6", description="Strategy rules version identifier")
 
-    # Risk
-    RISK_PCT: float = float(os.getenv("RISK_PCT", "0.01"))
-    SL_R: float = float(os.getenv("SL_R", "1.0"))
-    TP_R: float = float(os.getenv("TP_R", "1.5"))
-    MAX_DD_DAY: float = float(os.getenv("MAX_DD_DAY", "0.05"))
+    MIN_ATR: float = Field(0.00005, description="Minimum ATR required for trades")
+
+    # Risk management
+    RISK_PCT: float = Field(0.01, description="Fraction of capital risked per trade")
+    SL_R: float = Field(1.0, description="Stop-loss multiple of risk")
+    TP_R: float = Field(1.5, description="Take-profit multiple of risk")
+    MAX_DD_DAY: float = Field(0.05, description="Maximum daily drawdown")
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
+
 
 settings = Settings()
-
-
-
