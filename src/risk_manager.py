@@ -272,6 +272,23 @@ class RiskManager:
         changed = False
         valid_equity = _sanitize_equity(equity)
 
+        if valid_equity is None:
+            if self.state.day_id != day_id:
+                self.state.day_id = day_id
+                self.state.day_start_equity = None
+                changed = True
+
+            if self.state.week_id != week_id:
+                self.state.week_id = week_id
+                self.state.week_start_equity = None
+                self.state.has_hit_weekly_target = False
+                self.state.live_halted_on_equity_floor = False
+                changed = True
+
+            if changed:
+                self._save_state()
+            return
+
         if self.state.day_id != day_id:
             self.state.day_id = day_id
             self.state.day_start_equity = valid_equity
@@ -288,10 +305,14 @@ class RiskManager:
 
         if self.state.day_start_equity is None and valid_equity is not None:
             self.state.day_start_equity = valid_equity
+            if self.state.day_id == day_id:
+                self.state.daily_realized_pl = 0.0
             changed = True
 
         if self.state.week_start_equity is None and valid_equity is not None:
             self.state.week_start_equity = valid_equity
+            if self.state.week_id == week_id:
+                self.state.weekly_realized_pl = 0.0
             changed = True
 
         if changed:

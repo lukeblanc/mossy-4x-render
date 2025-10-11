@@ -131,3 +131,25 @@ def test_state_persistence_across_restart(state_dir):
     second = RiskManager(cfg, mode="paper")
     assert second.state.weekly_realized_pl == pytest.approx(200.0)
     assert second.state.week_id == snapshot["week_id"]
+
+
+def test_rollover_preserves_realized_pl_when_equity_missing(state_dir):
+    manager = RiskManager({}, mode="paper")
+
+    start = _utc(2024, 1, 1, 0, 0)
+    manager.should_open(start, 10_000.0, [], "EUR_USD", 0.1)
+    manager.register_exit(75.0)
+
+    previous_day_id = manager.state.day_id
+
+    glitch_time = start + timedelta(days=1)
+    manager._rollover(glitch_time, None)
+
+    assert manager.state.day_id != previous_day_id
+    assert manager.state.day_start_equity is None
+    assert manager.state.daily_realized_pl == pytest.approx(75.0)
+
+    manager._rollover(glitch_time, 10_100.0)
+
+    assert manager.state.day_start_equity == pytest.approx(10_100.0)
+    assert manager.state.daily_realized_pl == pytest.approx(0.0)
