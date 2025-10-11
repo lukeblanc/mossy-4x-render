@@ -33,6 +33,17 @@ class Settings(BaseModel):
     STRAT_TIMEFRAME: str = os.getenv("STRAT_TIMEFRAME", "M5")
     STRAT_COOLDOWN_BARS: int = int(os.getenv("STRAT_COOLDOWN_BARS", "2"))
     ATR_LEN: int = int(os.getenv("ATR_LEN", "14"))
+            # Additional rule variables
+        MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
+        DAILY_LOSS_CAP: float = float(os.getenv("DAILY_LOSS_CAP", "0.05"))
+        DRAWDOWN_CAP: float = float(os.getenv("DRAWDOWN_CAP", "0.10"))
+        NEWS_GUARD_MINUTES: int = int(os.getenv("NEWS_GUARD_MINUTES", "60"))
+        EXIT_LOGIC: str = os.getenv("EXIT_LOGIC", "chandelier")
+        MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", "3"))
+        ADX_FILTER: int = int(os.getenv("ADX_FILTER", "25"))
+        MTF_ALIGN: bool = os.getenv("MTF_ALIGN", "True").lower() == "true"
+        RULES_VERSION: str = os.getenv("RULES_VERSION", "V1.6")
+
     MIN_ATR: float = float(os.getenv("MIN_ATR", "0.00005"))
 
     # Risk
