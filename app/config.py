@@ -30,76 +30,56 @@ def _env_float(key: str, default: float) -> float:
 
 
 class Settings(BaseModel):
-    MODE: str
-    TZ: str
-    HEARTBEAT_SECONDS: int
-    DECISION_SECONDS: int
+    # Core
+    MODE: str = os.getenv("MODE", "demo")
+    TZ: str = os.getenv("TZ", "Australia/Perth")
+    HEARTBEAT_SECONDS: int = int(os.getenv("HEARTBEAT_SECONDS", "30"))
+    DECISION_SECONDS: int = int(os.getenv("DECISION_SECONDS", "60"))
 
-    MAX_SILENCE_SECONDS: int
-    ERROR_BURST_THRESHOLD: int
-    ALERT_EMAIL: Optional[str]
-    SMTP_HOST: Optional[str]
-    SMTP_PORT: int
-    SMTP_USER: Optional[str]
-    SMTP_PASS: Optional[str]
+    # Health / alerts
+    MAX_SILENCE_SECONDS: int = int(os.getenv("MAX_SILENCE_SECONDS", "180"))
+    ERROR_BURST_THRESHOLD: int = int(os.getenv("ERROR_BURST_THRESHOLD", "3"))
+    ALERT_EMAIL: Optional[str] = os.getenv("ALERT_EMAIL")
+    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: Optional[str] = os.getenv("SMTP_USER")
+    SMTP_PASS: Optional[str] = os.getenv("SMTP_PASS")
 
-    OANDA_API_KEY: Optional[str]
-    OANDA_ACCOUNT_ID: Optional[str]
-    INSTRUMENT: str
-    ORDER_SIZE: float
+    # Trading
+    OANDA_API_KEY: Optional[str] = os.getenv("OANDA_API_KEY")
+    OANDA_ACCOUNT_ID: Optional[str] = os.getenv("OANDA_ACCOUNT_ID")
+    INSTRUMENT: str = os.getenv("INSTRUMENT", "EUR_USD")
+    ORDER_SIZE: float = float(os.getenv("ORDER_SIZE", "1000"))
 
-    STRAT_EMA_FAST: int
-    STRAT_EMA_SLOW: int
-    STRAT_RSI_LEN: int
-    STRAT_RSI_BUY: int
-    STRAT_RSI_SELL: int
-    STRAT_TIMEFRAME: str
-    STRAT_COOLDOWN_BARS: int
-    ATR_LEN: int
-    MIN_ATR: float
+    # Strategy parameters
+    STRAT_EMA_FAST: int = int(os.getenv("STRAT_EMA_FAST", "10"))
+    STRAT_EMA_SLOW: int = int(os.getenv("STRAT_EMA_SLOW", "20"))
+    STRAT_RSI_LEN: int = int(os.getenv("STRAT_RSI_LEN", "14"))
+    STRAT_RSI_BUY: int = int(os.getenv("STRAT_RSI_BUY", "55"))
+    STRAT_RSI_SELL: int = int(os.getenv("STRAT_RSI_SELL", "45"))
+    STRAT_TIMEFRAME: str = os.getenv("STRAT_TIMEFRAME", "M5")
+    STRAT_COOLDOWN_BARS: int = int(os.getenv("STRAT_COOLDOWN_BARS", "2"))
+    ATR_LEN: int = int(os.getenv("ATR_LEN", "14"))
+            # Additional rule variables
+        MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
+        DAILY_LOSS_CAP: float = float(os.getenv("DAILY_LOSS_CAP", "0.05"))
+        DRAWDOWN_CAP: float = float(os.getenv("DRAWDOWN_CAP", "0.10"))
+        NEWS_GUARD_MINUTES: int = int(os.getenv("NEWS_GUARD_MINUTES", "60"))
+        EXIT_LOGIC: str = os.getenv("EXIT_LOGIC", "chandelier")
+        MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", "3"))
+        ADX_FILTER: int = int(os.getenv("ADX_FILTER", "25"))
+        MTF_ALIGN: bool = os.getenv("MTF_ALIGN", "True").lower() == "true"
+        RULES_VERSION: str = os.getenv("RULES_VERSION", "V1.6")
 
-    RISK_PCT: float
-    SL_R: float
-    TP_R: float
-    MAX_DD_DAY: float
-    MAX_RISK_PER_TRADE: float
+    MIN_ATR: float = float(os.getenv("MIN_ATR", "0.00005"))
 
-    @classmethod
-    def load(cls) -> "Settings":
-        return cls(
-            MODE=_env_str("MODE", "demo"),
-            TZ=_env_str("TZ", "Australia/Perth"),
-            HEARTBEAT_SECONDS=_env_int("HEARTBEAT_SECONDS", 30),
-            DECISION_SECONDS=_env_int("DECISION_SECONDS", 60),
-            MAX_SILENCE_SECONDS=_env_int("MAX_SILENCE_SECONDS", 180),
-            ERROR_BURST_THRESHOLD=_env_int("ERROR_BURST_THRESHOLD", 3),
-            ALERT_EMAIL=_env_str("ALERT_EMAIL"),
-            SMTP_HOST=_env_str("SMTP_HOST"),
-            SMTP_PORT=_env_int("SMTP_PORT", 587),
-            SMTP_USER=_env_str("SMTP_USER"),
-            SMTP_PASS=_env_str("SMTP_PASS"),
-            OANDA_API_KEY=_env_str("OANDA_API_KEY"),
-            OANDA_ACCOUNT_ID=_env_str("OANDA_ACCOUNT_ID"),
-            INSTRUMENT=_env_str("INSTRUMENT", "EUR_USD"),
-            ORDER_SIZE=_env_float("ORDER_SIZE", 1000.0),
-            STRAT_EMA_FAST=_env_int("STRAT_EMA_FAST", 10),
-            STRAT_EMA_SLOW=_env_int("STRAT_EMA_SLOW", 20),
-            STRAT_RSI_LEN=_env_int("STRAT_RSI_LEN", 14),
-            STRAT_RSI_BUY=_env_int("STRAT_RSI_BUY", 55),
-            STRAT_RSI_SELL=_env_int("STRAT_RSI_SELL", 45),
-            STRAT_TIMEFRAME=_env_str("STRAT_TIMEFRAME", "M5"),
-            STRAT_COOLDOWN_BARS=_env_int("STRAT_COOLDOWN_BARS", 2),
-            ATR_LEN=_env_int("ATR_LEN", 14),
-            MIN_ATR=_env_float("MIN_ATR", 0.00005),
-            RISK_PCT=_env_float("RISK_PCT", 0.01),
-            SL_R=_env_float("SL_R", 1.0),
-            TP_R=_env_float("TP_R", 1.5),
-            MAX_DD_DAY=_env_float("MAX_DD_DAY", 0.05),
-            MAX_RISK_PER_TRADE=_env_float("MAX_RISK_PER_TRADE", 0.02),
-        )
+    # Risk
+    RISK_PCT: float = float(os.getenv("RISK_PCT", "0.01"))
+    SL_R: float = float(os.getenv("SL_R", "1.0"))
+    TP_R: float = float(os.getenv("TP_R", "1.5"))
+    MAX_DD_DAY: float = float(os.getenv("MAX_DD_DAY", "0.05"))
 
-
-settings = Settings.load()
+settings = Settings()
 
 
 
