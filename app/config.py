@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     MAX_RISK_PER_TRADE: float = float(
         os.getenv("MAX_RISK_PER_TRADE", "0.02")
     )
-    MODE: str = os.getenv("MODE", "demo")
 
 
 settings = Settings()
