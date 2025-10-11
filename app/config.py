@@ -13,5 +13,7 @@ class Settings(BaseSettings):
         os.getenv("MAX_RISK_PER_TRADE", "0.02")
     )
 
+    # Trading parameters
+    MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
 
 settings = Settings()
