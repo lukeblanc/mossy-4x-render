@@ -1,6 +1,33 @@
 import os
-from pydantic import BaseModel
 from typing import Optional
+
+from pydantic import BaseModel
+
+
+def _env_str(key: str, default: Optional[str] = None) -> Optional[str]:
+    value = os.getenv(key)
+    return value if value is not None else default
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
 
 class Settings(BaseModel):
     # Core
