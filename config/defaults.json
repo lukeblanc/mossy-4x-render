@@ -3,8 +3,8 @@
   "decision_seconds": 60,
   "timeframe": "M5",
   "candles_to_fetch": 200,
-  "order_size": 1000,
-  "account_balance": 10000,
+  "order_size": 7500,
+  "account_balance": 1500,
   "ema_fast": 10,
   "ema_slow": 20,
   "rsi_length": 14,
@@ -20,9 +20,32 @@
     "XAU_USD"
   ],
   "max_open_trades": 1,
-  "risk_per_trade": 0.0025,
-  "cooldown_minutes": 45,
-  "risk": {
+  "risk_per_trade": 0.08,
+  "cooldown_minutes": 2,
+  "risk": {"weekly_profit_target": 400.0,
+"no_giveback_below_target": true,
+"allow_trading_above_target": true,
+"equity_floor": 1000.0,
+"risk_per_trade_pct": 0.08,
+"max_concurrent_positions": 1,
+"cooldown_minutes": 2,
+"daily_loss_cap_pct": 0.15,
+"weekly_loss_cap_pct": 0.30,
+"atr_stop_mult": 1.5,
+"atr_period": 14,
+"spread_pips_limit": {
+  "EUR_USD": 1.5,
+  "AUD_USD": 1.8,
+  "GBP_USD": 2.0,
+  "USD_JPY": 2.0,
+  "XAU_USD": 5.0
+},
+"default_spread_pips_limit": 2.5,
+"rollover_quiet_awst": {
+  "start": "04:55",
+  "end": "05:05"
+}
+
     "weekly_profit_target": 250.0,
     "no_giveback_below_target": true,
     "allow_trading_above_target": true,
