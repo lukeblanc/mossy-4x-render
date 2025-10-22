@@ -36,6 +36,13 @@ class ProfitProtection:
         closed_instruments: List[str] = []
 
         for trade in open_trades:
+            label: str
+            if isinstance(trade, dict):
+                label = str(trade.get("instrument") or "<unknown>")
+            else:
+                label = str(trade)
+            print(f"[CHECK-DEBUG] Checking {label}", flush=True)
+
             instrument = self._instrument_from_trade(trade)
             if not instrument:
                 continue
