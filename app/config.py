@@ -70,11 +70,11 @@ class Settings(BaseSettings):
         description="Granularity for fetched candles (OANDA notation).",
     )
     STRAT_EMA_FAST: int = Field(
-        10,
+        12,
         description="Fast EMA lookback length for the crossover strategy.",
     )
     STRAT_EMA_SLOW: int = Field(
-        20,
+        26,
         description="Slow EMA lookback length for the crossover strategy.",
     )
     STRAT_RSI_LEN: int = Field(
@@ -82,12 +82,16 @@ class Settings(BaseSettings):
         description="RSI lookback length.",
     )
     STRAT_RSI_BUY: float = Field(
-        55.0,
+        52.0,
         description="RSI threshold required to issue a BUY signal.",
     )
     STRAT_RSI_SELL: float = Field(
-        45.0,
+        48.0,
         description="RSI threshold required to issue a SELL signal.",
+    )
+    ADX_FILTER: float = Field(
+        20.0,
+        description="Minimum ADX value required before enabling trade signals.",
     )
     ATR_LEN: int = Field(
         14,

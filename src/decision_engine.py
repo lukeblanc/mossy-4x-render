@@ -337,8 +337,8 @@ class DecisionEngine:
         highs = [c["h"] for c in candles]
         lows = [c["l"] for c in candles]
 
-        ema_fast_len = int(self.config.get("ema_fast", 10))
-        ema_slow_len = int(self.config.get("ema_slow", 20))
+        ema_fast_len = int(self.config.get("ema_fast", 12))
+        ema_slow_len = int(self.config.get("ema_slow", 26))
         rsi_len = int(self.config.get("rsi_length", 14))
         atr_len = int(self.config.get("atr_length", 14))
 
@@ -370,8 +370,8 @@ class DecisionEngine:
         if atr_val < min_atr:
             return "HOLD", "low-atr"
 
-        rsi_buy = float(self.config.get("rsi_buy", 55))
-        rsi_sell = float(self.config.get("rsi_sell", 45))
+        rsi_buy = float(self.config.get("rsi_buy", 52))
+        rsi_sell = float(self.config.get("rsi_sell", 48))
 
         if ema_fast > ema_slow and rsi_val >= rsi_buy:
             return "BUY", "bullish"
