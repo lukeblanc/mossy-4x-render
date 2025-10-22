@@ -32,7 +32,7 @@
 "cooldown_minutes": 2,
 "daily_loss_cap_pct": 0.15,
 "weekly_loss_cap_pct": 0.30,
-"atr_stop_mult": 1.5,
+"atr_stop_mult": 1.8,
 "atr_period": 14,
 "spread_pips_limit": {
   "EUR_USD": 1.5,
@@ -56,7 +56,7 @@
     "cooldown_minutes": 45,
     "daily_loss_cap_pct": 0.01,
     "weekly_loss_cap_pct": 0.03,
-    "atr_stop_mult": 1.5,
+    "atr_stop_mult": 1.8,
     "atr_period": 14,
     "spread_pips_limit": {
       "EUR_USD": 1.5,
