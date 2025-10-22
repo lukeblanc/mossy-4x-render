@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from typing import Dict
+from typing import Dict, Optional
 
 from app.config import settings
 
@@ -143,6 +143,81 @@ class Broker:
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
         return []
+
+    def get_unrealized_profit(self, instrument: str) -> Optional[float]:
+        """Return the unrealized P/L for the given instrument in account currency."""
+        if not instrument:
+            return None
+        if self.mode == "simulation" or not (self.key and self.account):
+            return 0.0
+        try:
+            with self._client() as client:
+                resp = client.get(
+                    f"/v3/accounts/{self.account}/positions/{instrument}"
+                )
+                if resp.status_code != 200:
+                    return 0.0
+                position = resp.json().get("position", {}) or {}
+                unrealized = position.get("unrealizedPL")
+                if unrealized is not None:
+                    try:
+                        return float(unrealized)
+                    except (TypeError, ValueError):
+                        return 0.0
+                total = 0.0
+                found = False
+                for side in ("long", "short"):
+                    side_pl = (position.get(side) or {}).get("unrealizedPL")
+                    try:
+                        total += float(side_pl)
+                        found = True
+                    except (TypeError, ValueError):
+                        continue
+                return total if found else 0.0
+        except Exception as exc:
+            print(
+                f"[OANDA] Exception fetching unrealized P/L for {instrument}: {exc}",
+                flush=True,
+            )
+            return 0.0
+
+    def close_position(self, instrument: str) -> Dict:
+        """Close any open position for the given instrument."""
+        if not instrument:
+            return {"status": "ERROR", "reason": "invalid-instrument"}
+        if self.mode == "simulation":
+            print(f"[BROKER] SIMULATION close position {instrument}", flush=True)
+            return {"status": "SIMULATED"}
+        if not (self.key and self.account):
+            print(
+                f"[BROKER] {self.mode.upper()} close failed: missing credentials.",
+                flush=True,
+            )
+            return {"status": "ERROR", "reason": "missing-creds"}
+        payload: Dict[str, str] = {"longUnits": "ALL", "shortUnits": "ALL"}
+        try:
+            with self._client() as client:
+                resp = client.put(
+                    f"/v3/accounts/{self.account}/positions/{instrument}/close",
+                    json=payload,
+                )
+                if resp.status_code in (200, 201):
+                    print(f"[OANDA] Closed position {instrument}", flush=True)
+                    return {"status": "CLOSED", "response": resp.json()}
+                print(
+                    f"[OANDA] Failed to close {instrument} status={resp.status_code} body={resp.text}",
+                    flush=True,
+                )
+                return {
+                    "status": "ERROR",
+                    "code": resp.status_code,
+                    "text": resp.text,
+                }
+        except Exception as exc:
+            print(
+                f"[OANDA] Exception closing position {instrument}: {exc}", flush=True
+            )
+            return {"status": "ERROR", "error": str(exc)}
 
     def account_equity(self) -> float:
         if not (self.key and self.account):

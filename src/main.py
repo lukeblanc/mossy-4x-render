@@ -13,14 +13,21 @@ from app.broker import Broker
 from app.health import watchdog
 from src.decision_engine import DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
+from src.profit_protection import ProfitProtection
 from src import position_sizer
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        print(f"[CONFIG] Invalid JSON at {path}; using empty config", flush=True)
+        return {}
 
 
 config = load_config()
@@ -28,6 +35,7 @@ broker = Broker()
 engine = DecisionEngine(config)
 risk_mode = os.getenv("MODE", config.get("mode", "paper")).lower()
 risk = RiskManager(config.get("risk", {}), mode=risk_mode)
+profit_guard = ProfitProtection(broker)
 
 
 def _startup_checks() -> None:
@@ -100,6 +108,15 @@ async def decision_cycle() -> None:
         return
     else:
         open_trades = _open_trades_state()
+        # --- Profit-protection rule ($3 trigger / $0.50 trail) ---
+        closed_by_trail = profit_guard.process_open_trades(open_trades)
+        if closed_by_trail:
+            # Remove locally-tracked trades that were closed by the trailing rule
+            open_trades = [
+                trade
+                for trade in open_trades
+                if trade.get("instrument") not in closed_by_trail
+            ]
         for evaluation in evaluations:
             if not _should_place_trade(open_trades, evaluation):
                 continue
