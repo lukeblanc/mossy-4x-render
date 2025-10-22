@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 AWST = ZoneInfo("Australia/Perth")
 
+DEFAULT_ATR_STOP_MULT = 1.8
+
 
 def _state_path() -> Path:
     root = os.getenv("MOSSY_STATE_PATH")
