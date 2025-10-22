@@ -50,6 +50,10 @@ class ProfitProtection:
                 self._high_water[instrument] = profit
                 high_water = profit
 
+            print(
+                f"[TRAIL-DEBUG] profit={profit:.2f} high_water={high_water:.2f}",
+                flush=True,
+            )
             if (
                 high_water >= self.trigger
                 and profit <= high_water - self.trail
