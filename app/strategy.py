@@ -1,12 +1,40 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from typing import Dict, List, Tuple
+
 import httpx
-from typing import List, Dict, Tuple
 
 from app.config import settings
 
 # Signal type alias
 Signal = str
+
+
+ASIA_ADX_THRESHOLD = 25.0
+ASIA_SIZE_MULTIPLIER = 0.5
+
+
+def _current_session(now_utc: datetime) -> str:
+    """Return the trading session label based on the UTC hour."""
+
+    hour = now_utc.hour
+    if 12 <= hour < 21:
+        return "new_york"
+    if 7 <= hour < 12:
+        return "london"
+    return "asia"
+
+
+def _session_gate(now_utc: datetime, adx_value: float) -> Tuple[bool, float, str]:
+    """Determine if entries are allowed for the active session and size multiplier."""
+
+    session = _current_session(now_utc)
+    if session == "asia":
+        if adx_value >= ASIA_ADX_THRESHOLD:
+            return True, ASIA_SIZE_MULTIPLIER, session
+        return False, 0.0, session
+    return True, 1.0, session
 
 
 def _fetch_candles(count: int = 200) -> List[Dict]:
@@ -108,6 +136,66 @@ def _atr(highs: List[float], lows: List[float], closes: List[float], length: int
         trs.append(tr)
     return sum(trs) / length
 
+
+def _adx(highs: List[float], lows: List[float], closes: List[float], length: int) -> float:
+    """Compute the Average Directional Index using Wilder's smoothing."""
+
+    if length <= 0 or len(highs) < length + 1:
+        return 0.0
+
+    true_ranges: List[float] = []
+    plus_dm: List[float] = []
+    minus_dm: List[float] = []
+
+    for i in range(1, len(highs)):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus = up_move if up_move > down_move and up_move > 0 else 0.0
+        minus = down_move if down_move > up_move and down_move > 0 else 0.0
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        true_ranges.append(tr)
+        plus_dm.append(plus)
+        minus_dm.append(minus)
+
+    if len(true_ranges) < length:
+        return 0.0
+
+    tr_smooth = sum(true_ranges[:length])
+    plus_dm_smooth = sum(plus_dm[:length])
+    minus_dm_smooth = sum(minus_dm[:length])
+
+    def _calc_dx(tr_val: float, plus_val: float, minus_val: float) -> float:
+        if tr_val <= 0:
+            return 0.0
+        plus_di = 100.0 * plus_val / tr_val
+        minus_di = 100.0 * minus_val / tr_val
+        denom = plus_di + minus_di
+        if denom <= 0:
+            return 0.0
+        return 100.0 * abs(plus_di - minus_di) / denom
+
+    dx_values: List[float] = []
+    dx_values.append(_calc_dx(tr_smooth, plus_dm_smooth, minus_dm_smooth))
+
+    for i in range(length, len(true_ranges)):
+        tr_smooth = tr_smooth - (tr_smooth / length) + true_ranges[i]
+        plus_dm_smooth = plus_dm_smooth - (plus_dm_smooth / length) + plus_dm[i]
+        minus_dm_smooth = minus_dm_smooth - (minus_dm_smooth / length) + minus_dm[i]
+        dx_values.append(_calc_dx(tr_smooth, plus_dm_smooth, minus_dm_smooth))
+
+    if not dx_values:
+        return 0.0
+
+    initial_period = min(length, len(dx_values))
+    adx = sum(dx_values[:initial_period]) / initial_period
+    for dx in dx_values[initial_period:]:
+        adx = ((adx * (length - 1)) + dx) / length
+    return adx
+
 # Cooldown state: number of bars remaining before new trades are allowed
 _last_signal_bars_remaining = 0
 
@@ -129,8 +217,9 @@ def decide() -> Tuple[Signal, str, Dict]:
     slow = settings.STRAT_EMA_SLOW
     rsi_len = settings.STRAT_RSI_LEN
     atr_len = settings.ATR_LEN
+    adx_len = atr_len
     # Need enough candles for slow EMA and indicators
-    min_bars = max(fast, slow, rsi_len, atr_len) + 2
+    min_bars = max(fast, slow, rsi_len, atr_len, adx_len) + 2
     if not candles or len(candles) < min_bars:
         return "HOLD", "not-enough-data", {}
 
@@ -144,13 +233,22 @@ def decide() -> Tuple[Signal, str, Dict]:
     ema_slow_prev, ema_slow_curr = ema_slow[-2], ema_slow[-1]
     rsi_val = _rsi(closes, rsi_len)
     atr_val = _atr(highs, lows, closes, atr_len)
+    adx_val = _adx(highs, lows, closes, adx_len)
 
+    now_utc = datetime.now(timezone.utc)
+    allowed, size_mult, session = _session_gate(now_utc, adx_val)
     diagnostics = {
         "ema_fast": ema_fast_curr,
         "ema_slow": ema_slow_curr,
         "rsi": rsi_val,
         "atr": atr_val,
+        "adx": adx_val,
+        "session": session,
+        "size_multiplier": size_mult,
     }
+
+    if not allowed:
+        return "HOLD", "asia-low-adx", diagnostics
 
     # Crossover detection
     cross_up = ema_fast_prev <= ema_slow_prev and ema_fast_curr > ema_slow_curr
