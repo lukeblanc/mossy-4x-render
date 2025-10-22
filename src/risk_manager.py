@@ -129,7 +129,7 @@ class RiskManager:
         self.weekly_loss_cap_pct = float(
             self.config.get("weekly_loss_cap_pct", 0.03)
         )
-        self.atr_stop_mult = float(self.config.get("atr_stop_mult", 1.5))
+        self.atr_stop_mult = float(self.config.get("atr_stop_mult", 1.8))
         self.spread_pips_limit: Dict[str, float] = dict(
             self.config.get("spread_pips_limit", {}) or {}
         )
