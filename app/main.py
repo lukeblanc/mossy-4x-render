@@ -33,6 +33,13 @@ async def decision_tick():
         return
     # update last decision timestamp
     watchdog.last_decision_ts = datetime.now(timezone.utc)
+    diag = diag or {}
+    size_multiplier = float(diag.get("size_multiplier", 1.0))
+    size_multiplier = max(size_multiplier, 0.0)
+    computed_size = 0
+    if size_multiplier > 0:
+        computed_size = max(1, int(settings.ORDER_SIZE * size_multiplier))
+
     log = {
         "ts": ts_local.isoformat(),
         "instrument": settings.INSTRUMENT,
@@ -40,14 +47,23 @@ async def decision_tick():
         "ema_slow": diag.get("ema_slow"),
         "rsi": diag.get("rsi"),
         "atr": diag.get("atr"),
+        "adx": diag.get("adx"),
+        "session": diag.get("session"),
+        "size_multiplier": size_multiplier,
         "signal": signal,
         "reason": reason,
         "mode": settings.MODE,
-        "size": settings.ORDER_SIZE,
+        "size": computed_size,
     }
     print(f"[DECISION] {log}", flush=True)
     if signal in ("BUY", "SELL"):
-        broker.place_order(settings.INSTRUMENT, signal, settings.ORDER_SIZE)
+        if computed_size <= 0:
+            print(
+                f"[BROKER] Skipping order {signal} for {settings.INSTRUMENT} due to zero size",
+                flush=True,
+            )
+            return
+        broker.place_order(settings.INSTRUMENT, signal, computed_size)
 
 async def runner():
     """Main runner scheduling heartbeat and decision tasks and running watchdog."""
