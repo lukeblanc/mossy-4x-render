@@ -153,3 +153,24 @@ def test_rollover_preserves_realized_pl_when_equity_missing(state_dir):
 
     assert manager.state.day_start_equity == pytest.approx(10_100.0)
     assert manager.state.daily_realized_pl == pytest.approx(0.0)
+
+
+def test_default_atr_stop_multiplier_is_1_8(state_dir):
+    manager = RiskManager({}, mode="paper")
+
+    assert manager.atr_stop_mult == pytest.approx(1.8)
+    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.018)
+
+
+def test_atr_stop_multiplier_clamps_high_values(state_dir):
+    manager = RiskManager({"atr_stop_mult": 2.75}, mode="paper")
+
+    assert manager.atr_stop_mult == pytest.approx(1.8)
+    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.018)
+
+
+def test_atr_stop_multiplier_respects_lower_values(state_dir):
+    manager = RiskManager({"atr_stop_mult": 1.2}, mode="paper")
+
+    assert manager.atr_stop_mult == pytest.approx(1.2)
+    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.012)

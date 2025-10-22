@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 AWST = ZoneInfo("Australia/Perth")
 
+DEFAULT_ATR_STOP_MULT = 1.8
+
 
 def _state_path() -> Path:
     root = os.getenv("MOSSY_STATE_PATH")
@@ -129,7 +131,18 @@ class RiskManager:
         self.weekly_loss_cap_pct = float(
             self.config.get("weekly_loss_cap_pct", 0.03)
         )
-        self.atr_stop_mult = float(self.config.get("atr_stop_mult", 1.5))
+
+        configured_atr_mult = self.config.get("atr_stop_mult")
+        if configured_atr_mult is None:
+            atr_mult = DEFAULT_ATR_STOP_MULT
+        else:
+            try:
+                atr_mult = float(configured_atr_mult)
+            except (TypeError, ValueError):
+                atr_mult = DEFAULT_ATR_STOP_MULT
+        if atr_mult <= 0.0:
+            atr_mult = DEFAULT_ATR_STOP_MULT
+        self.atr_stop_mult = min(atr_mult, DEFAULT_ATR_STOP_MULT)
         self.spread_pips_limit: Dict[str, float] = dict(
             self.config.get("spread_pips_limit", {}) or {}
         )
