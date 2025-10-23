@@ -34,7 +34,7 @@ services:
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
 
- - type: cronJob          # ← 2 spaces before the dash, camel-case cronJob
+ - type: cronJob          
    name: mcp-optimiser
    env: docker
    plan: starter
