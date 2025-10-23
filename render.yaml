@@ -34,12 +34,12 @@ services:
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
 
-   - type: cron_job
-    name: mcp-optimiser
-    env: docker
-    plan: starter
-    dockerfilePath: mcp/Dockerfile
-    command: >
+ - type: cronJob          # ← 2 spaces before the dash, camel-case cronJob
+   name: mcp-optimiser
+   env: docker
+   plan: starter
+   dockerfilePath: mcp/Dockerfile
+   command: >
       python optimiser.py && python patcher.py
     schedule: "0 1 * * *"
     envVars:
@@ -49,3 +49,5 @@ services:
         sync: false
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
+
+
