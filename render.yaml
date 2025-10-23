@@ -34,7 +34,8 @@ services:
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
 
-  - type: cron               # ← exactly “cron”
+  
+  - type: cron
     name: mcp-optimiser
     env: docker
     plan: starter
@@ -49,7 +50,6 @@ services:
         sync: false
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
-
 
         
   
