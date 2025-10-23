@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+optuna
+pandas
+requests
+pynacl
+python-dotenv

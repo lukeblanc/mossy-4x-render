@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: mcp-web
+    env: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    startCommand: uvicorn app:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: MCP_API_KEY
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: GH_PAT
+        sync: false
+      - key: RENDER_DEPLOY_HOOK_URL
+        sync: false
+      - key: MAX_DRAWDOWN_PCT
+        sync: false
+      - key: MIN_WINRATE
+        sync: false
+  - type: worker
+    name: mcp-optimiser
+    env: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    startCommand: python optimiser.py && python patcher.py
+    schedule: "0 1 * * *"
+    envVarsFrom:
+      - type: service
+        name: mcp-web
