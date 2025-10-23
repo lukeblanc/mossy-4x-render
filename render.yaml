@@ -19,3 +19,28 @@ services:
         sync: false
       - key: OANDA_ACCOUNT_ID
         sync: false
+# ---------- MCP SERVICES ----------
+  - type: webservice
+    name: mcp-web
+    env: docker
+    plan: free
+    dockerfilePath: mcp/Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: MCP_API_KEY
+        sync: false
+      - key: GH_PAT
+        sync: false
+      - key: RENDER_DEPLOY_HOOK_URL
+        sync: false
+
+  - type: worker
+    name: mcp-optimiser
+    env: docker
+    plan: starter
+    dockerfilePath: mcp/Dockerfile
+    startCommand: >
+      python optimiser.py && python patcher.py
+    schedule: "0 1 * * *"
+    envVarsFrom:
+      - serviceName: mcp-web
