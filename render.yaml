@@ -20,7 +20,7 @@ services:
       - key: OANDA_ACCOUNT_ID
         sync: false
 # ---------- MCP SERVICES ----------
-  - type: webservice
+  - type: web
     name: mcp-web
     env: docker
     plan: free
