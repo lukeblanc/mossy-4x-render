@@ -42,5 +42,5 @@ services:
     startCommand: >
       python optimiser.py && python patcher.py
     schedule: "0 1 * * *"
-    envVarsFrom:
+    envVars:
       - serviceName: mcp-web
