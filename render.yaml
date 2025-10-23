@@ -34,7 +34,7 @@ services:
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
 
-  - type: worker
+  - type: cron_job
     name: mcp-optimiser
     env: docker
     plan: starter
