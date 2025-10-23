@@ -39,8 +39,13 @@ services:
     env: docker
     plan: starter
     dockerfilePath: mcp/Dockerfile
-    startCommand: >
+    Command: >
       python optimiser.py && python patcher.py
     schedule: "0 1 * * *"
     envVars:
       - serviceName: mcp-web
+ sync: false
+      - key: GH_PAT
+        sync: false
+      - key: RENDER_DEPLOY_HOOK_URL
+        sync: false
