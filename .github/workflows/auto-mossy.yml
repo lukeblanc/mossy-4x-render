@@ -1,0 +1,55 @@
+name: Auto Mossy Nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  auto-mossy:
+    runs-on: ubuntu-latest
+    env:
+      RENDER_API_TOKEN: ${{ secrets.RENDER_API_TOKEN }}
+      MCP_API_KEY: ${{ secrets.MCP_API_KEY }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r mcp/requirements.txt
+
+      - name: Run nightly optimiser
+        run: |
+          python -m mcp.optimiser \
+            --trades-db data/trades.db \
+            --max-drawdown 25 \
+            --min-winrate 0.45 \
+            --trials 32
+
+      - name: Trigger Render redeploy
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          hook_url = os.environ.get('RENDER_DEPLOY_HOOK_URL')
+          if not hook_url:
+              raise SystemExit('RENDER_DEPLOY_HOOK_URL secret is not configured')
+
+          response = requests.post(hook_url, timeout=30)
+          response.raise_for_status()
+          print('Redeploy triggered successfully')
+          PY
+
+      - name: Success notice
+        run: echo "✅ Nightly auto-tune completed and redeploy triggered."

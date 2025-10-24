@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict
@@ -98,3 +100,44 @@ def run_optimisation(
     BEST_PARAMS_FILE.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     return result
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Run Mossy optimiser on the latest trade logs.')
+    parser.add_argument('--trades-db', default=os.getenv('MOSSY_TRADES_DB', 'data/trades.db'))
+    parser.add_argument('--max-drawdown', type=float, default=_env_float('MOSSY_MAX_DRAWDOWN', 25.0))
+    parser.add_argument('--min-winrate', type=float, default=_env_float('MOSSY_MIN_WINRATE', 0.45))
+    parser.add_argument('--trials', type=int, default=_env_int('MOSSY_OPTIMISER_TRIALS', 25))
+
+    args = parser.parse_args()
+
+    try:
+        result = run_optimisation(Path(args.trades_db), args.max_drawdown, args.min_winrate, n_trials=args.trials)
+    except Exception as exc:  # noqa: BLE001 - surface optimisation errors for CI visibility
+        raise SystemExit(f'Optimisation failed: {exc}') from exc
+
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == '__main__':
+    main()
+
