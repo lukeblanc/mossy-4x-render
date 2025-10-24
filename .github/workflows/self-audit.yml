@@ -1,4 +1,5 @@
-name: Mossy 4X Self-Audit
+name: self-audit.disabled
+
 
 on:
   workflow_dispatch: # manual trigger
