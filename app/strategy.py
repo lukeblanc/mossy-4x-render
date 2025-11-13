@@ -14,6 +14,11 @@ Signal = str
 ASIA_ADX_THRESHOLD = 25.0
 ASIA_SIZE_MULTIPLIER = 0.5
 
+# Trend-following thresholds
+MIN_TREND_ADX = 15.0
+RSI_LONG_THRESHOLD = 55.0
+RSI_SHORT_THRESHOLD = 45.0
+
 
 def _current_session(now_utc: datetime) -> str:
     """Return the trading session label based on the UTC hour."""
@@ -35,6 +40,37 @@ def _session_gate(now_utc: datetime, adx_value: float) -> Tuple[bool, float, str
             return True, ASIA_SIZE_MULTIPLIER, session
         return False, 0.0, session
     return True, 1.0, session
+
+
+def decide_signal(
+    ema_fast: float,
+    ema_slow: float,
+    rsi: float,
+    atr: float,
+    adx: float,
+    session: str,
+) -> Tuple[Signal, str]:
+    """Simple trend-following decision rule using EMA, RSI, and ADX filters."""
+
+    del atr  # ATR unused in the simplified logic but kept for signature symmetry
+    del session  # session not part of the simplified rules
+
+    signal: Signal = "HOLD"
+    reason = "no-signal"
+
+    if adx is not None and adx >= MIN_TREND_ADX:
+        if ema_fast > ema_slow and rsi is not None and rsi > RSI_LONG_THRESHOLD:
+            signal = "BUY"
+            reason = "trend-long"
+        elif ema_fast < ema_slow and rsi is not None and rsi < RSI_SHORT_THRESHOLD:
+            signal = "SELL"
+            reason = "trend-short"
+        else:
+            reason = "trend-but-no-rsi-confirmation"
+    else:
+        reason = "no-trend-adx-low"
+
+    return signal, reason
 
 
 def _fetch_candles(count: int = 200) -> List[Dict]:
@@ -229,8 +265,8 @@ def decide() -> Tuple[Signal, str, Dict]:
 
     ema_fast = _ema(closes, fast)
     ema_slow = _ema(closes, slow)
-    ema_fast_prev, ema_fast_curr = ema_fast[-2], ema_fast[-1]
-    ema_slow_prev, ema_slow_curr = ema_slow[-2], ema_slow[-1]
+    ema_fast_curr = ema_fast[-1]
+    ema_slow_curr = ema_slow[-1]
     rsi_val = _rsi(closes, rsi_len)
     atr_val = _atr(highs, lows, closes, atr_len)
     adx_val = _adx(highs, lows, closes, adx_len)
@@ -250,24 +286,16 @@ def decide() -> Tuple[Signal, str, Dict]:
     if not allowed:
         return "HOLD", "asia-low-adx", diagnostics
 
-    # Crossover detection
-    cross_up = ema_fast_prev <= ema_slow_prev and ema_fast_curr > ema_slow_curr
-    cross_down = ema_fast_prev >= ema_slow_prev and ema_fast_curr < ema_slow_curr
+    signal, reason = decide_signal(
+        ema_fast_curr,
+        ema_slow_curr,
+        rsi_val,
+        atr_val,
+        adx_val,
+        session,
+    )
 
-    # Evaluate buy/sell conditions
-    if (
-        cross_up
-        and rsi_val > settings.STRAT_RSI_BUY
-        and atr_val >= settings.MIN_ATR
-    ):
+    if signal in ("BUY", "SELL"):
         _last_signal_bars_remaining = settings.STRAT_COOLDOWN_BARS
-        return "BUY", "ema_up & rsi_high", diagnostics
-    elif (
-        cross_down
-        and rsi_val < settings.STRAT_RSI_SELL
-        and atr_val >= settings.MIN_ATR
-    ):
-        _last_signal_bars_remaining = settings.STRAT_COOLDOWN_BARS
-        return "SELL", "ema_down & rsi_low", diagnostics
 
-    return "HOLD", "no-signal", diagnostics
+    return signal, reason, diagnostics
