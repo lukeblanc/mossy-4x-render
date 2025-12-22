@@ -73,7 +73,7 @@ def test_cooldown_and_spread_limits(state_dir):
         mode="paper",
     )
     now = _utc(2024, 1, 1, 2, 0)
-    manager.register_entry(now)
+    manager.register_entry(now, "EUR_USD")
 
     ok, reason = manager.should_open(now + timedelta(minutes=30), 10_000.0, [], "EUR_USD", 0.5)
     assert ok is False

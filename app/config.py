@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,11 +17,16 @@ class Settings(BaseSettings):
     OANDA_API_KEY: str = Field(
         "",
         description="OANDA API key used for authenticated requests.",
+        validation_alias=AliasChoices("OANDA_API_KEY", "OANDA_API_TOKEN"),
     )
     OANDA_ACCOUNT_ID: str = Field(
         "",
         description="OANDA account identifier.",
         validation_alias=AliasChoices("OANDA_ACCOUNT_ID", "ACCOUNT_ID"),
+    )
+    OANDA_ENV: str = Field(
+        "practice",
+        description="Target OANDA environment: practice or live.",
     )
     BASE_URL: str = Field(
         "https://api-fxpractice.oanda.com/v3",
@@ -136,4 +143,3 @@ class Settings(BaseSettings):
     MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
 
 settings = Settings()
-

@@ -16,7 +16,7 @@ DEFAULT_ATR_STOP_MULT = 1.8
 
 def _state_path() -> Path:
     root = os.getenv("MOSSY_STATE_PATH")
-    base = Path(root) if root else Path("state")
+    base = Path(root) if root else Path("data")
     base.mkdir(parents=True, exist_ok=True)
     return base / "risk_state.json"
 
@@ -55,8 +55,13 @@ class RiskState:
     daily_realized_pl: float = 0.0
     weekly_realized_pl: float = 0.0
     last_entry_ts_utc: Optional[datetime] = None
+    last_entry_per_instrument: Dict[str, datetime] = field(default_factory=dict)
+    cooldown_until: Dict[str, datetime] = field(default_factory=dict)
+    peak_equity: Optional[float] = None
+    last_trades: list = field(default_factory=list)
     has_hit_weekly_target: bool = False
     live_halted_on_equity_floor: bool = False
+    max_drawdown_halt: bool = False
 
     def to_dict(self) -> Dict:
         return {
@@ -67,8 +72,13 @@ class RiskState:
             "daily_realized_pl": self.daily_realized_pl,
             "weekly_realized_pl": self.weekly_realized_pl,
             "last_entry_ts_utc": _iso(self.last_entry_ts_utc),
+            "last_entry_per_instrument": {k: _iso(v) for k, v in self.last_entry_per_instrument.items()},
+            "cooldown_until": {k: _iso(v) for k, v in self.cooldown_until.items()},
+            "peak_equity": self.peak_equity,
+            "last_trades": list(self.last_trades),
             "has_hit_weekly_target": self.has_hit_weekly_target,
             "live_halted_on_equity_floor": self.live_halted_on_equity_floor,
+            "max_drawdown_halt": self.max_drawdown_halt,
         }
 
     @classmethod
@@ -81,10 +91,15 @@ class RiskState:
             daily_realized_pl=float(data.get("daily_realized_pl", 0.0)),
             weekly_realized_pl=float(data.get("weekly_realized_pl", 0.0)),
             last_entry_ts_utc=_from_iso(data.get("last_entry_ts_utc")),
+            last_entry_per_instrument={k: _from_iso(v) for k, v in (data.get("last_entry_per_instrument") or {}).items()},
+            cooldown_until={k: _from_iso(v) for k, v in (data.get("cooldown_until") or {}).items()},
+            peak_equity=_sanitize_equity(data.get("peak_equity")),
+            last_trades=list(data.get("last_trades") or []),
             has_hit_weekly_target=bool(data.get("has_hit_weekly_target", False)),
             live_halted_on_equity_floor=bool(
                 data.get("live_halted_on_equity_floor", False)
             ),
+            max_drawdown_halt=bool(data.get("max_drawdown_halt", False)),
         )
 
 
@@ -103,10 +118,15 @@ class RiskManager:
     config: Dict
     mode: str = "paper"
     state: RiskState = field(default_factory=RiskState)
+    state_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         self.mode = (self.mode or "paper").lower()
-        self._state_file = _state_path()
+        if self.state_dir:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            self._state_file = (self.state_dir / "risk_state.json").resolve()
+        else:
+            self._state_file = _state_path()
         self._load_state()
         self.weekly_profit_target = float(
             self.config.get("weekly_profit_target", 250.0)
@@ -119,19 +139,21 @@ class RiskManager:
         )
         self.equity_floor = float(self.config.get("equity_floor", 1000.0))
         self.risk_per_trade_pct = float(
-            self.config.get("risk_per_trade_pct", 0.0025)
+            self.config.get("risk_per_trade_pct", 0.005)
         )
         self.max_concurrent_positions = int(
             self.config.get("max_concurrent_positions", 1)
         )
-        self.cooldown_minutes = int(self.config.get("cooldown_minutes", 45))
+        self.cooldown_candles = int(self.config.get("cooldown_candles", 9))
         self.daily_loss_cap_pct = float(
-            self.config.get("daily_loss_cap_pct", 0.01)
+            self.config.get("daily_loss_cap_pct", 0.02)
         )
         self.weekly_loss_cap_pct = float(
             self.config.get("weekly_loss_cap_pct", 0.03)
         )
-        self.atr_stop_mult = float(self.config.get("atr_stop_mult", 1.8))
+        atr_mult = float(self.config.get("atr_stop_mult", DEFAULT_ATR_STOP_MULT))
+        self.atr_stop_mult = min(atr_mult, DEFAULT_ATR_STOP_MULT)
+        self.tp_rr_multiple = float(self.config.get("tp_rr_multiple", 1.5))
         self.spread_pips_limit: Dict[str, float] = dict(
             self.config.get("spread_pips_limit", {}) or {}
         )
@@ -139,6 +161,8 @@ class RiskManager:
         self.rollover_quiet = self.config.get("rollover_quiet_awst", {}) or {}
         self.rollover_start = _parse_time(self.rollover_quiet.get("start"))
         self.rollover_end = _parse_time(self.rollover_quiet.get("end"))
+        self.timeframe = (self.config.get("timeframe") or "M5").upper()
+        self.max_drawdown_cap_pct = float(self.config.get("max_drawdown_cap_pct", 0.10))
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -171,6 +195,13 @@ class RiskManager:
         close_all_cb: Callable[[], None],
     ) -> None:
         self._rollover(now_utc, equity)
+        self._update_peak_equity(equity)
+        if self._breached_max_drawdown(equity):
+            self.state.max_drawdown_halt = True
+            self._save_state()
+
+        if self.state.max_drawdown_halt:
+            return
         if self.mode != "live":
             if self.state.live_halted_on_equity_floor:
                 self.state.live_halted_on_equity_floor = False
@@ -200,6 +231,7 @@ class RiskManager:
         spread_pips: Optional[float],
     ) -> Tuple[bool, str]:
         self._rollover(now_utc, equity)
+        self._update_peak_equity(equity)
 
         if self.mode == "live":
             if equity <= self.equity_floor:
@@ -231,13 +263,15 @@ class RiskManager:
         if self._breached_weekly_loss(equity):
             return False, "weekly-loss-cap"
 
+        if self.state.max_drawdown_halt:
+            return False, "max-drawdown"
+
         if self.max_concurrent_positions > 0 and len(open_positions) >= self.max_concurrent_positions:
             return False, "max-positions"
 
-        if self.cooldown_minutes > 0 and self.state.last_entry_ts_utc:
-            delta = now_utc - self.state.last_entry_ts_utc
-            if delta < timedelta(minutes=self.cooldown_minutes):
-                return False, "cooldown"
+        cooldown_end = self.state.cooldown_until.get(instrument)
+        if cooldown_end and now_utc < cooldown_end:
+            return False, "cooldown"
 
         if self._in_rollover_window(now_utc):
             return False, "rollover-window"
@@ -254,13 +288,22 @@ class RiskManager:
             return 0.0
         return max(0.0, atr_price_units * self.atr_stop_mult)
 
-    def register_entry(self, now_utc: datetime) -> None:
+    def register_entry(self, now_utc: datetime, instrument: str) -> None:
         self.state.last_entry_ts_utc = now_utc
+        self.state.last_entry_per_instrument[instrument] = now_utc
+        cooldown_minutes = self._cooldown_minutes()
+        if cooldown_minutes > 0:
+            self.state.cooldown_until[instrument] = now_utc + timedelta(minutes=cooldown_minutes)
         self._save_state()
 
     def register_exit(self, realized_pl: float) -> None:
         self.state.daily_realized_pl += float(realized_pl)
         self.state.weekly_realized_pl += float(realized_pl)
+        self.state.last_trades.append(
+            {"ts": datetime.now(timezone.utc).isoformat(), "pl": float(realized_pl)}
+        )
+        if len(self.state.last_trades) > 50:
+            self.state.last_trades = self.state.last_trades[-50:]
         self._save_state()
 
     # ------------------------------------------------------------------
@@ -336,6 +379,14 @@ class RiskManager:
         drawdown = self.state.week_start_equity - equity
         return drawdown >= self.state.week_start_equity * self.weekly_loss_cap_pct
 
+    def _breached_max_drawdown(self, equity: float) -> bool:
+        if self.max_drawdown_cap_pct <= 0:
+            return False
+        if self.state.peak_equity is None:
+            return False
+        drawdown = self.state.peak_equity - equity
+        return drawdown >= self.state.peak_equity * self.max_drawdown_cap_pct
+
     def _in_rollover_window(self, now_utc: datetime) -> bool:
         if not self.rollover_start or not self.rollover_end:
             return False
@@ -360,3 +411,39 @@ class RiskManager:
         except (TypeError, ValueError):
             return None
 
+    def _cooldown_minutes(self) -> int:
+        minutes = self._granularity_minutes(self.timeframe)
+        if minutes <= 0:
+            return 0
+        return max(0, int(self.cooldown_candles * minutes))
+
+    @staticmethod
+    def _granularity_minutes(timeframe: str) -> int:
+        tf = (timeframe or "").upper()
+        if tf.startswith("M"):
+            try:
+                return int(tf.replace("M", "", 1))
+            except ValueError:
+                return 0
+        if tf.startswith("H"):
+            try:
+                return int(tf.replace("H", "", 1)) * 60
+            except ValueError:
+                return 0
+        if tf.startswith("D"):
+            return 24 * 60
+        return 0
+
+    def tp_distance_from_atr(self, atr_price_units: Optional[float]) -> float:
+        sl = self.sl_distance_from_atr(atr_price_units)
+        if sl <= 0:
+            return 0.0
+        return sl * max(1.0, self.tp_rr_multiple)
+
+    def _update_peak_equity(self, equity: float) -> None:
+        valid = _sanitize_equity(equity)
+        if valid is None:
+            return
+        if self.state.peak_equity is None or valid > self.state.peak_equity:
+            self.state.peak_equity = valid
+            self._save_state()
