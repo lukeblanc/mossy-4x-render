@@ -5,10 +5,12 @@ services:
     plan: starter
     autoDeploy: true
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python -m app.main"
+    startCommand: "python -m src.main"
     envVars:
       - key: MODE
         value: demo
+      - key: OANDA_ENV
+        value: practice
       - key: TZ
         value: Australia/Perth
       - key: HEARTBEAT_SECONDS
@@ -17,6 +19,8 @@ services:
         value: "60"
       - key: OANDA_API_KEY
         sync: false
+      - key: INSTRUMENTS
+        value: "EUR_USD"
       - key: OANDA_ACCOUNT_ID
         sync: false
 # ---------- MCP SERVICES ----------
