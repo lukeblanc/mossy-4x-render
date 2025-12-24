@@ -20,6 +20,8 @@ class ProfitProtection:
         self.trigger = float(trigger)
         self.trail = float(trail)
         self._high_water: Dict[str, float] = {}
+        self._armed: Dict[str, bool] = {}
+        self._demo_mode = getattr(broker, "mode", "").lower() == "demo"
 
     def snapshot(self) -> Dict[str, float]:
         """Return a shallow copy of the current high-water marks (useful for tests)."""
@@ -53,21 +55,43 @@ class ProfitProtection:
                 continue
 
             high_water = self._high_water.get(instrument)
-            if high_water is None or profit > high_water:
-                self._high_water[instrument] = profit
-                high_water = profit
+            if self._demo_mode:
+                # Demo-only trailing: arm at $1.00, exit if profit falls to $0.50
+                if profit >= 1.0 and not self._armed.get(instrument):
+                    self._armed[instrument] = True
+                    self._high_water[instrument] = profit
+                    print(
+                        f"[TRAIL] armed at $1.00 for {instrument} (profit={profit:.2f})",
+                        flush=True,
+                    )
+                if self._armed.get(instrument):
+                    if high_water is None or profit > high_water:
+                        self._high_water[instrument] = profit
+                        high_water = profit
+                    if profit <= 0.50 and self._close_position(instrument, profit, high_water or profit):
+                        print(
+                            f"[TRAIL] exit triggered at $0.50 for {instrument} (profit={profit:.2f})",
+                            flush=True,
+                        )
+                        closed_instruments.append(instrument)
+                        self._armed.pop(instrument, None)
+                        self._high_water.pop(instrument, None)
+            else:
+                if high_water is None or profit > high_water:
+                    self._high_water[instrument] = profit
+                    high_water = profit
 
-            print(
-                f"[TRAIL-DEBUG] profit={profit:.2f} high_water={high_water:.2f}",
-                flush=True,
-            )
-            if (
-                high_water >= self.trigger
-                and profit <= high_water - self.trail
-                and self._close_position(instrument, profit, high_water)
-            ):
-                closed_instruments.append(instrument)
-                self._high_water.pop(instrument, None)
+                print(
+                    f"[TRAIL-DEBUG] profit={profit:.2f} high_water={high_water:.2f}",
+                    flush=True,
+                )
+                if (
+                    high_water >= self.trigger
+                    and profit <= high_water - self.trail
+                    and self._close_position(instrument, profit, high_water)
+                ):
+                    closed_instruments.append(instrument)
+                    self._high_water.pop(instrument, None)
 
         self._cleanup_stale(active_instruments)
         return closed_instruments
@@ -77,6 +101,7 @@ class ProfitProtection:
         stale = [inst for inst in self._high_water if inst not in active]
         for inst in stale:
             self._high_water.pop(inst, None)
+            self._armed.pop(inst, None)
 
     @staticmethod
     def _instrument_from_trade(trade: Dict) -> Optional[str]:
@@ -139,4 +164,3 @@ class ProfitProtection:
             flush=True,
         )
         return True
-
