@@ -147,7 +147,12 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                 return 0.0
             return atr * 1.5
 
-        def register_entry(self, now_utc):
+        def tp_distance_from_atr(self, atr):
+            if atr is None:
+                return 0.0
+            return atr * 3.0
+
+        def register_entry(self, now_utc, instrument: str):
             self.entries.append(now_utc)
 
         def register_exit(self, realized_pl: float) -> None:
@@ -185,6 +190,8 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
             units: int,
             *,
             sl_distance: float | None = None,
+            tp_distance: float | None = None,
+            entry_price: float | None = None,
         ) -> Dict[str, str]:
             self.calls.append(
                 {
@@ -192,6 +199,8 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                     "signal": signal,
                     "units": units,
                     "sl_distance": sl_distance,
+                    "tp_distance": tp_distance,
+                    "entry_price": entry_price,
                 }
             )
             return {"status": "SENT"}
@@ -233,6 +242,8 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                 "signal": "BUY",
                 "units": 100,
                 "sl_distance": expected_sl,
+                "tp_distance": dummy_risk.tp_distance_from_atr(0.01),
+                "entry_price": 1.2345,
             }
         ]
         assert dummy_risk.entries

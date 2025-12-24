@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
@@ -17,6 +18,8 @@ from src.profit_protection import ProfitProtection
 from src import position_sizer
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
@@ -30,11 +33,64 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
         return {}
 
 
+def _parse_instruments(value: str | List[str] | None) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip().upper() for v in value if str(v).strip()]
+    tokens = [tok.strip().upper() for tok in str(value).replace(";", ",").split(",")]
+    return [tok for tok in tokens if tok]
+
+
+def _granularity_minutes(timeframe: str) -> int:
+    tf = (timeframe or "").upper()
+    if tf.startswith("M"):
+        try:
+            return int(tf.replace("M", "", 1))
+        except ValueError:
+            return 0
+    if tf.startswith("H"):
+        try:
+            return int(tf.replace("H", "", 1)) * 60
+        except ValueError:
+            return 0
+    if tf.startswith("D"):
+        return 24 * 60
+    return 0
+
+
 config = load_config()
+env_instruments = os.getenv("INSTRUMENTS") or os.getenv("INSTRUMENT")
+resolved_instruments = _parse_instruments(env_instruments) or config.get("instruments") or ["EUR_USD"]
+config["instruments"] = resolved_instruments
+config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", config.get("max_open_trades", 2)))
+config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
+mode_env = os.getenv("MODE", config.get("mode", "paper")).lower()
+config["mode"] = "paper" if mode_env == "demo" else mode_env
+risk_tf_minutes = _granularity_minutes(config["timeframe"])
+risk_cooldown_candles = int(os.getenv("COOLDOWN_CANDLES", config.get("cooldown_candles", 9)))
+config["cooldown_candles"] = risk_cooldown_candles
+config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
+risk_config = config.get("risk", {}) or {}
+risk_config.setdefault("risk_per_trade_pct", float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005))))
+risk_config.setdefault("atr_stop_mult", float(os.getenv("ATR_STOP_MULT", risk_config.get("atr_stop_mult", 1.8))))
+risk_config.setdefault("tp_rr_multiple", float(os.getenv("TP_RR_MULTIPLE", risk_config.get("tp_rr_multiple", 1.5))))
+risk_config.setdefault("cooldown_candles", int(os.getenv("COOLDOWN_CANDLES", risk_config.get("cooldown_candles", 9))))
+risk_config.setdefault("max_concurrent_positions", int(os.getenv("MAX_CONCURRENT_POSITIONS", risk_config.get("max_concurrent_positions", 2))))
+risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02))))
+risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
+risk_config["timeframe"] = config["timeframe"]
+config["risk"] = risk_config
+
+# Abort if live is requested (demo/practice only)
+oanda_env = (os.getenv("OANDA_ENV") or "practice").lower()
+if oanda_env == "live" or config["mode"] == "live":
+    print("[STARTUP] Live mode is disabled for this deployment. Exiting.", flush=True)
+    sys.exit(1)
+
 broker = Broker()
 engine = DecisionEngine(config)
-risk_mode = os.getenv("MODE", config.get("mode", "paper")).lower()
-risk = RiskManager(config.get("risk", {}), mode=risk_mode)
+risk = RiskManager(config.get("risk", {}), mode=config["mode"], state_dir=DATA_DIR)
 profit_guard = ProfitProtection(broker)
 
 
@@ -85,8 +141,19 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool
 async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
+    equity = broker.account_equity()
+    open_count = len(_open_trades_state())
+    drawdown = None
+    if risk.state.peak_equity:
+        drawdown = risk.state.peak_equity - equity
+    dd_pct = None
+    if risk.state.peak_equity and risk.state.peak_equity > 0:
+        dd_pct = drawdown / risk.state.peak_equity if drawdown is not None else None
+    dd_pct_str = f"{(dd_pct * 100):.2f}" if dd_pct is not None else "n/a"
     print(
-        f"[HEARTBEAT] {ts_local} instruments={len(config.get('instruments', []))}",
+        f"[HEARTBEAT] {ts_local} instruments={len(config.get('instruments', []))} "
+        f"equity={equity:.2f} daily_pl={risk.state.daily_realized_pl:.2f} "
+        f"drawdown_pct={dd_pct_str} open_trades={open_count}",
         flush=True,
     )
 
@@ -144,6 +211,7 @@ async def decision_cycle() -> None:
 
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val)
+            tp_distance = risk.tp_distance_from_atr(atr_val)
             entry_price = diagnostics.get("close")
             units = position_sizer.units_for_risk(
                 equity,
@@ -163,11 +231,13 @@ async def decision_cycle() -> None:
                 evaluation.signal,
                 units,
                 sl_distance=sl_distance,
+                tp_distance=tp_distance,
+                entry_price=entry_price,
             )
             if result.get("status") == "SENT":
                 engine.mark_trade(evaluation.instrument)
                 open_trades.append({"instrument": evaluation.instrument})
-                risk.register_entry(now_utc)
+                risk.register_entry(now_utc, evaluation.instrument)
             else:
                 print(
                     f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"

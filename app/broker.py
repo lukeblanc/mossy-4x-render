@@ -11,12 +11,18 @@ LIVE = "https://api-fxtrade.oanda.com"
 
 class Broker:
     def __init__(self):
+        # Guard against accidental live usage
+        env_label = (getattr(settings, "OANDA_ENV", "practice") or "practice").lower()
         self.mode = (settings.MODE or "demo").lower()
+        if env_label == "live" or self.mode == "live":
+            print("[OANDA] Live trading is disabled in this deployment. Exiting.", flush=True)
+            raise SystemExit(1)
+
         self.account = settings.OANDA_ACCOUNT_ID
         self.key = settings.OANDA_API_KEY
-        if self.mode == "demo":
+        if env_label == "practice" or self.mode == "demo":
             self.base_url = PRACTICE
-        elif self.mode == "live":
+        elif env_label == "live" or self.mode == "live":
             self.base_url = LIVE
         else:
             self.base_url = PRACTICE
@@ -58,6 +64,8 @@ class Broker:
         units: float,
         *,
         sl_distance: float | None = None,
+        tp_distance: float | None = None,
+        entry_price: float | None = None,
     ) -> dict:
         side = signal.upper()
         if side not in ("BUY", "SELL"):
@@ -90,6 +98,18 @@ class Broker:
                 "timeInForce": "GTC",
                 "distance": f"{sl_distance:.5f}",
             }
+        if tp_distance is not None and tp_distance > 0 and entry_price is not None and entry_price > 0:
+            tp_price = entry_price + tp_distance if side == "BUY" else entry_price - tp_distance
+            if tp_price > 0:
+                order_payload["takeProfitOnFill"] = {
+                    "timeInForce": "GTC",
+                    "price": f"{tp_price:.5f}",
+                }
+        elif tp_distance is not None and tp_distance > 0:
+            print(
+                "[BROKER] Skipping take-profit because entry price is unavailable or invalid",
+                flush=True,
+            )
 
         payload = {"order": order_payload}
 
