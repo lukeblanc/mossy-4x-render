@@ -65,6 +65,7 @@ class Broker:
         *,
         sl_distance: float | None = None,
         tp_distance: float | None = None,
+        entry_price: float | None = None,
     ) -> dict:
         side = signal.upper()
         if side not in ("BUY", "SELL"):
@@ -97,11 +98,26 @@ class Broker:
                 "timeInForce": "GTC",
                 "distance": f"{sl_distance:.5f}",
             }
-        if tp_distance is not None and tp_distance > 0:
-            order_payload["takeProfitOnFill"] = {
-                "timeInForce": "GTC",
-                "distance": f"{tp_distance:.5f}",
-            }
+        if (
+            entry_price is not None
+            and tp_distance is not None
+            and tp_distance > 0
+        ):
+            try:
+                entry_val = float(entry_price)
+                tp_val = float(tp_distance)
+            except (TypeError, ValueError):
+                entry_val = None
+                tp_val = None
+            if entry_val is not None and tp_val is not None:
+                if side == "BUY":
+                    tp_price = entry_val + tp_val
+                else:
+                    tp_price = entry_val - tp_val
+                order_payload["takeProfitOnFill"] = {
+                    "timeInForce": "GTC",
+                    "price": f"{tp_price:.5f}",
+                }
 
         payload = {"order": order_payload}
 
