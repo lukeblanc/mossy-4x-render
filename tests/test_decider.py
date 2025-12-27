@@ -191,6 +191,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
             *,
             sl_distance: float | None = None,
             tp_distance: float | None = None,
+            entry_price: float | None = None,
         ) -> Dict[str, str]:
             self.calls.append(
                 {
@@ -199,6 +200,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                     "units": units,
                     "sl_distance": sl_distance,
                     "tp_distance": tp_distance,
+                    "entry_price": entry_price,
                 }
             )
             return {"status": "SENT"}
@@ -241,6 +243,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                 "units": 100,
                 "sl_distance": expected_sl,
                 "tp_distance": dummy_risk.tp_distance_from_atr(0.01),
+                "entry_price": 1.2345,
             }
         ]
         assert dummy_risk.entries

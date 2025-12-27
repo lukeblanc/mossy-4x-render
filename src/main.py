@@ -91,7 +91,16 @@ if oanda_env == "live" or config["mode"] == "live":
 broker = Broker()
 engine = DecisionEngine(config)
 risk = RiskManager(config.get("risk", {}), mode=config["mode"], state_dir=DATA_DIR)
-profit_guard = ProfitProtection(broker)
+
+
+def _profit_guard_for_mode(mode: str, broker: Broker) -> ProfitProtection:
+    label = (mode or "").lower()
+    if label == "demo":
+        return ProfitProtection(broker, trigger=1.0, trail=0.5)
+    return ProfitProtection(broker)
+
+
+profit_guard = _profit_guard_for_mode(mode_env, broker)
 
 
 def _startup_checks() -> None:
@@ -232,6 +241,7 @@ async def decision_cycle() -> None:
                 units,
                 sl_distance=sl_distance,
                 tp_distance=tp_distance,
+                entry_price=entry_price,
             )
             if result.get("status") == "SENT":
                 engine.mark_trade(evaluation.instrument)

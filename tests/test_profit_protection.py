@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.profit_protection import ProfitProtection
+from src import main as main_mod
 
 
 class DummyBroker:
@@ -53,3 +54,18 @@ def test_state_clears_when_positions_exit():
     # No open trades -> cleanup should remove the high-water mark
     guard.process_open_trades([])
     assert guard.snapshot() == {}
+
+
+def test_demo_trailing_thresholds():
+    broker = DummyBroker({})
+
+    demo_guard = main_mod._profit_guard_for_mode("demo", broker)
+    live_guard = main_mod._profit_guard_for_mode("live", broker)
+    paper_guard = main_mod._profit_guard_for_mode("paper", broker)
+
+    assert demo_guard.trigger == pytest.approx(1.0)
+    assert demo_guard.trail == pytest.approx(0.5)
+    assert live_guard.trigger == pytest.approx(3.0)
+    assert live_guard.trail == pytest.approx(0.5)
+    assert paper_guard.trigger == pytest.approx(3.0)
+    assert paper_guard.trail == pytest.approx(0.5)
