@@ -65,6 +65,7 @@ class Broker:
         *,
         sl_distance: float | None = None,
         tp_distance: float | None = None,
+        entry_price: float | None = None,
     ) -> dict:
         side = signal.upper()
         if side not in ("BUY", "SELL"):
@@ -97,11 +98,18 @@ class Broker:
                 "timeInForce": "GTC",
                 "distance": f"{sl_distance:.5f}",
             }
-        if tp_distance is not None and tp_distance > 0:
-            order_payload["takeProfitOnFill"] = {
-                "timeInForce": "GTC",
-                "distance": f"{tp_distance:.5f}",
-            }
+        if tp_distance is not None and tp_distance > 0 and entry_price is not None and entry_price > 0:
+            tp_price = entry_price + tp_distance if side == "BUY" else entry_price - tp_distance
+            if tp_price > 0:
+                order_payload["takeProfitOnFill"] = {
+                    "timeInForce": "GTC",
+                    "price": f"{tp_price:.5f}",
+                }
+        elif tp_distance is not None and tp_distance > 0:
+            print(
+                "[BROKER] Skipping take-profit because entry price is unavailable or invalid",
+                flush=True,
+            )
 
         payload = {"order": order_payload}
 
@@ -318,3 +326,19 @@ class Broker:
         if instrument.startswith("XAG"):
             return 0.01
         return 0.0001
+Extension
+Extension Embed
+
+
+
+Actions
+
+Your Business
+
+Settings
+
+Help
+Search Amazon
+
+United States
+Search Amazon
