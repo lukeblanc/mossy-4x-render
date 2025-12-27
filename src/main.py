@@ -15,6 +15,7 @@ from app.health import watchdog
 from src.decision_engine import DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
 from src.profit_protection import ProfitProtection
+from src import session_filter
 from src import position_sizer
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
@@ -220,6 +221,15 @@ async def decision_cycle() -> None:
             if not ok_to_open:
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to {reason}",
+                    flush=True,
+                )
+                continue
+
+            session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
+            if not session_filter.is_entry_session(now_utc, mode=session_mode):
+                ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
+                print(
+                    f"[SESSION] Entry blocked – outside trading session (UTC {ts})",
                     flush=True,
                 )
                 continue
