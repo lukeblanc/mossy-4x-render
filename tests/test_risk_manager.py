@@ -100,6 +100,52 @@ def test_daily_loss_cap_blocks_after_drawdown(state_dir):
     assert reason == "daily-loss-cap"
 
 
+def test_demo_profit_cap_allows_until_target(state_dir, capsys):
+    manager = RiskManager(
+        {"daily_profit_target_usd": 5.0},
+        mode="paper",
+        demo_mode=True,
+    )
+    now = _utc(2024, 2, 1, 0, 0)
+
+    ok, reason = manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+    first_log = capsys.readouterr().out
+    assert "UTC day start equity set to 1000.00" in first_log
+
+    ok, reason = manager.should_open(now + timedelta(hours=1), 1_004.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+
+
+def test_demo_profit_cap_blocks_and_resets_next_day(state_dir, capsys):
+    manager = RiskManager(
+        {"daily_profit_target_usd": 5.0},
+        mode="paper",
+        demo_mode=True,
+    )
+    now = _utc(2024, 2, 1, 0, 0)
+
+    manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    capsys.readouterr()
+
+    ok, reason = manager.should_open(now + timedelta(hours=1), 1_006.0, [], "EUR_USD", 0.2)
+    captured = capsys.readouterr().out
+    assert ok is False
+    assert reason == "daily-profit-cap"
+    assert "Daily profit target hit" in captured
+    assert manager.state.daily_profit_cap_hit is True
+
+    next_day = now + timedelta(days=1)
+    ok, reason = manager.should_open(next_day, 1_002.0, [], "EUR_USD", 0.2)
+    resumed = capsys.readouterr().out
+    assert ok is True
+    assert reason == "ok"
+    assert "UTC day start equity set to 1002.00" in resumed
+    assert manager.state.daily_profit_cap_hit is False
+
+
 def test_rollover_window_blocks(state_dir):
     manager = RiskManager(
         {

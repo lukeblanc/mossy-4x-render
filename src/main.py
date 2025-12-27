@@ -79,6 +79,7 @@ risk_config.setdefault("cooldown_candles", int(os.getenv("COOLDOWN_CANDLES", ris
 risk_config.setdefault("max_concurrent_positions", int(os.getenv("MAX_CONCURRENT_POSITIONS", risk_config.get("max_concurrent_positions", 2))))
 risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02))))
 risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
+risk_config.setdefault("daily_profit_target_usd", float(os.getenv("DAILY_PROFIT_TARGET_USD", risk_config.get("daily_profit_target_usd", 5.0))))
 risk_config["timeframe"] = config["timeframe"]
 config["risk"] = risk_config
 
@@ -90,7 +91,12 @@ if oanda_env == "live" or config["mode"] == "live":
 
 broker = Broker()
 engine = DecisionEngine(config)
-risk = RiskManager(config.get("risk", {}), mode=config["mode"], state_dir=DATA_DIR)
+risk = RiskManager(
+    config.get("risk", {}),
+    mode=config["mode"],
+    state_dir=DATA_DIR,
+    demo_mode=(mode_env == "demo"),
+)
 
 
 def _profit_guard_for_mode(mode: str, broker: Broker) -> ProfitProtection:
