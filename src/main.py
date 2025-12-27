@@ -225,7 +225,8 @@ async def decision_cycle() -> None:
                 )
                 continue
 
-            if not session_filter.is_entry_session(now_utc, mode=mode_env):
+            session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
+            if not session_filter.is_entry_session(now_utc, mode=session_mode):
                 ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
                 print(
                     f"[SESSION] Entry blocked – outside trading session (UTC {ts})",

@@ -373,6 +373,7 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
     dummy_broker = DummyBroker()
     dummy_risk = DummyRisk()
     calls = {"should_open": 0}
+    dummy_risk.demo_mode = True
     monkeypatch.setattr(main, "engine", dummy_engine)
     monkeypatch.setattr(main, "broker", dummy_broker)
     monkeypatch.setattr(main, "risk", dummy_risk)
@@ -405,6 +406,110 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
         assert dummy_broker.calls == []
         assert dummy_risk.entries == []
         assert calls["should_open"] == 1
+        assert watchdog.last_decision_ts > before
+    finally:
+        watchdog.last_decision_ts = original_ts
+
+
+def test_decision_cycle_allows_entries_inside_session(monkeypatch):
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+
+        def __init__(self) -> None:
+            self.entries: List[datetime] = []
+            self.demo_mode = True
+
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr):
+            return 0.01
+
+        def tp_distance_from_atr(self, atr):
+            return 0.02
+
+        def register_entry(self, now_utc, instrument: str):
+            self.entries.append(now_utc)
+
+        def register_exit(self, *args, **kwargs):
+            pass
+
+    class DummyEngine:
+        def __init__(self) -> None:
+            self.marked: List[str] = []
+            self.evaluations: int = 0
+
+        def evaluate_all(self) -> List[Evaluation]:
+            self.evaluations += 1
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={"atr": 0.01, "close": 1.2345},
+                    reason="trend",
+                    market_active=True,
+                )
+            ]
+
+        def mark_trade(self, instrument: str) -> None:
+            self.marked.append(instrument)
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, object]] = []
+
+        def place_order(
+            self,
+            instrument: str,
+            signal: str,
+            units: int,
+            *args,
+            **kwargs,
+        ) -> Dict[str, str]:
+            self.calls.append({"instrument": instrument, "signal": signal, "units": units})
+            return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+        def close_all_positions(self) -> None:
+            pass
+
+    dummy_engine = DummyEngine()
+    dummy_broker = DummyBroker()
+    dummy_risk = DummyRisk()
+    monkeypatch.setattr(main, "engine", dummy_engine)
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "risk", dummy_risk)
+    monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main, "mode_env", "demo")
+    monkeypatch.setattr(
+        main.position_sizer,
+        "units_for_risk",
+        lambda equity, entry_price, stop_distance, risk_pct: 100,
+    )
+
+    before = datetime.now(timezone.utc) - timedelta(hours=1)
+    original_ts = watchdog.last_decision_ts
+    watchdog.last_decision_ts = before
+
+    asyncio.run(main.decision_cycle())
+
+    try:
+        assert dummy_engine.evaluations == 1
+        assert dummy_engine.marked == ["EUR_USD"]
+        assert dummy_broker.calls == [
+            {"instrument": "EUR_USD", "signal": "BUY", "units": 100}
+        ]
+        assert dummy_risk.entries
         assert watchdog.last_decision_ts > before
     finally:
         watchdog.last_decision_ts = original_ts
