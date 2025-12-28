@@ -225,6 +225,13 @@ async def decision_cycle() -> None:
                 )
                 continue
 
+            if getattr(risk, "demo_mode", False) and now_utc.weekday() >= 5:
+                print(
+                    "[WEEKEND] Entry blocked - weekend lock active (UTC Saturday/Sunday)",
+                    flush=True,
+                )
+                continue
+
             session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
             if not session_filter.is_entry_session(now_utc, mode=session_mode):
                 ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
