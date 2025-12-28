@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from src.profit_protection import ProfitProtection
@@ -69,3 +71,71 @@ def test_demo_trailing_thresholds():
     assert live_guard.trail == pytest.approx(0.5)
     assert paper_guard.trigger == pytest.approx(3.0)
     assert paper_guard.trail == pytest.approx(0.5)
+
+
+def test_time_exit_only_in_aggressive_mode(capsys):
+    open_time = (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()
+    trades = [{"instrument": "EUR_USD", "currentUnits": "100", "openTime": open_time}]
+
+    aggressive_broker = DummyBroker({"EUR_USD": [-1.0]})
+    aggressive_guard = ProfitProtection(
+        aggressive_broker,
+        aggressive=True,
+        aggressive_max_hold_minutes=45,
+    )
+    closed = aggressive_guard.process_open_trades(trades)
+    assert closed == ["EUR_USD"]
+    assert aggressive_broker.closed == ["EUR_USD"]
+
+    normal_broker = DummyBroker({"EUR_USD": [-1.0]})
+    normal_guard = ProfitProtection(
+        normal_broker,
+        aggressive=False,
+        aggressive_max_hold_minutes=45,
+    )
+    closed = normal_guard.process_open_trades(trades)
+    assert closed == []
+    assert normal_broker.closed == []
+
+    output = capsys.readouterr().out
+    assert "[TIME-EXIT] Closing EUR_USD" in output
+    assert output.count("[TIME-EXIT]") == 1
+
+
+def test_loss_floor_only_in_aggressive_mode(capsys):
+    trades = [
+        {"instrument": "GBP_USD", "currentUnits": "100", "openTime": datetime.now(timezone.utc).isoformat()},
+        {
+            "instrument": "AUD_USD",
+            "currentUnits": "100",
+            "openTime": datetime.now(timezone.utc).isoformat(),
+            "atr": 2.0,
+        },
+    ]
+
+    aggressive_broker = DummyBroker({"GBP_USD": [-6.0], "AUD_USD": [-2.5]})
+    aggressive_guard = ProfitProtection(
+        aggressive_broker,
+        aggressive=True,
+        aggressive_max_loss_usd=5.0,
+        aggressive_max_loss_atr_mult=1.0,
+    )
+    closed = aggressive_guard.process_open_trades(trades)
+    assert set(closed) == {"GBP_USD", "AUD_USD"}
+    assert aggressive_broker.closed == ["GBP_USD", "AUD_USD"]
+
+    normal_broker = DummyBroker({"GBP_USD": [-6.0], "AUD_USD": [-2.5]})
+    normal_guard = ProfitProtection(
+        normal_broker,
+        aggressive=False,
+        aggressive_max_loss_usd=5.0,
+        aggressive_max_loss_atr_mult=1.0,
+    )
+    closed = normal_guard.process_open_trades(trades)
+    assert closed == []
+    assert normal_broker.closed == []
+
+    output = capsys.readouterr().out
+    assert "[LOSS-FLOOR] Closing GBP_USD" in output
+    assert "[LOSS-FLOOR] Closing AUD_USD" in output
+    assert output.count("[LOSS-FLOOR]") == 2

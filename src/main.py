@@ -78,6 +78,9 @@ aggressive_mode = _as_bool(os.getenv("AGGRESSIVE_MODE", config.get("aggressive_m
 risk_tf_minutes = _granularity_minutes(config["timeframe"])
 risk_cooldown_candles = int(os.getenv("COOLDOWN_CANDLES", config.get("cooldown_candles", 9)))
 risk_config = config.get("risk", {}) or {}
+aggressive_max_hold_minutes = float(os.getenv("AGGRESSIVE_MAX_HOLD_MINUTES", config.get("aggressive_max_hold_minutes", 45)))
+aggressive_max_loss_usd = float(os.getenv("AGGRESSIVE_MAX_LOSS_USD", config.get("aggressive_max_loss_usd", 5.0)))
+aggressive_max_loss_atr_mult = float(os.getenv("AGGRESSIVE_MAX_LOSS_ATR_MULT", config.get("aggressive_max_loss_atr_mult", 1.2)))
 
 # Baseline risk defaults
 risk_config.setdefault("risk_per_trade_pct", float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005))))
@@ -108,6 +111,9 @@ config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_
 config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("max_concurrent_positions", config.get("max_open_trades", 2))))
 risk_config["timeframe"] = config["timeframe"]
 config["aggressive_mode"] = aggressive_mode
+config["aggressive_max_hold_minutes"] = aggressive_max_hold_minutes
+config["aggressive_max_loss_usd"] = aggressive_max_loss_usd
+config["aggressive_max_loss_atr_mult"] = aggressive_max_loss_atr_mult
 config["risk"] = risk_config
 
 # Abort if live is requested (demo/practice only)
@@ -126,16 +132,39 @@ risk = RiskManager(
 )
 
 
-def _profit_guard_for_mode(mode: str, broker: Broker, aggressive: bool) -> ProfitProtection:
+def _profit_guard_for_mode(
+    mode: str,
+    broker: Broker,
+    aggressive: bool = False,
+    *,
+    max_hold_minutes: float = 45.0,
+    max_loss_usd: float = 5.0,
+    max_loss_atr_mult: float = 1.2,
+) -> ProfitProtection:
     label = (mode or "").lower()
     if aggressive:
-        return ProfitProtection(broker, trigger=5.0, trail=1.5)
+        return ProfitProtection(
+            broker,
+            trigger=5.0,
+            trail=1.5,
+            aggressive=True,
+            aggressive_max_hold_minutes=max_hold_minutes,
+            aggressive_max_loss_usd=max_loss_usd,
+            aggressive_max_loss_atr_mult=max_loss_atr_mult,
+        )
     if label == "demo":
         return ProfitProtection(broker, trigger=1.0, trail=0.5)
     return ProfitProtection(broker)
 
 
-profit_guard = _profit_guard_for_mode(mode_env, broker, aggressive_mode)
+profit_guard = _profit_guard_for_mode(
+    mode_env,
+    broker,
+    aggressive_mode,
+    max_hold_minutes=aggressive_max_hold_minutes,
+    max_loss_usd=aggressive_max_loss_usd,
+    max_loss_atr_mult=aggressive_max_loss_atr_mult,
+)
 
 
 def _startup_checks() -> None:
