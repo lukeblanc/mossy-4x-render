@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.broker import Broker
 from app.health import watchdog
-from src.decision_engine import DecisionEngine, Evaluation
+from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
 from src.profit_protection import ProfitProtection
 from src import session_filter
@@ -35,13 +35,29 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
         return {}
 
 
-def _parse_instruments(value: str | List[str] | None) -> List[str]:
+def _parse_instruments(value: str | List[str] | None) -> List[str] | None:
     if value is None:
-        return []
+        return None
     if isinstance(value, list):
         return [str(v).strip().upper() for v in value if str(v).strip()]
     tokens = [tok.strip().upper() for tok in str(value).replace(";", ",").split(",")]
     return [tok for tok in tokens if tok]
+
+
+def _instrument_env_override() -> tuple[bool, str | List[str] | None]:
+    for key in ("INSTRUMENTS", "INSTRUMENT"):
+        if key in os.environ:
+            return True, os.environ.get(key)
+    return False, None
+
+
+def _resolve_instruments_config(config: Dict) -> List[str]:
+    has_env, env_value = _instrument_env_override()
+    raw_value = env_value if has_env else config.get("instruments")
+    parsed = _parse_instruments(raw_value)
+    if parsed is None:
+        return list(DEFAULT_INSTRUMENTS)
+    return parsed
 
 
 def _granularity_minutes(timeframe: str) -> int:
@@ -68,9 +84,10 @@ def _as_bool(value: object) -> bool:
 
 
 config = load_config()
-env_instruments = os.getenv("INSTRUMENTS") or os.getenv("INSTRUMENT")
-resolved_instruments = _parse_instruments(env_instruments) or config.get("instruments") or ["EUR_USD"]
-config["instruments"] = resolved_instruments
+config["merge_default_instruments"] = _as_bool(
+    os.getenv("MERGE_DEFAULT_INSTRUMENTS", config.get("merge_default_instruments", False))
+)
+config["instruments"] = _resolve_instruments_config(config)
 config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
 mode_env = os.getenv("MODE", config.get("mode", "paper")).lower()
 config["mode"] = "paper" if mode_env == "demo" else mode_env
