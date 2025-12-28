@@ -61,28 +61,53 @@ def _granularity_minutes(timeframe: str) -> int:
     return 0
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+    return bool(value)
+
+
 config = load_config()
 env_instruments = os.getenv("INSTRUMENTS") or os.getenv("INSTRUMENT")
 resolved_instruments = _parse_instruments(env_instruments) or config.get("instruments") or ["EUR_USD"]
 config["instruments"] = resolved_instruments
-config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", config.get("max_open_trades", 2)))
 config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
 mode_env = os.getenv("MODE", config.get("mode", "paper")).lower()
 config["mode"] = "paper" if mode_env == "demo" else mode_env
+aggressive_mode = _as_bool(os.getenv("AGGRESSIVE_MODE", config.get("aggressive_mode", False)))
 risk_tf_minutes = _granularity_minutes(config["timeframe"])
 risk_cooldown_candles = int(os.getenv("COOLDOWN_CANDLES", config.get("cooldown_candles", 9)))
-config["cooldown_candles"] = risk_cooldown_candles
-config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
 risk_config = config.get("risk", {}) or {}
+
+# Baseline risk defaults
 risk_config.setdefault("risk_per_trade_pct", float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005))))
 risk_config.setdefault("atr_stop_mult", float(os.getenv("ATR_STOP_MULT", risk_config.get("atr_stop_mult", 1.8))))
 risk_config.setdefault("tp_rr_multiple", float(os.getenv("TP_RR_MULTIPLE", risk_config.get("tp_rr_multiple", 1.5))))
 risk_config.setdefault("cooldown_candles", int(os.getenv("COOLDOWN_CANDLES", risk_config.get("cooldown_candles", 9))))
 risk_config.setdefault("max_concurrent_positions", int(os.getenv("MAX_CONCURRENT_POSITIONS", risk_config.get("max_concurrent_positions", 2))))
 risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02))))
+risk_config.setdefault("weekly_loss_cap_pct", float(os.getenv("WEEKLY_LOSS_CAP_PCT", risk_config.get("weekly_loss_cap_pct", 0.03))))
 risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
 risk_config.setdefault("daily_profit_target_usd", float(os.getenv("DAILY_PROFIT_TARGET_USD", risk_config.get("daily_profit_target_usd", 5.0))))
+
+if aggressive_mode:
+    # Loosen guardrails for higher throughput/risk
+    risk_config["risk_per_trade_pct"] = float(os.getenv("AGGRESSIVE_RISK_PCT", risk_config.get("risk_per_trade_pct", 0.01)))
+    risk_config["max_concurrent_positions"] = int(os.getenv("AGGRESSIVE_MAX_POSITIONS", risk_config.get("max_concurrent_positions", 3)))
+    risk_config["cooldown_candles"] = int(os.getenv("AGGRESSIVE_COOLDOWN_CANDLES", 3))
+    risk_config["daily_loss_cap_pct"] = float(os.getenv("AGGRESSIVE_DAILY_LOSS_CAP_PCT", 0.03))
+    risk_config["weekly_loss_cap_pct"] = float(os.getenv("AGGRESSIVE_WEEKLY_LOSS_CAP_PCT", 0.06))
+    risk_config["max_drawdown_cap_pct"] = float(os.getenv("AGGRESSIVE_MAX_DRAWDOWN_CAP_PCT", 0.20))
+    risk_config["tp_rr_multiple"] = float(os.getenv("AGGRESSIVE_TP_RR", 2.0))
+    # Remove profit cap in aggressive/demo and widen take-profit allowance
+    risk_config["daily_profit_target_usd"] = float(os.getenv("AGGRESSIVE_DAILY_PROFIT_CAP", 0.0))
+    risk_cooldown_candles = risk_config["cooldown_candles"]
+
+config["cooldown_candles"] = risk_cooldown_candles
+config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
+config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("max_concurrent_positions", config.get("max_open_trades", 2))))
 risk_config["timeframe"] = config["timeframe"]
+config["aggressive_mode"] = aggressive_mode
 config["risk"] = risk_config
 
 # Abort if live is requested (demo/practice only)
@@ -101,14 +126,16 @@ risk = RiskManager(
 )
 
 
-def _profit_guard_for_mode(mode: str, broker: Broker) -> ProfitProtection:
+def _profit_guard_for_mode(mode: str, broker: Broker, aggressive: bool) -> ProfitProtection:
     label = (mode or "").lower()
+    if aggressive:
+        return ProfitProtection(broker, trigger=5.0, trail=1.5)
     if label == "demo":
         return ProfitProtection(broker, trigger=1.0, trail=0.5)
     return ProfitProtection(broker)
 
 
-profit_guard = _profit_guard_for_mode(mode_env, broker)
+profit_guard = _profit_guard_for_mode(mode_env, broker, aggressive_mode)
 
 
 def _startup_checks() -> None:
@@ -287,14 +314,15 @@ async def decision_cycle() -> None:
                 )
                 continue
 
-            session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
-            if not session_filter.is_entry_session(now_utc, mode=session_mode):
-                ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
-                print(
-                    f"[SESSION] Entry blocked – outside trading session (UTC {ts})",
-                    flush=True,
-                )
-                continue
+            if not aggressive_mode:
+                session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
+                if not session_filter.is_entry_session(now_utc, mode=session_mode):
+                    ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
+                    print(
+                        f"[SESSION] Entry blocked – outside trading session (UTC {ts})",
+                        flush=True,
+                    )
+                    continue
 
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val)
