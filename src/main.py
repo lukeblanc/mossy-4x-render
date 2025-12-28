@@ -17,6 +17,7 @@ from src.risk_manager import RiskManager
 from src.profit_protection import ProfitProtection
 from src import session_filter
 from src import position_sizer
+from src.projector import project_market
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -154,6 +155,59 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool
     return True
 
 
+def _projector_enabled() -> bool:
+    return (os.getenv("ENABLE_PROJECTOR", "false") or "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
+
+
+def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
+    if not _projector_enabled():
+        return
+
+    try:
+        projection = project_market(
+            evaluation.instrument,
+            evaluation.candles or [],
+            evaluation.diagnostics or {},
+            now_utc,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[PROJECTOR] {evaluation.instrument} skipped error={exc}", flush=True)
+        return
+
+    ts = projection.get("timestamp") or now_utc
+    if isinstance(ts, datetime):
+        ts_dt = ts.astimezone(timezone.utc)
+    else:
+        ts_dt = now_utc
+    ts_str = ts_dt.strftime("%H:%M")
+    bias = projection.get("bias", "NEUTRAL")
+    bias_score = projection.get("bias_score", 0.0) or 0.0
+    volatility = projection.get("volatility", "NORMAL")
+    confidence = projection.get("confidence", 0.0) or 0.0
+    bias_score_fmt = f"{bias_score:.2f}"
+    confidence_fmt = f"{int(round(confidence))}"
+
+    range_info = projection.get("range") or {}
+    low = range_info.get("low")
+    high = range_info.get("high")
+    range_fmt = "n/a"
+    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        range_fmt = f"{low:.4f}..{high:.4f}"
+
+    print(
+        f"[PROJECTOR] {evaluation.instrument} ts={ts_str} bias={bias} "
+        f"score={bias_score_fmt} conf={confidence_fmt} "
+        f"vol={volatility} range={range_fmt}",
+        flush=True,
+    )
+
+
 async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
@@ -201,6 +255,7 @@ async def decision_cycle() -> None:
                 if trade.get("instrument") not in closed_by_trail
             ]
         for evaluation in evaluations:
+            _log_projector(evaluation, now_utc)
             if not _should_place_trade(open_trades, evaluation):
                 continue
 

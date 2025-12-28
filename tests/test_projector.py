@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.decision_engine import DecisionEngine  # noqa: E402
+import src.main as main  # noqa: E402
+from src.decision_engine import DecisionEngine, Evaluation  # noqa: E402
 from src.projector import project_market  # noqa: E402
 
 
@@ -72,22 +74,89 @@ def test_project_market_handles_neutral_high_vol(monkeypatch, sample_candles):
     assert projection["confidence"] == 30.0
 
 
-def test_decision_engine_logs_projector(monkeypatch, capfd):
+def test_projector_called_when_enabled(monkeypatch, capfd):
     monkeypatch.setenv("ENABLE_PROJECTOR", "true")
 
-    prices: Dict[str, List[Dict[str, float]]] = {
-        "EUR_USD": [
-            {"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.0},
-            {"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.1},
-        ]
-    }
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+        demo_mode = False
 
-    def fetcher(instrument: str, **kwargs):
-        return prices[instrument]
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
 
-    calls: Dict[str, object] = {}
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr):
+            return atr * 1.5 if atr else 0.0
+
+        def tp_distance_from_atr(self, atr):
+            return atr * 3.0 if atr else 0.0
+
+        def register_entry(self, *args, **kwargs):
+            pass
+
+        def register_exit(self, *args, **kwargs):
+            pass
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, object]] = []
+
+        def place_order(self, instrument, signal, units, *, sl_distance=None, tp_distance=None, entry_price=None):
+            self.calls.append(
+                {
+                    "instrument": instrument,
+                    "signal": signal,
+                    "units": units,
+                    "sl_distance": sl_distance,
+                    "tp_distance": tp_distance,
+                    "entry_price": entry_price,
+                }
+            )
+            return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+        def close_all_positions(self) -> None:
+            pass
+
+        def list_open_trades(self):
+            return []
+
+    class DummyEngine:
+        def __init__(self) -> None:
+            self.marked: List[str] = []
+
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={
+                        "ema_fast": 1.1,
+                        "ema_slow": 1.0,
+                        "rsi": 55.0,
+                        "atr": 0.01,
+                        "close": 1.1234,
+                    },
+                    reason="bullish",
+                    market_active=True,
+                    candles=[{"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.0}],
+                )
+            ]
+
+        def mark_trade(self, instrument: str) -> None:
+            self.marked.append(instrument)
+
+    calls: Dict[str, object] = {"count": 0}
 
     def fake_project(pair, candles, indicators, now_utc):
+        calls["count"] += 1
         calls["pair"] = pair
         calls["candles"] = list(candles)
         calls["indicators"] = indicators
@@ -97,32 +166,141 @@ def test_decision_engine_logs_projector(monkeypatch, capfd):
             "timestamp": now_utc,
             "bias": "BULL",
             "bias_score": 0.42,
-            "range": {"low": 1.0000, "high": 1.1000},
+            "range": {"low": 1.1762, "high": 1.1798},
             "volatility": "NORMAL",
             "confidence": 68,
         }
 
-    monkeypatch.setattr("src.decision_engine.project_market", fake_project)
+    dummy_engine = DummyEngine()
+    dummy_broker = DummyBroker()
+    dummy_risk = DummyRisk()
+    monkeypatch.setattr(main, "engine", dummy_engine)
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "risk", dummy_risk)
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
+    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.position_sizer, "units_for_risk", lambda *args, **kwargs: 100)
+    monkeypatch.setattr(main, "project_market", fake_project)
 
-    engine = DecisionEngine(
-        {
-            "instruments": ["EUR_USD"],
-            "candles_to_fetch": 2,
-            "timeframe": "M1",
-            "ema_fast": 2,
-            "ema_slow": 3,
-            "rsi_length": 2,
-            "atr_length": 2,
-            "min_atr": 0.0001,
-        },
-        candle_fetcher=fetcher,
-        now_fn=lambda: datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-    )
-
-    engine.evaluate_all()
+    asyncio.run(main.decision_cycle())
 
     captured = capfd.readouterr().out
-    assert "[PROJECTOR] EUR_USD ts=00:00 bias=BULL score=0.42 conf=68 vol=NORMAL range=1.0000..1.1000" in captured
+    assert "[PROJECTOR] EUR_USD ts=" in captured
+    assert "bias=BULL score=0.42 conf=68 vol=NORMAL range=1.1762..1.1798" in captured
+    assert calls["count"] == 1
     assert calls["pair"] == "EUR_USD"
-    assert calls["candles"]
-    assert calls["indicators"]["atr"] is not None
+    assert dummy_broker.calls  # trade still placed
+
+
+def test_projector_not_called_when_disabled(monkeypatch, capfd):
+    monkeypatch.setenv("ENABLE_PROJECTOR", "false")
+
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+        demo_mode = False
+
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr):
+            return atr * 1.5 if atr else 0.0
+
+        def tp_distance_from_atr(self, atr):
+            return atr * 3.0 if atr else 0.0
+
+        def register_entry(self, *args, **kwargs):
+            pass
+
+        def register_exit(self, *args, **kwargs):
+            pass
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, object]] = []
+
+        def place_order(self, instrument, signal, units, *, sl_distance=None, tp_distance=None, entry_price=None):
+            self.calls.append(
+                {
+                    "instrument": instrument,
+                    "signal": signal,
+                    "units": units,
+                    "sl_distance": sl_distance,
+                    "tp_distance": tp_distance,
+                    "entry_price": entry_price,
+                }
+            )
+            return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+        def close_all_positions(self) -> None:
+            pass
+
+        def list_open_trades(self):
+            return []
+
+    class DummyEngine:
+        def __init__(self) -> None:
+            self.marked: List[str] = []
+
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={
+                        "ema_fast": 1.1,
+                        "ema_slow": 1.0,
+                        "rsi": 55.0,
+                        "atr": 0.01,
+                        "close": 1.1234,
+                    },
+                    reason="bullish",
+                    market_active=True,
+                    candles=[{"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.0}],
+                )
+            ]
+
+        def mark_trade(self, instrument: str) -> None:
+            self.marked.append(instrument)
+
+    calls: Dict[str, object] = {"count": 0}
+
+    def fake_project(*args, **kwargs):
+        calls["count"] += 1
+        return {
+            "pair": "EUR_USD",
+            "timestamp": datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            "bias": "BULL",
+            "bias_score": 0.42,
+            "range": {"low": 1.1762, "high": 1.1798},
+            "volatility": "NORMAL",
+            "confidence": 68,
+        }
+
+    dummy_engine = DummyEngine()
+    dummy_broker = DummyBroker()
+    dummy_risk = DummyRisk()
+    monkeypatch.setattr(main, "engine", dummy_engine)
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "risk", dummy_risk)
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
+    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.position_sizer, "units_for_risk", lambda *args, **kwargs: 100)
+    monkeypatch.setattr(main, "project_market", fake_project)
+
+    asyncio.run(main.decision_cycle())
+
+    captured = capfd.readouterr().out
+    assert "[PROJECTOR]" not in captured
+    assert calls["count"] == 0
+    assert dummy_broker.calls  # trade still placed

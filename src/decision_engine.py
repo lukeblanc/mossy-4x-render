@@ -10,8 +10,6 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import httpx
 
-from src.projector import project_market
-
 PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
 
 DEFAULT_INSTRUMENTS: List[str] = [
@@ -30,6 +28,7 @@ class Evaluation:
     diagnostics: Optional[Dict[str, float]]
     reason: str
     market_active: bool
+    candles: Optional[List[Dict[str, float]]] = None
 
 
 def _default_now() -> datetime:
@@ -141,10 +140,10 @@ class DecisionEngine:
                 diagnostics=None,
                 reason="inactive-market",
                 market_active=False,
+                candles=normalized,
             )
 
         diagnostics = self._build_indicators(normalized)
-        self._log_projection(instrument, normalized, diagnostics)
         signal, reason = self._generate_signal(diagnostics)
 
         cooldown_until = self._cooldowns.get(instrument)
@@ -159,6 +158,7 @@ class DecisionEngine:
             diagnostics=diagnostics,
             reason=reason,
             market_active=True,
+            candles=normalized,
         )
 
     def _fetch_candles(
@@ -245,49 +245,6 @@ class DecisionEngine:
         else:
             atr_str = f"{atr:.5f}"
         print(f"[SIGNAL] {instrument} signal={signal} rsi={rsi_str} atr={atr_str}", flush=True)
-
-    def _log_projection(
-        self,
-        instrument: str,
-        candles: List[Dict[str, float]],
-        diagnostics: Dict[str, float],
-    ) -> None:
-        try:
-            projection = project_market(instrument, candles, diagnostics, self._now())
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[PROJECTOR] {instrument} skipped error={exc}", flush=True)
-            return
-
-        enabled = self._as_bool(os.getenv("ENABLE_PROJECTOR", "false"))
-        if not enabled:
-            return
-
-        ts = projection.get("timestamp")
-        ts_str = (
-            ts.astimezone(timezone.utc).strftime("%H:%M")
-            if isinstance(ts, datetime)
-            else "n/a"
-        )
-        bias = projection.get("bias", "NEUTRAL")
-        bias_score = projection.get("bias_score", 0.0) or 0.0
-        volatility = projection.get("volatility", "NORMAL")
-        confidence = projection.get("confidence", 0.0) or 0.0
-        bias_score_fmt = f"{bias_score:.2f}"
-        confidence_fmt = f"{int(round(confidence))}"
-
-        range_info = projection.get("range") or {}
-        low = range_info.get("low")
-        high = range_info.get("high")
-        range_fmt = "n/a"
-        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
-            range_fmt = f"{low:.4f}..{high:.4f}"
-
-        print(
-            f"[PROJECTOR] {instrument} ts={ts_str} bias={bias} "
-            f"score={bias_score_fmt} conf={confidence_fmt} "
-            f"vol={volatility} range={range_fmt}",
-            flush=True,
-        )
 
     def _resolve_instruments(
         self, instruments: Optional[Iterable[str]], merge_default_instruments: bool
