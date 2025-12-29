@@ -86,6 +86,25 @@ def test_place_order_uses_absolute_tp_price_for_sell(monkeypatch):
     assert "distance" not in order["takeProfitOnFill"]
 
 
+def test_stop_loss_distance_respects_instrument_precision(monkeypatch):
+    _configure_settings(monkeypatch)
+    recorded = {}
+    monkeypatch.setattr(Broker, "_client", lambda self: DummyClient(recorded))
+
+    broker = Broker()
+    result = broker.place_order(
+        "USD_JPY",
+        "SELL",
+        50,
+        sl_distance=0.06901,
+    )
+
+    assert result["status"] == "SENT"
+    order = recorded["payload"]["order"]
+    assert order["units"] == "-50"
+    assert order["stopLossOnFill"]["distance"] == "0.069"
+
+
 def test_usd_jpy_tp_price_is_rounded(monkeypatch, capsys):
     _configure_settings(monkeypatch)
     recorded = {}
