@@ -1,13 +1,29 @@
 from __future__ import annotations
 
-import httpx
-
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Optional
+
+import httpx
 
 from app.config import settings
 
 PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
+
+
+def normalize_price(instrument: str, price: float | Decimal | str) -> str:
+    precision = {
+        "USD_JPY": Decimal("0.001"),
+        "XAU_USD": Decimal("0.01"),
+    }.get(instrument, Decimal("0.00001"))
+
+    try:
+        dec_price = Decimal(str(price))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"Invalid price value for normalization: {price}")
+
+    return str(dec_price.quantize(precision, rounding=ROUND_HALF_UP))
+
 
 class Broker:
     def __init__(self):
@@ -104,9 +120,9 @@ class Broker:
             and tp_distance > 0
         ):
             try:
-                entry_val = float(entry_price)
-                tp_val = float(tp_distance)
-            except (TypeError, ValueError):
+                entry_val = Decimal(str(entry_price))
+                tp_val = Decimal(str(tp_distance))
+            except (TypeError, ValueError, InvalidOperation):
                 entry_val = None
                 tp_val = None
             if entry_val is not None and tp_val is not None:
@@ -114,9 +130,14 @@ class Broker:
                     tp_price = entry_val + tp_val
                 else:
                     tp_price = entry_val - tp_val
+                rounded_tp = normalize_price(instrument, tp_price)
+                print(
+                    f"[ORDER_FMT] instrument={instrument} raw_tp={tp_price} rounded_tp={rounded_tp}",
+                    flush=True,
+                )
                 order_payload["takeProfitOnFill"] = {
                     "timeInForce": "GTC",
-                    "price": f"{tp_price:.5f}",
+                    "price": rounded_tp,
                 }
 
         payload = {"order": order_payload}
