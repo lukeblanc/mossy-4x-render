@@ -189,6 +189,7 @@ risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT
 risk_config.setdefault("weekly_loss_cap_pct", float(os.getenv("WEEKLY_LOSS_CAP_PCT", risk_config.get("weekly_loss_cap_pct", 0.03))))
 risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
 risk_config.setdefault("daily_profit_target_usd", float(os.getenv("DAILY_PROFIT_TARGET_USD", risk_config.get("daily_profit_target_usd", 5.0))))
+risk_config["max_trades_per_day"] = int(os.getenv("MAX_TRADES_PER_DAY", risk_config.get("max_trades_per_day", 0) or 0))
 
 if aggressive_mode:
     # Loosen guardrails for higher throughput/risk
