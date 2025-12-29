@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Dict
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -112,6 +113,22 @@ class Settings(BaseSettings):
         9,
         description="Bars to wait after a trade before considering a new one.",
     )
+    SL_ATR_MULT: float = Field(
+        1.2,
+        description="ATR multiplier applied to stop loss distance.",
+    )
+    TP_ATR_MULT: float = Field(
+        1.0,
+        description="ATR multiplier applied to take profit distance.",
+    )
+    INSTRUMENT_ATR_MULTIPLIERS: Dict[str, Dict[str, float]] = Field(
+        default_factory=dict,
+        description="Optional per-instrument overrides for ATR SL/TP multipliers.",
+    )
+    METRIC_SUMMARY_INTERVAL: int = Field(
+        10,
+        description="Decision count between summary metric log lines.",
+    )
 
     # ------------------------------------------------------------------
     # Alerting
@@ -141,5 +158,6 @@ class Settings(BaseSettings):
 
     # Trading parameters
     MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
+
 
 settings = Settings()

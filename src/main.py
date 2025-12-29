@@ -15,16 +15,20 @@ from app.broker import Broker
 from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
-from src.profit_protection import ProfitProtection
 from src import session_filter
 from src import position_sizer
 from src.projector import project_market
+from src.risk_setup import (
+    build_profit_protection,
+    build_risk_manager,
+    resolve_state_dir,
+)
 
 VERSION = "v1.6.1"
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
@@ -217,94 +221,18 @@ if oanda_env == "live" or config["mode"] == "live":
 
 broker = Broker()
 engine = DecisionEngine(config)
-risk = RiskManager(
-    config.get("risk", {}),
+risk = build_risk_manager(
+    config,
     mode=config["mode"],
-    state_dir=DATA_DIR,
     demo_mode=(mode_env == "demo"),
+    state_dir=DATA_DIR,
 )
 
 
-def _profit_guard_for_mode(
-    mode: str,
-    broker: Broker,
-    aggressive: bool = False,
-    *,
-    max_hold_minutes: float = 45.0,
-    max_loss_usd: float = 5.0,
-    max_loss_atr_mult: float = 1.2,
-    trailing: Dict | None = None,
-    time_stop: Dict | None = None,
-) -> ProfitProtection:
-    label = (mode or "").lower()
-    trailing_cfg = trailing or trailing_config
-    ts_cfg = time_stop or config.get("time_stop", {}) or {}
-    ts_minutes = float(ts_cfg.get("minutes", 90))
-    ts_min_pips = float(ts_cfg.get("min_pips", 2.0))
-    ts_xau_mult = float(ts_cfg.get("xau_atr_mult", 0.35))
-    if aggressive:
-        return ProfitProtection(
-            broker,
-            trigger=5.0,
-            trail=1.5,
-            arm_usd=5.0,
-            giveback_usd=1.5,
-            arm_pips=trailing_cfg["arm_pips"],
-            giveback_pips=trailing_cfg["giveback_pips"],
-            use_pips=trailing_cfg["use_pips"],
-            be_arm_pips=trailing_cfg["be_arm_pips"],
-            be_offset_pips=trailing_cfg["be_offset_pips"],
-            min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
-            aggressive=True,
-            aggressive_max_hold_minutes=max_hold_minutes,
-            aggressive_max_loss_usd=max_loss_usd,
-            aggressive_max_loss_atr_mult=max_loss_atr_mult,
-            time_stop_minutes=ts_minutes,
-            time_stop_min_pips=ts_min_pips,
-            time_stop_xau_atr_mult=ts_xau_mult,
-        )
-    if label == "demo":
-        return ProfitProtection(
-            broker,
-            trigger=1.0,
-            trail=0.5,
-            arm_usd=1.0,
-            giveback_usd=0.5,
-            arm_pips=trailing_cfg["arm_pips"],
-            giveback_pips=trailing_cfg["giveback_pips"],
-            use_pips=trailing_cfg["use_pips"],
-            be_arm_pips=trailing_cfg["be_arm_pips"],
-            be_offset_pips=trailing_cfg["be_offset_pips"],
-            min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
-            time_stop_minutes=ts_minutes,
-            time_stop_min_pips=ts_min_pips,
-            time_stop_xau_atr_mult=ts_xau_mult,
-        )
-    return ProfitProtection(
-        broker,
-        trigger=3.0,
-        trail=0.5,
-        arm_usd=trailing_cfg["arm_usd"],
-        giveback_usd=trailing_cfg["giveback_usd"],
-        arm_pips=trailing_cfg["arm_pips"],
-        giveback_pips=trailing_cfg["giveback_pips"],
-        use_pips=trailing_cfg["use_pips"],
-        be_arm_pips=trailing_cfg["be_arm_pips"],
-        be_offset_pips=trailing_cfg["be_offset_pips"],
-        min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
-        time_stop_minutes=ts_minutes,
-        time_stop_min_pips=ts_min_pips,
-        time_stop_xau_atr_mult=ts_xau_mult,
-    )
-
-
-profit_guard = _profit_guard_for_mode(
+profit_guard = build_profit_protection(
     mode_env,
     broker,
     aggressive_mode,
-    max_hold_minutes=aggressive_max_hold_minutes,
-    max_loss_usd=aggressive_max_loss_usd,
-    max_loss_atr_mult=aggressive_max_loss_atr_mult,
     trailing=trailing_config,
     time_stop=config["time_stop"],
 )
