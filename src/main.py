@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
@@ -18,6 +19,8 @@ from src.profit_protection import ProfitProtection
 from src import session_filter
 from src import position_sizer
 from src.projector import project_market
+
+VERSION = "v1.6.1"
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -228,6 +231,36 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool
     return True
 
 
+def _trend_aligned(signal: str, diagnostics: Dict[str, float] | None) -> tuple[bool, float, float]:
+    if diagnostics is None:
+        return False, math.nan, math.nan
+    ema_fast = diagnostics.get("ema_trend_fast", math.nan)
+    ema_slow = diagnostics.get("ema_trend_slow", math.nan)
+    if signal == "BUY":
+        return ema_fast > ema_slow, ema_fast, ema_slow
+    if signal == "SELL":
+        return ema_fast < ema_slow, ema_fast, ema_slow
+    return False, ema_fast, ema_slow
+
+
+def _xau_blocked(signal: str, instrument: str, diagnostics: Dict[str, float] | None) -> tuple[bool, float, float]:
+    if instrument != "XAU_USD" or diagnostics is None:
+        return False, math.nan, math.nan
+    rsi = diagnostics.get("rsi", math.nan)
+    atr_current = diagnostics.get("atr", math.nan)
+    atr_baseline = diagnostics.get("atr_baseline_50", math.nan)
+    if atr_baseline and not math.isnan(atr_baseline) and atr_baseline > 0:
+        atr_ratio = atr_current / atr_baseline
+    else:
+        atr_ratio = math.nan
+
+    if signal == "SELL" and not math.isnan(rsi) and rsi < 18 and atr_ratio > 1.15:
+        return True, rsi, atr_ratio
+    if signal == "BUY" and not math.isnan(rsi) and rsi > 82 and atr_ratio > 1.15:
+        return True, rsi, atr_ratio
+    return False, rsi, atr_ratio
+
+
 def _projector_enabled() -> bool:
     return (os.getenv("ENABLE_PROJECTOR", "false") or "false").strip().lower() in {
         "1",
@@ -327,6 +360,13 @@ async def decision_cycle() -> None:
                 for trade in open_trades
                 if trade.get("instrument") not in closed_by_trail
             ]
+
+        session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
+        entries_allowed = session_filter.is_entry_session(now_utc, mode=session_mode)
+        if not entries_allowed:
+            ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
+            print(f"[FILTER] Entries paused (off-session) now_utc={ts}", flush=True)
+
         for evaluation in evaluations:
             _log_projector(evaluation, now_utc)
             if not _should_place_trade(open_trades, evaluation):
@@ -353,6 +393,9 @@ async def decision_cycle() -> None:
                 )
                 continue
 
+            if not entries_allowed:
+                continue
+
             if getattr(risk, "demo_mode", False) and now_utc.weekday() >= 5:
                 print(
                     "[WEEKEND] Entry blocked - weekend lock active (UTC Saturday/Sunday)",
@@ -360,20 +403,30 @@ async def decision_cycle() -> None:
                 )
                 continue
 
-            if not aggressive_mode:
-                session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
-                if not session_filter.is_entry_session(now_utc, mode=session_mode):
-                    ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
-                    print(
-                        f"[SESSION] Entry blocked – outside trading session (UTC {ts})",
-                        flush=True,
-                    )
-                    continue
-
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val)
             tp_distance = risk.tp_distance_from_atr(atr_val)
             entry_price = diagnostics.get("close")
+
+            trend_ok, ema_fast, ema_slow = _trend_aligned(evaluation.signal, diagnostics)
+            if not trend_ok:
+                print(
+                    f"[FILTER] Trend misaligned {evaluation.instrument} signal={evaluation.signal} "
+                    f"ema50={ema_fast:.5f} ema200={ema_slow:.5f}",
+                    flush=True,
+                )
+                continue
+
+            xau_blocked, rsi_val, atr_ratio = _xau_blocked(
+                evaluation.signal, evaluation.instrument, diagnostics
+            )
+            if xau_blocked:
+                print(
+                    f"[FILTER] XAU_USD blocked {evaluation.signal}: rsi={rsi_val:.2f} atr_ratio={atr_ratio:.2f}",
+                    flush=True,
+                )
+                continue
+
             units = position_sizer.units_for_risk(
                 equity,
                 entry_price or 0.0,
