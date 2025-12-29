@@ -87,10 +87,10 @@ def test_projector_called_when_enabled(monkeypatch, capfd):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return atr * 1.5 if atr else 0.0
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return atr * 3.0 if atr else 0.0
 
         def register_entry(self, *args, **kwargs):
@@ -209,10 +209,10 @@ def test_projector_not_called_when_disabled(monkeypatch, capfd):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return atr * 1.5 if atr else 0.0
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return atr * 3.0 if atr else 0.0
 
         def register_entry(self, *args, **kwargs):

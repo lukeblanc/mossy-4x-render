@@ -86,6 +86,44 @@ def _as_bool(value: object) -> bool:
     return bool(value)
 
 
+def _calc_exit_prices(signal: str, entry_price: float | None, sl_distance: float | None, tp_distance: float | None) -> tuple[float | None, float | None]:
+    if entry_price is None:
+        return None, None
+    try:
+        entry_val = float(entry_price)
+    except (TypeError, ValueError):
+        return None, None
+
+    side = (signal or "").upper()
+    sl_price = None
+    tp_price = None
+
+    if sl_distance is not None and sl_distance > 0:
+        sl_price = entry_val - sl_distance if side == "BUY" else entry_val + sl_distance
+    if tp_distance is not None and tp_distance > 0:
+        tp_price = entry_val + tp_distance if side == "BUY" else entry_val - tp_distance
+    return sl_price, tp_price
+
+
+def _order_ticket(result: Dict) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    resp = result.get("response", {}) or {}
+    tx_keys = (
+        "orderCreateTransaction",
+        "orderFillTransaction",
+        "takeProfitOrderTransaction",
+        "stopLossOrderTransaction",
+    )
+    for key in tx_keys:
+        tx = resp.get(key) or {}
+        for id_key in ("tradeOpenedID", "id", "orderID", "orderFillTransactionID"):
+            if tx.get(id_key) is not None:
+                return str(tx[id_key])
+    last_id = resp.get("lastTransactionID") or result.get("order_id") or result.get("id")
+    return str(last_id) if last_id is not None else None
+
+
 config = load_config()
 config["merge_default_instruments"] = _as_bool(
     os.getenv("MERGE_DEFAULT_INSTRUMENTS", config.get("merge_default_instruments", False))
@@ -121,13 +159,28 @@ trailing_config = {
     "min_check_interval_sec": min_check_interval_sec,
 }
 config["trailing"] = trailing_config
+time_stop_cfg = config.get("time_stop", {}) or {}
+time_stop_minutes = float(os.getenv("TIME_STOP_MINUTES", time_stop_cfg.get("minutes", 90)))
+time_stop_min_pips = float(os.getenv("TIME_STOP_MIN_PIPS", time_stop_cfg.get("min_pips", 2.0)))
+time_stop_xau_atr_mult = float(os.getenv("TIME_STOP_XAU_ATR_MULT", time_stop_cfg.get("xau_atr_mult", 0.35)))
+config["time_stop"] = {
+    "minutes": time_stop_minutes,
+    "min_pips": time_stop_min_pips,
+    "xau_atr_mult": time_stop_xau_atr_mult,
+}
 
 # Baseline risk defaults
 risk_config.setdefault("risk_per_trade_pct", float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005))))
-risk_config.setdefault("atr_stop_mult", float(os.getenv("ATR_STOP_MULT", risk_config.get("atr_stop_mult", 1.8))))
-risk_config.setdefault("tp_rr_multiple", float(os.getenv("TP_RR_MULTIPLE", risk_config.get("tp_rr_multiple", 1.5))))
+sl_default = risk_config.get("sl_atr_mult", risk_config.get("atr_stop_mult", config.get("sl_atr_mult", 1.2)))
+tp_default = risk_config.get("tp_atr_mult", risk_config.get("tp_rr_multiple", config.get("tp_atr_mult", 1.0)))
+risk_config["sl_atr_mult"] = float(os.getenv("SL_ATR_MULT", os.getenv("ATR_STOP_MULT", sl_default)))
+risk_config["tp_atr_mult"] = float(os.getenv("TP_ATR_MULT", tp_default))
+risk_config.setdefault("instrument_atr_multipliers", risk_config.get("instrument_atr_multipliers", config.get("instrument_atr_multipliers", {})))
+risk_config.setdefault("tp_rr_multiple", risk_config["tp_atr_mult"])
 risk_config.setdefault("cooldown_candles", int(os.getenv("COOLDOWN_CANDLES", risk_config.get("cooldown_candles", 9))))
-risk_config.setdefault("max_concurrent_positions", int(os.getenv("MAX_CONCURRENT_POSITIONS", risk_config.get("max_concurrent_positions", 2))))
+env_max_positions = os.getenv("MAX_CONCURRENT_POSITIONS") or os.getenv("MAX_OPEN_TRADES")
+max_positions_default = risk_config.get("max_concurrent_positions", config.get("max_open_trades", 3))
+risk_config["max_concurrent_positions"] = int(env_max_positions or max_positions_default or 3)
 risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02))))
 risk_config.setdefault("weekly_loss_cap_pct", float(os.getenv("WEEKLY_LOSS_CAP_PCT", risk_config.get("weekly_loss_cap_pct", 0.03))))
 risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
@@ -148,7 +201,7 @@ if aggressive_mode:
 
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
-config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("max_concurrent_positions", config.get("max_open_trades", 2))))
+config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("max_concurrent_positions", config.get("max_open_trades", 3))))
 risk_config["timeframe"] = config["timeframe"]
 config["aggressive_mode"] = aggressive_mode
 config["aggressive_max_hold_minutes"] = aggressive_max_hold_minutes
@@ -181,9 +234,14 @@ def _profit_guard_for_mode(
     max_loss_usd: float = 5.0,
     max_loss_atr_mult: float = 1.2,
     trailing: Dict | None = None,
+    time_stop: Dict | None = None,
 ) -> ProfitProtection:
     label = (mode or "").lower()
     trailing_cfg = trailing or trailing_config
+    ts_cfg = time_stop or config.get("time_stop", {}) or {}
+    ts_minutes = float(ts_cfg.get("minutes", 90))
+    ts_min_pips = float(ts_cfg.get("min_pips", 2.0))
+    ts_xau_mult = float(ts_cfg.get("xau_atr_mult", 0.35))
     if aggressive:
         return ProfitProtection(
             broker,
@@ -201,6 +259,9 @@ def _profit_guard_for_mode(
             aggressive_max_hold_minutes=max_hold_minutes,
             aggressive_max_loss_usd=max_loss_usd,
             aggressive_max_loss_atr_mult=max_loss_atr_mult,
+            time_stop_minutes=ts_minutes,
+            time_stop_min_pips=ts_min_pips,
+            time_stop_xau_atr_mult=ts_xau_mult,
         )
     if label == "demo":
         return ProfitProtection(
@@ -215,6 +276,9 @@ def _profit_guard_for_mode(
             be_arm_pips=trailing_cfg["be_arm_pips"],
             be_offset_pips=trailing_cfg["be_offset_pips"],
             min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
+            time_stop_minutes=ts_minutes,
+            time_stop_min_pips=ts_min_pips,
+            time_stop_xau_atr_mult=ts_xau_mult,
         )
     return ProfitProtection(
         broker,
@@ -228,6 +292,9 @@ def _profit_guard_for_mode(
         be_arm_pips=trailing_cfg["be_arm_pips"],
         be_offset_pips=trailing_cfg["be_offset_pips"],
         min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
+        time_stop_minutes=ts_minutes,
+        time_stop_min_pips=ts_min_pips,
+        time_stop_xau_atr_mult=ts_xau_mult,
     )
 
 
@@ -239,6 +306,7 @@ profit_guard = _profit_guard_for_mode(
     max_loss_usd=aggressive_max_loss_usd,
     max_loss_atr_mult=aggressive_max_loss_atr_mult,
     trailing=trailing_config,
+    time_stop=config["time_stop"],
 )
 
 
@@ -467,8 +535,8 @@ async def decision_cycle() -> None:
                 continue
 
             atr_val = diagnostics.get("atr")
-            sl_distance = risk.sl_distance_from_atr(atr_val)
-            tp_distance = risk.tp_distance_from_atr(atr_val)
+            sl_distance = risk.sl_distance_from_atr(atr_val, instrument=evaluation.instrument)
+            tp_distance = risk.tp_distance_from_atr(atr_val, instrument=evaluation.instrument)
             entry_price = diagnostics.get("close")
 
             trend_ok, ema_fast, ema_slow = _trend_aligned(evaluation.signal, diagnostics)
@@ -515,6 +583,14 @@ async def decision_cycle() -> None:
                 engine.mark_trade(evaluation.instrument)
                 open_trades.append({"instrument": evaluation.instrument})
                 risk.register_entry(now_utc, evaluation.instrument)
+                sl_price, tp_price = _calc_exit_prices(evaluation.signal, entry_price, sl_distance, tp_distance)
+                ticket = _order_ticket(result)
+                print(
+                    f"[ORDER] ticket={ticket or 'n/a'} instrument={evaluation.instrument} "
+                    f"sl={ 'n/a' if sl_price is None else f'{sl_price:.5f}'} "
+                    f"tp={ 'n/a' if tp_price is None else f'{tp_price:.5f}'}",
+                    flush=True,
+                )
             else:
                 print(
                     f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"

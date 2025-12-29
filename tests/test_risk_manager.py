@@ -201,22 +201,45 @@ def test_rollover_preserves_realized_pl_when_equity_missing(state_dir):
     assert manager.state.daily_realized_pl == pytest.approx(0.0)
 
 
-def test_default_atr_stop_multiplier_is_1_8(state_dir):
+def test_default_atr_multipliers_are_applied(state_dir):
     manager = RiskManager({}, mode="paper")
 
-    assert manager.atr_stop_mult == pytest.approx(1.8)
-    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.018)
-
-
-def test_atr_stop_multiplier_clamps_high_values(state_dir):
-    manager = RiskManager({"atr_stop_mult": 2.75}, mode="paper")
-
-    assert manager.atr_stop_mult == pytest.approx(1.8)
-    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.018)
-
-
-def test_atr_stop_multiplier_respects_lower_values(state_dir):
-    manager = RiskManager({"atr_stop_mult": 1.2}, mode="paper")
-
     assert manager.atr_stop_mult == pytest.approx(1.2)
+    assert manager.tp_atr_mult == pytest.approx(1.0)
     assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.012)
+    assert manager.tp_distance_from_atr(0.01) == pytest.approx(0.01)
+
+
+def test_instrument_atr_overrides(state_dir):
+    manager = RiskManager(
+        {
+            "sl_atr_mult": 1.2,
+            "tp_atr_mult": 1.0,
+            "instrument_atr_multipliers": {
+                "XAU_USD": {"sl_atr_mult": 1.6, "tp_atr_mult": 0.8}
+            },
+        },
+        mode="paper",
+    )
+
+    assert manager.sl_distance_from_atr(0.5, instrument="EUR_USD") == pytest.approx(0.6)
+    assert manager.tp_distance_from_atr(0.5, instrument="EUR_USD") == pytest.approx(0.5)
+
+    assert manager.sl_distance_from_atr(0.5, instrument="XAU_USD") == pytest.approx(0.8)
+    assert manager.tp_distance_from_atr(0.5, instrument="XAU_USD") == pytest.approx(0.4)
+
+
+def test_max_concurrent_positions_default_and_env_override(monkeypatch, state_dir):
+    # Default is 3
+    default_manager = RiskManager({}, mode="paper")
+    now = _utc(2024, 1, 1, 0, 0)
+    open_trades = [{"instrument": "EUR_USD"}, {"instrument": "AUD_USD"}, {"instrument": "GBP_USD"}]
+    ok, reason = default_manager.should_open(now, 10_000.0, open_trades, "USD_JPY", 0.1)
+    assert ok is False
+    assert reason == "max-positions"
+
+    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "2")
+    env_manager = RiskManager({}, mode="paper")
+    ok, reason = env_manager.should_open(now, 10_000.0, open_trades[:2], "USD_JPY", 0.1)
+    assert ok is False
+    assert reason == "max-positions"

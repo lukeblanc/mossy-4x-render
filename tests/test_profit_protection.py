@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.profit_protection import ProfitProtection
+from src.decision_engine import Evaluation
 from src import main as main_mod
 
 
@@ -32,6 +33,10 @@ class DummyBroker:
         return 0.2
 
     def _pip_size(self, instrument: str) -> float:
+        if instrument.endswith("JPY"):
+            return 0.01
+        if instrument.startswith("XAU"):
+            return 0.1
         return 0.0001
 
 
@@ -122,9 +127,9 @@ def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
             pass
         def should_open(self, *args, **kwargs):
             return False, "daily_profit_cap"
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.5
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 1.0
         def register_entry(self, now_utc, instrument: str):
             self.registered.append(instrument)
@@ -174,6 +179,8 @@ def test_time_exit_only_in_aggressive_mode(capsys):
         aggressive_broker,
         aggressive=True,
         aggressive_max_hold_minutes=45,
+        time_stop_minutes=9999,
+        time_stop_min_pips=9999,
     )
     closed = aggressive_guard.process_open_trades(trades)
     assert closed == ["T-EXIT"]
@@ -184,6 +191,8 @@ def test_time_exit_only_in_aggressive_mode(capsys):
         normal_broker,
         aggressive=False,
         aggressive_max_hold_minutes=45,
+        time_stop_minutes=9999,
+        time_stop_min_pips=9999,
     )
     closed = normal_guard.process_open_trades(trades)
     assert closed == []
@@ -192,6 +201,100 @@ def test_time_exit_only_in_aggressive_mode(capsys):
     output = capsys.readouterr().out
     assert "[TIME-EXIT] Closing EUR_USD" in output
     assert output.count("[TIME-EXIT]") == 1
+
+
+def test_time_stop_uses_atr_fraction_for_xau(capsys):
+    opened_at = datetime.now(timezone.utc) - timedelta(minutes=120)
+    trade = {
+        "id": "XAU-TS",
+        "instrument": "XAU_USD",
+        "currentUnits": 100,
+        "openTime": opened_at.isoformat(),
+        "unrealizedPips": 0.5,
+        "atr": 0.8,
+    }
+    broker = DummyBroker()
+    guard = ProfitProtection(
+        broker,
+        time_stop_minutes=60,
+        time_stop_min_pips=2.0,
+        time_stop_xau_atr_mult=0.5,
+    )
+
+    closed = guard.process_open_trades([trade], now_utc=opened_at + timedelta(minutes=120))
+
+    assert closed == ["XAU-TS"]
+    assert broker.closed == [{"trade_id": "XAU-TS", "instrument": "XAU_USD"}]
+    output = capsys.readouterr().out
+    assert "[TIME-STOP] TIME_STOP XAU_USD" in output
+
+
+def test_time_stop_runs_when_entries_blocked(monkeypatch):
+    class TimeStopBroker(DummyBroker):
+        def account_equity(self):
+            return 10_000.0
+        def close_all_positions(self):
+            pass
+
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+        demo_mode = False
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
+        def should_open(self, *args, **kwargs):
+            return False, "daily-profit-cap"
+        def sl_distance_from_atr(self, atr, instrument=None):
+            return 0.0
+        def tp_distance_from_atr(self, atr, instrument=None):
+            return 0.0
+        def register_entry(self, *args, **kwargs):
+            pass
+        def register_exit(self, *args, **kwargs):
+            pass
+
+    class DummyEngine:
+        def __init__(self):
+            self.marked = []
+        def evaluate_all(self):
+            return [
+                Evaluation(
+                    instrument="GBP_USD",
+                    signal="BUY",
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
+                    reason="trend",
+                    market_active=True,
+                )
+            ]
+        def mark_trade(self, instrument):
+            self.marked.append(instrument)
+
+    stale_open = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+    open_trade = {
+        "id": "STALE",
+        "instrument": "EUR_USD",
+        "currentUnits": 1000,
+        "openTime": stale_open,
+        "unrealizedPips": 1.0,
+    }
+    broker = TimeStopBroker()
+    guard = ProfitProtection(broker, time_stop_minutes=1, time_stop_min_pips=2.0)
+    monkeypatch.setattr(main_mod, "profit_guard", guard)
+    monkeypatch.setattr(main_mod, "broker", broker)
+    monkeypatch.setattr(main_mod, "risk", DummyRisk())
+    monkeypatch.setattr(main_mod, "engine", DummyEngine())
+    monkeypatch.setattr(main_mod, "_open_trades_state", lambda: [open_trade])
+    monkeypatch.setattr(main_mod.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main_mod.position_sizer, "units_for_risk", lambda *args, **kwargs: 0)
+
+    main_mod.asyncio.run(main_mod.decision_cycle())
+
+    assert {"trade_id": "STALE", "instrument": "EUR_USD"} in broker.closed
 
 
 def test_demo_trailing_thresholds():

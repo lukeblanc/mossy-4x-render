@@ -12,6 +12,7 @@ class TrailingState:
     high_water_profit: Optional[float] = None
     trail_active: bool = False
     last_update: Optional[datetime] = None
+    open_time: Optional[datetime] = None
 
 
 class BrokerLike(Protocol):
@@ -52,6 +53,9 @@ class ProfitProtection:
         aggressive_max_hold_minutes: float = 45.0,
         aggressive_max_loss_usd: float = 5.0,
         aggressive_max_loss_atr_mult: float = 1.2,
+        time_stop_minutes: float = 90.0,
+        time_stop_min_pips: float = 2.0,
+        time_stop_xau_atr_mult: float = 0.35,
     ) -> None:
         self.broker = broker
         self.arm_pips = float(arm_pips)
@@ -69,6 +73,9 @@ class ProfitProtection:
         self.aggressive_max_hold_minutes = float(aggressive_max_hold_minutes)
         self.aggressive_max_loss_usd = float(aggressive_max_loss_usd)
         self.aggressive_max_loss_atr_mult = float(aggressive_max_loss_atr_mult)
+        self.time_stop_minutes = float(time_stop_minutes)
+        self.time_stop_min_pips = float(time_stop_min_pips)
+        self.time_stop_xau_atr_mult = float(time_stop_xau_atr_mult)
         self._state: Dict[str, TrailingState] = {}
 
     def snapshot(self) -> Dict[str, TrailingState]:
@@ -91,12 +98,28 @@ class ProfitProtection:
 
             active_keys.add(trade_id)
             state = self._state.get(trade_id, TrailingState())
-            if self._interval_blocked(state, now_utc):
-                continue
+            state.open_time = state.open_time or self._open_time_from_trade(trade)
 
             spread_pips = self._current_spread(instrument)
             profit = self._profit_from_trade(trade, instrument)
             pips = self._pips_from_trade(trade, instrument, profit, units)
+            atr_val = self._atr_for_trade(trade)
+            minutes_open = self._minutes_open(trade, now_utc, state.open_time)
+
+            if self._maybe_time_stop(
+                trade_id,
+                instrument,
+                pips,
+                minutes_open,
+                atr_val,
+                spread_pips,
+            ):
+                closed_trades.append(trade_id)
+                self._state.pop(trade_id, None)
+                continue
+
+            if self._interval_blocked(state, now_utc):
+                continue
 
             self._update_high_water(trade_id, state, pips, profit)
             state.last_update = now_utc
@@ -242,6 +265,15 @@ class ProfitProtection:
             return profit, state.high_water_profit, self.arm_usd, self.giveback_usd, "usd"
         return profit, state.high_water_profit, self.arm_usd, self.giveback_usd, "usd"
 
+    def _time_stop_threshold(self, instrument: str, atr_value: Optional[float]) -> float:
+        base_threshold = max(0.0, self.time_stop_min_pips)
+        if instrument == "XAU_USD" and atr_value is not None and atr_value > 0:
+            pip_size = self._pip_size(instrument)
+            if pip_size > 0:
+                atr_pips = atr_value / pip_size
+                return max(base_threshold, atr_pips * self.time_stop_xau_atr_mult)
+        return base_threshold
+
     def _update_high_water(
         self,
         trade_id: str,
@@ -262,6 +294,45 @@ class ProfitProtection:
             return False
         delta = now_utc - state.last_update
         return delta.total_seconds() < self.min_check_interval_sec
+
+    def _maybe_time_stop(
+        self,
+        trade_id: str,
+        instrument: str,
+        pips: Optional[float],
+        minutes_open: Optional[float],
+        atr_value: Optional[float],
+        spread_pips: Optional[float],
+    ) -> bool:
+        if self.time_stop_minutes <= 0 or self.time_stop_min_pips < 0:
+            return False
+        if minutes_open is None or minutes_open < self.time_stop_minutes:
+            return False
+        if pips is None:
+            return False
+
+        threshold = self._time_stop_threshold(instrument, atr_value)
+        if pips >= threshold:
+            return False
+
+        summary = (
+            f"TIME_STOP {instrument} age={minutes_open:.1f}m "
+            f"pips={pips:.2f} threshold={threshold:.2f}"
+        )
+        if self._close_trade(
+            trade_id,
+            instrument,
+            None,
+            pips,
+            threshold,
+            threshold,
+            spread_pips,
+            log_prefix="[TIME-STOP]",
+            reason="TIME_STOP",
+            summary=summary,
+        ):
+            return True
+        return False
 
     def _maybe_aggressive_exit(
         self,
@@ -343,8 +414,8 @@ class ProfitProtection:
                 return None
         return None
 
-    def _minutes_open(self, trade: Dict, now_utc: datetime) -> Optional[float]:
-        opened_at = self._open_time_from_trade(trade)
+    def _minutes_open(self, trade: Dict, now_utc: datetime, open_time: Optional[datetime] = None) -> Optional[float]:
+        opened_at = open_time or self._open_time_from_trade(trade)
         if opened_at is None:
             return None
         delta = now_utc - opened_at

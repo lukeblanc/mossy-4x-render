@@ -142,12 +142,12 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             if atr is None:
                 return 0.0
             return atr * 1.5
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             if atr is None:
                 return 0.0
             return atr * 3.0
@@ -287,8 +287,11 @@ def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.01
+
+        def tp_distance_from_atr(self, atr, instrument=None):
+            return 0.02
 
         def register_entry(self, *args, **kwargs):
             pass
@@ -327,10 +330,10 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.01
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 0.02
 
         def register_entry(self, now_utc, instrument: str):
@@ -452,10 +455,10 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.01
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 0.02
 
         def register_entry(self, now_utc, instrument: str):
@@ -576,10 +579,10 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.01
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 0.02
 
         def register_entry(self, now_utc, instrument: str):
@@ -693,10 +696,10 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.01
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 0.02
 
         def register_entry(self, now_utc, instrument: str):
