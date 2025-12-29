@@ -101,6 +101,26 @@ risk_config = config.get("risk", {}) or {}
 aggressive_max_hold_minutes = float(os.getenv("AGGRESSIVE_MAX_HOLD_MINUTES", config.get("aggressive_max_hold_minutes", 45)))
 aggressive_max_loss_usd = float(os.getenv("AGGRESSIVE_MAX_LOSS_USD", config.get("aggressive_max_loss_usd", 5.0)))
 aggressive_max_loss_atr_mult = float(os.getenv("AGGRESSIVE_MAX_LOSS_ATR_MULT", config.get("aggressive_max_loss_atr_mult", 1.2)))
+trailing_config = config.get("trailing", {}) or {}
+trail_use_pips = _as_bool(os.getenv("TRAIL_USE_PIPS", trailing_config.get("use_pips", True)))
+trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", trailing_config.get("arm_pips", 8.0)))
+trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", trailing_config.get("giveback_pips", 4.0)))
+trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", trailing_config.get("arm_usd", 3.0)))
+trail_giveback_usd = float(os.getenv("TRAIL_GIVEBACK_USD", trailing_config.get("giveback_usd", 0.5)))
+be_arm_pips = float(os.getenv("BE_ARM_PIPS", trailing_config.get("be_arm_pips", 6.0)))
+be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", trailing_config.get("be_offset_pips", 1.0)))
+min_check_interval_sec = float(os.getenv("MIN_CHECK_INTERVAL_SEC", trailing_config.get("min_check_interval_sec", 0.0)))
+trailing_config = {
+    "arm_pips": trail_arm_pips,
+    "giveback_pips": trail_giveback_pips,
+    "arm_usd": trail_arm_usd,
+    "giveback_usd": trail_giveback_usd,
+    "use_pips": trail_use_pips,
+    "be_arm_pips": be_arm_pips,
+    "be_offset_pips": be_offset_pips,
+    "min_check_interval_sec": min_check_interval_sec,
+}
+config["trailing"] = trailing_config
 
 # Baseline risk defaults
 risk_config.setdefault("risk_per_trade_pct", float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005))))
@@ -160,21 +180,55 @@ def _profit_guard_for_mode(
     max_hold_minutes: float = 45.0,
     max_loss_usd: float = 5.0,
     max_loss_atr_mult: float = 1.2,
+    trailing: Dict | None = None,
 ) -> ProfitProtection:
     label = (mode or "").lower()
+    trailing_cfg = trailing or trailing_config
     if aggressive:
         return ProfitProtection(
             broker,
             trigger=5.0,
             trail=1.5,
+            arm_usd=5.0,
+            giveback_usd=1.5,
+            arm_pips=trailing_cfg["arm_pips"],
+            giveback_pips=trailing_cfg["giveback_pips"],
+            use_pips=trailing_cfg["use_pips"],
+            be_arm_pips=trailing_cfg["be_arm_pips"],
+            be_offset_pips=trailing_cfg["be_offset_pips"],
+            min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
             aggressive=True,
             aggressive_max_hold_minutes=max_hold_minutes,
             aggressive_max_loss_usd=max_loss_usd,
             aggressive_max_loss_atr_mult=max_loss_atr_mult,
         )
     if label == "demo":
-        return ProfitProtection(broker, trigger=1.0, trail=0.5)
-    return ProfitProtection(broker)
+        return ProfitProtection(
+            broker,
+            trigger=1.0,
+            trail=0.5,
+            arm_usd=1.0,
+            giveback_usd=0.5,
+            arm_pips=trailing_cfg["arm_pips"],
+            giveback_pips=trailing_cfg["giveback_pips"],
+            use_pips=trailing_cfg["use_pips"],
+            be_arm_pips=trailing_cfg["be_arm_pips"],
+            be_offset_pips=trailing_cfg["be_offset_pips"],
+            min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
+        )
+    return ProfitProtection(
+        broker,
+        trigger=3.0,
+        trail=0.5,
+        arm_usd=trailing_cfg["arm_usd"],
+        giveback_usd=trailing_cfg["giveback_usd"],
+        arm_pips=trailing_cfg["arm_pips"],
+        giveback_pips=trailing_cfg["giveback_pips"],
+        use_pips=trailing_cfg["use_pips"],
+        be_arm_pips=trailing_cfg["be_arm_pips"],
+        be_offset_pips=trailing_cfg["be_offset_pips"],
+        min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
+    )
 
 
 profit_guard = _profit_guard_for_mode(
@@ -184,6 +238,7 @@ profit_guard = _profit_guard_for_mode(
     max_hold_minutes=aggressive_max_hold_minutes,
     max_loss_usd=aggressive_max_loss_usd,
     max_loss_atr_mult=aggressive_max_loss_atr_mult,
+    trailing=trailing_config,
 )
 
 
@@ -197,6 +252,13 @@ def _open_trades_state() -> List[Dict]:
     except AttributeError:
         # Older broker implementations may not yet expose list_open_trades.
         return []
+
+
+def _trade_identifier(trade: Dict) -> str | None:
+    try:
+        return profit_guard._trade_id(trade)  # type: ignore[attr-defined]
+    except Exception:
+        return None
 
 
 def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool:
@@ -358,7 +420,8 @@ async def decision_cycle() -> None:
             open_trades = [
                 trade
                 for trade in open_trades
-                if trade.get("instrument") not in closed_by_trail
+                if (trade.get("instrument") not in closed_by_trail)
+                and (_trade_identifier(trade) not in closed_by_trail)
             ]
 
         session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env

@@ -47,5 +47,15 @@
       "start": "04:55",
       "end": "05:05"
     }
+  },
+  "trailing": {
+    "arm_pips": 8.0,
+    "giveback_pips": 4.0,
+    "arm_usd": 3.0,
+    "giveback_usd": 0.5,
+    "use_pips": true,
+    "be_arm_pips": 6.0,
+    "be_offset_pips": 1.0,
+    "min_check_interval_sec": 0.0
   }
 }
