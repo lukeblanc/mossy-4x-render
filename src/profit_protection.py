@@ -1,8 +1,17 @@
 """Profit-protection logic for trailing unrealized gains."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Protocol
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple
+
+
+@dataclass
+class TrailingState:
+    high_water_pips: Optional[float] = None
+    high_water_profit: Optional[float] = None
+    trail_active: bool = False
+    last_update: Optional[datetime] = None
 
 
 class BrokerLike(Protocol):
@@ -12,9 +21,18 @@ class BrokerLike(Protocol):
     def close_position(self, instrument: str) -> Dict:
         ...
 
+    def close_trade(self, trade_id: str, instrument: Optional[str] = None) -> Dict:
+        ...
+
+    def current_spread(self, instrument: str) -> Optional[float]:
+        ...
+
+    def _pip_size(self, instrument: str) -> float:
+        ...
+
 
 class ProfitProtection:
-    """Maintain per-instrument high-water marks and apply trailing exits."""
+    """Maintain per-trade high-water marks and apply trailing exits."""
 
     def __init__(
         self,
@@ -22,84 +40,127 @@ class ProfitProtection:
         trigger: float = 3.0,
         trail: float = 0.5,
         *,
+        arm_pips: float = 8.0,
+        giveback_pips: float = 4.0,
+        arm_usd: Optional[float] = None,
+        giveback_usd: Optional[float] = None,
+        use_pips: bool = True,
+        be_arm_pips: float = 6.0,
+        be_offset_pips: float = 1.0,
+        min_check_interval_sec: float = 0.0,
         aggressive: bool = False,
         aggressive_max_hold_minutes: float = 45.0,
         aggressive_max_loss_usd: float = 5.0,
         aggressive_max_loss_atr_mult: float = 1.2,
     ) -> None:
         self.broker = broker
-        self.trigger = float(trigger)
-        self.trail = float(trail)
+        self.arm_pips = float(arm_pips)
+        self.giveback_pips = float(giveback_pips)
+        self.arm_usd = float(arm_usd if arm_usd is not None else trigger)
+        self.giveback_usd = float(giveback_usd if giveback_usd is not None else trail)
+        # Preserve legacy attributes for backwards compatibility/tests
+        self.trigger = self.arm_usd
+        self.trail = self.giveback_usd
+        self.use_pips = bool(use_pips)
+        self.be_arm_pips = float(be_arm_pips)
+        self.be_offset_pips = float(be_offset_pips)
+        self.min_check_interval_sec = float(min_check_interval_sec)
         self.aggressive = aggressive
         self.aggressive_max_hold_minutes = float(aggressive_max_hold_minutes)
         self.aggressive_max_loss_usd = float(aggressive_max_loss_usd)
         self.aggressive_max_loss_atr_mult = float(aggressive_max_loss_atr_mult)
-        self._high_water: Dict[str, float] = {}
+        self._state: Dict[str, TrailingState] = {}
 
-    def snapshot(self) -> Dict[str, float]:
-        """Return a shallow copy of the current high-water marks (useful for tests)."""
-        return dict(self._high_water)
+    def snapshot(self) -> Dict[str, TrailingState]:
+        """Return a shallow copy of the current per-trade trailing state (test helper)."""
+        return dict(self._state)
 
-    def process_open_trades(self, open_trades: List[Dict]) -> List[str]:
-        """
-        Inspect open trades, update their high-water marks and close when they
-        violate the trailing stop rule.
+    def process_open_trades(self, open_trades: List[Dict], *, now_utc: Optional[datetime] = None) -> List[str]:
+        """Inspect open trades, update their high-water marks, and close on trailing giveback."""
 
-        Returns a list of instruments that were closed during this invocation.
-        """
-        active_instruments = set()
-        closed_instruments: List[str] = []
-
-        now_utc = datetime.now(timezone.utc)
+        now_utc = now_utc or datetime.now(timezone.utc)
+        active_keys = set()
+        closed_trades: List[str] = []
 
         for trade in open_trades:
-            label: str
-            if isinstance(trade, dict):
-                label = str(trade.get("instrument") or "<unknown>")
-            else:
-                label = str(trade)
-            print(f"[CHECK-DEBUG] Checking {label}", flush=True)
-
+            trade_id = self._trade_id(trade)
             instrument = self._instrument_from_trade(trade)
-            if not instrument:
-                continue
-            active_instruments.add(instrument)
-
-            profit = self._safe_profit(instrument)
-            if profit is None:
+            units = self._units_from_trade(trade)
+            if not trade_id or not instrument or units == 0:
                 continue
 
-            high_water = self._high_water.get(instrument)
-            if high_water is None or profit > high_water:
-                self._high_water[instrument] = profit
-                high_water = profit
+            active_keys.add(trade_id)
+            state = self._state.get(trade_id, TrailingState())
+            if self._interval_blocked(state, now_utc):
+                continue
 
-            print(
-                f"[TRAIL-DEBUG] profit={profit:.2f} high_water={high_water:.2f}",
-                flush=True,
+            spread_pips = self._current_spread(instrument)
+            profit = self._profit_from_trade(trade, instrument)
+            pips = self._pips_from_trade(trade, instrument, profit, units)
+
+            self._update_high_water(trade_id, state, pips, profit)
+            state.last_update = now_utc
+            self._state[trade_id] = state
+
+            metric, high_water, arm_threshold, giveback, metric_label = self._metric_bundle(
+                state, pips, profit
             )
 
-            if self.aggressive and self._maybe_aggressive_exit(trade, instrument, profit, now_utc):
-                closed_instruments.append(instrument)
-                self._high_water.pop(instrument, None)
+            if metric is None or high_water is None:
                 continue
 
-            if (
-                high_water >= self.trigger
-                and profit <= high_water - self.trail
-                and self._close_position(instrument, profit, high_water)
-            ):
-                closed_instruments.append(instrument)
-                self._high_water.pop(instrument, None)
+            if self.aggressive and self._maybe_aggressive_exit(trade, trade_id, instrument, profit, now_utc):
+                closed_trades.append(trade_id)
+                self._state.pop(trade_id, None)
+                continue
 
-        self._cleanup_stale(active_instruments)
-        return closed_instruments
+            if not state.trail_active and metric >= arm_threshold:
+                state.trail_active = True
+                print(f"[TRAIL] armed ticket={trade_id} profit_{metric_label}={metric:.2f}", flush=True)
 
-    def _cleanup_stale(self, active_instruments: Iterable[str]) -> None:
-        active = set(active_instruments)
-        stale = [inst for inst in self._high_water if inst not in active]
-        for inst in stale:
-            self._high_water.pop(inst, None)
+            if not state.trail_active:
+                continue
+
+            trailing_floor = high_water - giveback
+            if metric_label == "pips" and pips is not None and pips >= self.be_arm_pips:
+                trailing_floor = max(trailing_floor, self.be_offset_pips)
+
+            if metric <= trailing_floor:
+                if self._close_trade(
+                    trade_id,
+                    instrument,
+                    profit,
+                    pips,
+                    trailing_floor,
+                    high_water,
+                    spread_pips,
+                    reason="TRAIL_GIVEBACK",
+                ):
+                    closed_trades.append(trade_id)
+                    self._state.pop(trade_id, None)
+
+        self._cleanup_stale(active_keys)
+        return closed_trades
+
+    def _cleanup_stale(self, active_keys: Iterable[str]) -> None:
+        active = set(active_keys)
+        stale = [key for key in self._state if key not in active]
+        for key in stale:
+            self._state.pop(key, None)
+
+    @staticmethod
+    def _trade_id(trade: Dict) -> Optional[str]:
+        if not isinstance(trade, dict):
+            return None
+        for key in ("id", "tradeID", "ticket", "position_id"):
+            value = trade.get(key)
+            if value is not None:
+                return str(value)
+        instrument = trade.get("instrument")
+        open_time = trade.get("openTime") or trade.get("open_time")
+        if instrument and open_time:
+            return f"{instrument}:{open_time}"
+        return instrument
 
     @staticmethod
     def _instrument_from_trade(trade: Dict) -> Optional[str]:
@@ -115,9 +176,24 @@ class ProfitProtection:
                 pass
         return instrument
 
-    def _safe_profit(self, instrument: str) -> Optional[float]:
+    @staticmethod
+    def _units_from_trade(trade: Dict) -> float:
+        units = trade.get("currentUnits") or trade.get("current_units") or trade.get("units")
         try:
-            profit = self.broker.get_unrealized_profit(instrument)
+            return float(units)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _profit_from_trade(self, trade: Dict, instrument: str) -> Optional[float]:
+        if isinstance(trade, dict):
+            for key in ("unrealizedPL", "unrealized_pl", "profit", "floating"):
+                if key in trade:
+                    try:
+                        return float(trade[key])
+                    except (TypeError, ValueError):
+                        break
+        try:
+            return self.broker.get_unrealized_profit(instrument)
         except AttributeError:
             return None
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -126,16 +202,71 @@ class ProfitProtection:
                 flush=True,
             )
             return None
-        if profit is None:
+
+    def _pips_from_trade(
+        self,
+        trade: Dict,
+        instrument: str,
+        profit: Optional[float],
+        units: float,
+    ) -> Optional[float]:
+        if isinstance(trade, dict):
+            for key in ("unrealizedPips", "unrealized_pips", "pips"):
+                value = trade.get(key)
+                if value is not None:
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        break
+
+        pip_size = self._pip_size(instrument)
+        if pip_size <= 0 or profit is None or units == 0:
             return None
         try:
-            return float(profit)
+            price_diff = profit / units
+            pips = (price_diff / pip_size) * (1 if units > 0 else -1)
+            return float(pips)
         except (TypeError, ValueError):
             return None
+
+    def _metric_bundle(
+        self,
+        state: TrailingState,
+        pips: Optional[float],
+        profit: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float], float, float, str]:
+        if self.use_pips and pips is not None:
+            return pips, state.high_water_pips, self.arm_pips, self.giveback_pips, "pips"
+        if pips is None and profit is not None and self.use_pips:
+            # Fallback to USD when pip math not available
+            return profit, state.high_water_profit, self.arm_usd, self.giveback_usd, "usd"
+        return profit, state.high_water_profit, self.arm_usd, self.giveback_usd, "usd"
+
+    def _update_high_water(
+        self,
+        trade_id: str,
+        state: TrailingState,
+        pips: Optional[float],
+        profit: Optional[float],
+    ) -> None:
+        if pips is not None and (state.high_water_pips is None or pips > state.high_water_pips):
+            state.high_water_pips = pips
+            print(f"[TRAIL] update ticket={trade_id} high_water_pips={pips:.2f}", flush=True)
+        if profit is not None and (state.high_water_profit is None or profit > state.high_water_profit):
+            state.high_water_profit = profit
+
+    def _interval_blocked(self, state: TrailingState, now_utc: datetime) -> bool:
+        if self.min_check_interval_sec <= 0:
+            return False
+        if state.last_update is None:
+            return False
+        delta = now_utc - state.last_update
+        return delta.total_seconds() < self.min_check_interval_sec
 
     def _maybe_aggressive_exit(
         self,
         trade: Dict,
+        trade_id: str,
         instrument: str,
         profit: float,
         now_utc: datetime,
@@ -149,11 +280,16 @@ class ProfitProtection:
             and minutes_open > self.aggressive_max_hold_minutes
             and profit <= 0
         ):
-            if self._close_position(
+            if self._close_trade(
+                trade_id,
                 instrument,
                 profit,
+                None,
                 profit,
+                profit,
+                None,
                 log_prefix="[TIME-EXIT]",
+                reason=f"age>{minutes_open:.1f}m",
                 summary=f"Closing {instrument} after {minutes_open:.1f} minutes, profit={profit:.2f}",
             ):
                 return True
@@ -163,11 +299,16 @@ class ProfitProtection:
         atr_limit = atr_val is not None and profit <= -(self.aggressive_max_loss_atr_mult * atr_val)
         if profit <= 0 and (usd_limit or atr_limit):
             atr_str = "n/a" if atr_val is None else f"{atr_val:.4f}"
-            if self._close_position(
+            if self._close_trade(
+                trade_id,
                 instrument,
                 profit,
+                None,
                 profit,
+                profit,
+                None,
                 log_prefix="[LOSS-FLOOR]",
+                reason="LOSS_FLOOR",
                 summary=f"Closing {instrument} loss={profit:.2f} atr={atr_str}",
             ):
                 return True
@@ -223,17 +364,25 @@ class ProfitProtection:
         except (TypeError, ValueError):
             return None
 
-    def _close_position(
+    def _close_trade(
         self,
+        trade_id: str,
         instrument: str,
-        profit: float,
+        profit: Optional[float],
+        pips: Optional[float],
+        floor: float,
         high_water: float,
+        spread_pips: Optional[float],
         *,
         log_prefix: str = "[TRAIL]",
+        reason: str,
         summary: Optional[str] = None,
     ) -> bool:
         try:
-            result = self.broker.close_position(instrument)
+            if hasattr(self.broker, "close_trade"):
+                result = self.broker.close_trade(trade_id, instrument=instrument)
+            else:
+                result = self.broker.close_position(instrument)
         except AttributeError:
             return False
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -243,23 +392,48 @@ class ProfitProtection:
             )
             return False
 
-        if isinstance(result, dict) and result.get("status") in {"CLOSED", "SIMULATED"}:
+        status = result.get("status") if isinstance(result, dict) else None
+        success = status in {"CLOSED", "SIMULATED", "FILLED"}
+        spread_clause = ""
+        if spread_pips is not None:
+            spread_clause = f" spread={spread_pips:.2f}"
+        metric_clause = (
+            f"current_pips={pips:.2f}" if pips is not None else f"current_profit={profit:.2f}"
+        )
+
+        if success:
             if summary:
-                print(f"{log_prefix} {summary}", flush=True)
+                print(f"{log_prefix} {summary}{spread_clause}", flush=True)
             else:
-                diff = high_water - profit
                 print(
-                    f"{log_prefix} Closed {instrument} at ${profit:.2f} "
-                    f"(fell ${diff:.2f} from high of ${high_water:.2f})",
+                    f"{log_prefix} close ticket={trade_id} {metric_clause} floor={floor:.2f} "
+                    f"high_water={high_water:.2f} reason={reason}{spread_clause}",
                     flush=True,
                 )
             return True
 
-        # Unknown response but still log to aid debugging
-        diff = high_water - profit
         print(
-            f"{log_prefix} Attempted to close {instrument} at ${profit:.2f} "
-            f"(fell ${diff:.2f} from high of ${high_water:.2f}) resp={result}",
+            f"{log_prefix} Attempted close ticket={trade_id} {metric_clause} floor={floor:.2f} "
+            f"high_water={high_water:.2f} reason={reason} resp={result}{spread_clause}",
             flush=True,
         )
         return True
+
+    def _pip_size(self, instrument: str) -> float:
+        try:
+            return float(self.broker._pip_size(instrument))
+        except Exception:
+            if instrument.endswith("JPY"):
+                return 0.01
+            if instrument.startswith("XAU"):
+                return 0.1
+            if instrument.startswith("XAG"):
+                return 0.01
+            return 0.0001
+
+    def _current_spread(self, instrument: str) -> Optional[float]:
+        try:
+            spread = self.broker.current_spread(instrument)
+            return None if spread is None else float(spread)
+        except Exception:
+            return None
