@@ -15,6 +15,7 @@ from app.broker import Broker
 from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
+from src.profit_protection import ProfitProtection
 from src import session_filter
 from src import position_sizer
 from src.projector import project_market
@@ -134,6 +135,9 @@ config["merge_default_instruments"] = _as_bool(
 )
 config["instruments"] = _resolve_instruments_config(config)
 config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
+config["use_macd_confirmation"] = _as_bool(
+    os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
+)
 mode_env = os.getenv("MODE", config.get("mode", "paper")).lower()
 config["mode"] = "paper" if mode_env == "demo" else mode_env
 aggressive_mode = _as_bool(os.getenv("AGGRESSIVE_MODE", config.get("aggressive_mode", False)))
@@ -230,13 +234,17 @@ risk = build_risk_manager(
 )
 
 
-profit_guard = build_profit_protection(
-    mode_env,
-    broker,
-    aggressive_mode,
-    trailing=trailing_config,
-    time_stop=config["time_stop"],
-)
+def _profit_guard_for_mode(mode: str, broker_instance: Broker) -> ProfitProtection:
+    return build_profit_protection(
+        mode,
+        broker_instance,
+        aggressive=aggressive_mode,
+        trailing=trailing_config,
+        time_stop=config["time_stop"],
+    )
+
+
+profit_guard = _profit_guard_for_mode(mode_env, broker)
 
 
 def _startup_checks() -> None:
@@ -318,6 +326,36 @@ def _xau_blocked(signal: str, instrument: str, diagnostics: Dict[str, float] | N
     if signal == "BUY" and not math.isnan(rsi) and rsi > 82 and atr_ratio > 1.15:
         return True, rsi, atr_ratio
     return False, rsi, atr_ratio
+
+
+def _macd_confirmation_enabled() -> bool:
+    return _as_bool(config.get("use_macd_confirmation", False))
+
+
+def _macd_confirms(signal: str, diagnostics: Dict[str, float] | None) -> tuple[bool, float, float, float]:
+    if not _macd_confirmation_enabled():
+        return True, math.nan, math.nan, math.nan
+    if diagnostics is None:
+        return False, math.nan, math.nan, math.nan
+
+    def _coerce(value: object) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return math.nan
+
+    macd_line = _coerce(diagnostics.get("macd_line"))
+    macd_signal = _coerce(diagnostics.get("macd_signal"))
+    macd_histogram = _coerce(diagnostics.get("macd_histogram"))
+
+    if any(math.isnan(val) for val in (macd_line, macd_signal, macd_histogram)):
+        return False, macd_line, macd_signal, macd_histogram
+
+    if signal == "BUY":
+        return macd_line > macd_signal and macd_histogram >= 0, macd_line, macd_signal, macd_histogram
+    if signal == "SELL":
+        return macd_line < macd_signal and macd_histogram <= 0, macd_line, macd_signal, macd_histogram
+    return False, macd_line, macd_signal, macd_histogram
 
 
 def _projector_enabled() -> bool:
@@ -483,6 +521,17 @@ async def decision_cycle() -> None:
             if xau_blocked:
                 print(
                     f"[FILTER] XAU_USD blocked {evaluation.signal}: rsi={rsi_val:.2f} atr_ratio={atr_ratio:.2f}",
+                    flush=True,
+                )
+                continue
+
+            macd_ok, macd_line, macd_signal_line, macd_histogram = _macd_confirms(
+                evaluation.signal, diagnostics
+            )
+            if not macd_ok:
+                print(
+                    f"[FILTER] MACD veto {evaluation.instrument} macd={macd_line:.5f} "
+                    f"signal={macd_signal_line:.5f} hist={macd_histogram:.5f}",
                     flush=True,
                 )
                 continue

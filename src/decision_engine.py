@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import httpx
+from src.indicators import calculate_macd
 
 PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
 
@@ -357,6 +358,12 @@ class DecisionEngine:
         ema_trend_slow = ema_trend_slow_series[-1] if ema_trend_slow_series else math.nan
         rsi_val = self._rsi(closes, rsi_len)
         atr_val, atr_baseline = self._atr_with_baseline(highs, lows, closes, atr_len, baseline_window=50)
+        macd_line, macd_signal, macd_histogram = calculate_macd(
+            closes,
+            fast_length=12,
+            slow_length=26,
+            signal_length=9,
+        )
 
         last_close = closes[-1] if closes else math.nan
         return {
@@ -368,6 +375,9 @@ class DecisionEngine:
             "atr": atr_val,
             "atr_baseline_50": atr_baseline,
             "close": last_close,
+            "macd_line": macd_line,
+            "macd_signal": macd_signal,
+            "macd_histogram": macd_histogram,
         }
 
     def _generate_signal(self, diagnostics: Dict[str, float]) -> (str, str):
