@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -342,22 +342,31 @@ class DecisionEngine:
 
         ema_fast_len = int(self.config.get("ema_fast", 12))
         ema_slow_len = int(self.config.get("ema_slow", 26))
+        ema_trend_fast_len = int(self.config.get("ema_trend_fast", 50))
+        ema_trend_slow_len = int(self.config.get("ema_trend_slow", 200))
         rsi_len = int(self.config.get("rsi_length", 14))
         atr_len = int(self.config.get("atr_length", 14))
 
         ema_fast_series = self._ema(closes, ema_fast_len)
         ema_slow_series = self._ema(closes, ema_slow_len)
+        ema_trend_fast_series = self._ema(closes, ema_trend_fast_len)
+        ema_trend_slow_series = self._ema(closes, ema_trend_slow_len)
         ema_fast = ema_fast_series[-1] if ema_fast_series else math.nan
         ema_slow = ema_slow_series[-1] if ema_slow_series else math.nan
+        ema_trend_fast = ema_trend_fast_series[-1] if ema_trend_fast_series else math.nan
+        ema_trend_slow = ema_trend_slow_series[-1] if ema_trend_slow_series else math.nan
         rsi_val = self._rsi(closes, rsi_len)
-        atr_val = self._atr(highs, lows, closes, atr_len)
+        atr_val, atr_baseline = self._atr_with_baseline(highs, lows, closes, atr_len, baseline_window=50)
 
         last_close = closes[-1] if closes else math.nan
         return {
             "ema_fast": ema_fast,
             "ema_slow": ema_slow,
+            "ema_trend_fast": ema_trend_fast,
+            "ema_trend_slow": ema_trend_slow,
             "rsi": rsi_val,
             "atr": atr_val,
+            "atr_baseline_50": atr_baseline,
             "close": last_close,
         }
 
@@ -414,19 +423,46 @@ class DecisionEngine:
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
-    def _atr(
-        self, highs: List[float], lows: List[float], closes: List[float], length: int
-    ) -> float:
+    def _atr_with_baseline(
+        self,
+        highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        length: int,
+        *,
+        baseline_window: int = 50,
+    ) -> Tuple[float, float]:
         if length <= 0 or len(highs) < length + 1:
-            return math.nan
+            return math.nan, math.nan
+
         true_ranges: List[float] = []
-        for i in range(1, length + 1):
+        for i in range(1, len(highs)):
             high = highs[-i]
             low = lows[-i]
             prev_close = closes[-(i + 1)]
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            true_ranges.append(tr)
-        return sum(true_ranges) / length
+            true_ranges.insert(0, tr)
+
+        atr_values: List[float] = []
+        if true_ranges:
+            rolling_atr = true_ranges[0]
+            atr_values.append(rolling_atr)
+            k = 2 / (length + 1)
+            for tr in true_ranges[1:]:
+                rolling_atr = tr * k + rolling_atr * (1 - k)
+                atr_values.append(rolling_atr)
+
+        if len(atr_values) < 1:
+            return math.nan, math.nan
+
+        current_atr = atr_values[-1]
+        baseline_slice = atr_values[-baseline_window:] if baseline_window > 0 else atr_values
+        if baseline_slice:
+            baseline_atr = sum(baseline_slice) / len(baseline_slice)
+        else:
+            baseline_atr = math.nan
+
+        return current_atr, baseline_atr
 
 
 __all__ = ["DecisionEngine", "Evaluation", "DEFAULT_INSTRUMENTS"]

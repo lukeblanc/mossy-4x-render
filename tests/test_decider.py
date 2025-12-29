@@ -169,7 +169,13 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                 Evaluation(
                     instrument="EUR_USD",
                     signal="BUY",
-                    diagnostics={"atr": 0.01, "close": 1.2345},
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
                     reason="trend",
                     market_active=True,
                 )
@@ -344,7 +350,13 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
                 Evaluation(
                     instrument="EUR_USD",
                     signal="BUY",
-                    diagnostics={"atr": 0.01, "close": 1.2345},
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
                     reason="trend",
                     market_active=True,
                 )
@@ -414,7 +426,7 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
 
     try:
         captured = capsys.readouterr().out
-        assert "[SESSION] Entry blocked – outside trading session" in captured
+        assert "[FILTER] Entries paused (off-session)" in captured
         assert dummy_engine.evaluations == 1
         assert dummy_engine.marked == []
         assert dummy_broker.calls == []
@@ -463,7 +475,13 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
                 Evaluation(
                     instrument="EUR_USD",
                     signal="BUY",
-                    diagnostics={"atr": 0.01, "close": 1.2345},
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
                     reason="trend",
                     market_active=True,
                 )
@@ -581,7 +599,13 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
                 Evaluation(
                     instrument="EUR_USD",
                     signal="BUY",
-                    diagnostics={"atr": 0.01, "close": 1.2345},
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
                     reason="trend",
                     market_active=True,
                 )
@@ -692,7 +716,13 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
                 Evaluation(
                     instrument="EUR_USD",
                     signal="BUY",
-                    diagnostics={"atr": 0.01, "close": 1.2345},
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
                     reason="trend",
                     market_active=True,
                 )
