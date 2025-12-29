@@ -11,18 +11,34 @@ PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
 
 
-def normalize_price(instrument: str, price: float | Decimal | str) -> str:
-    precision = {
+def _precision_for(instrument: str) -> Decimal:
+    return {
         "USD_JPY": Decimal("0.001"),
         "XAU_USD": Decimal("0.01"),
     }.get(instrument, Decimal("0.00001"))
 
-    try:
-        dec_price = Decimal(str(price))
-    except (InvalidOperation, ValueError, TypeError):
-        raise ValueError(f"Invalid price value for normalization: {price}")
 
-    return str(dec_price.quantize(precision, rounding=ROUND_HALF_UP))
+def _quantize_value(value: float | Decimal | str, precision: Decimal) -> Decimal:
+    try:
+        dec_value = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"Invalid numeric value for normalization: {value}")
+
+    return dec_value.quantize(precision, rounding=ROUND_HALF_UP)
+
+
+def normalize_price(instrument: str, price: float | Decimal | str) -> str:
+    precision = _precision_for(instrument)
+    dec_price = _quantize_value(price, precision)
+
+    return str(dec_price)
+
+
+def normalize_distance(instrument: str, distance: float | Decimal | str) -> str:
+    precision = _precision_for(instrument)
+    dec_distance = _quantize_value(distance, precision)
+
+    return str(dec_distance)
 
 
 class Broker:
@@ -110,10 +126,15 @@ class Broker:
         }
 
         if sl_distance is not None and sl_distance > 0:
-            order_payload["stopLossOnFill"] = {
-                "timeInForce": "GTC",
-                "distance": f"{sl_distance:.5f}",
-            }
+            try:
+                normalized_sl_distance = normalize_distance(instrument, sl_distance)
+            except ValueError:
+                normalized_sl_distance = None
+            if normalized_sl_distance is not None:
+                order_payload["stopLossOnFill"] = {
+                    "timeInForce": "GTC",
+                    "distance": normalized_sl_distance,
+                }
         if (
             entry_price is not None
             and tp_distance is not None
