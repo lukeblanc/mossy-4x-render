@@ -38,10 +38,10 @@ def test_xau_falling_knife_block(monkeypatch, capsys):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.5
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 1.0
 
         def register_entry(self, now_utc, instrument: str):
@@ -150,10 +150,10 @@ def test_off_session_blocks_entries_but_trailing_runs(monkeypatch, capsys):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return 0.5
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return 1.0
 
         def register_entry(self, now_utc, instrument: str):

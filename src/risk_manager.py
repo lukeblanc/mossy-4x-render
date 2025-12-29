@@ -152,9 +152,9 @@ class RiskManager:
         self.risk_per_trade_pct = float(
             self.config.get("risk_per_trade_pct", 0.005)
         )
-        self.max_concurrent_positions = int(
-            self.config.get("max_concurrent_positions", 1)
-        )
+        env_max_positions = os.getenv("MAX_CONCURRENT_POSITIONS") or os.getenv("MAX_OPEN_TRADES")
+        max_positions_cfg = self.config.get("max_concurrent_positions", self.config.get("max_open_trades", 3))
+        self.max_concurrent_positions = int(env_max_positions or max_positions_cfg or 3)
         self.cooldown_candles = int(self.config.get("cooldown_candles", 9))
         self.daily_loss_cap_pct = float(
             self.config.get("daily_loss_cap_pct", 0.02)
@@ -165,9 +165,19 @@ class RiskManager:
         self.weekly_loss_cap_pct = float(
             self.config.get("weekly_loss_cap_pct", 0.03)
         )
-        atr_mult = float(self.config.get("atr_stop_mult", DEFAULT_ATR_STOP_MULT))
-        self.atr_stop_mult = min(atr_mult, DEFAULT_ATR_STOP_MULT)
-        self.tp_rr_multiple = float(self.config.get("tp_rr_multiple", 1.5))
+        self.sl_atr_mult = self._coerce_positive(
+            self.config.get("sl_atr_mult", self.config.get("atr_stop_mult", 1.2)),
+            cap=DEFAULT_ATR_STOP_MULT,
+        )
+        self.tp_atr_mult = self._coerce_positive(
+            self.config.get("tp_atr_mult", self.config.get("tp_rr_multiple", 1.0)),
+            cap=None,
+        )
+        self.atr_stop_mult = self.sl_atr_mult  # backwards compatibility attribute
+        self.tp_rr_multiple = self.tp_atr_mult
+        self.instrument_atr_multipliers: Dict[str, Dict[str, float]] = dict(
+            self.config.get("instrument_atr_multipliers", {}) or {}
+        )
         self.spread_pips_limit: Dict[str, float] = dict(
             self.config.get("spread_pips_limit", {}) or {}
         )
@@ -301,10 +311,21 @@ class RiskManager:
 
         return True, "ok"
 
-    def sl_distance_from_atr(self, atr_price_units: Optional[float]) -> float:
+    def _atr_multipliers_for(self, instrument: Optional[str]) -> Tuple[float, float]:
+        default_sl = self.sl_atr_mult if self.sl_atr_mult > 0 else DEFAULT_ATR_STOP_MULT
+        default_tp = self.tp_atr_mult if self.tp_atr_mult > 0 else 1.0
+        if not instrument:
+            return default_sl, default_tp
+        override = self.instrument_atr_multipliers.get(instrument, {})
+        sl_mult = self._coerce_positive(override.get("sl_atr_mult", default_sl), cap=DEFAULT_ATR_STOP_MULT)
+        tp_mult = self._coerce_positive(override.get("tp_atr_mult", default_tp), cap=None)
+        return sl_mult, tp_mult
+
+    def sl_distance_from_atr(self, atr_price_units: Optional[float], instrument: Optional[str] = None) -> float:
         if atr_price_units is None or atr_price_units <= 0:
             return 0.0
-        return max(0.0, atr_price_units * self.atr_stop_mult)
+        sl_mult, _ = self._atr_multipliers_for(instrument)
+        return max(0.0, atr_price_units * sl_mult)
 
     def register_entry(self, now_utc: datetime, instrument: str) -> None:
         self.state.last_entry_ts_utc = now_utc
@@ -478,6 +499,18 @@ class RiskManager:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _coerce_positive(value: object, *, cap: Optional[float] = None) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if number < 0:
+            number = 0.0
+        if cap is not None:
+            return min(number, cap)
+        return number
+
     def _cooldown_minutes(self) -> int:
         minutes = self._granularity_minutes(self.timeframe)
         if minutes <= 0:
@@ -501,11 +534,11 @@ class RiskManager:
             return 24 * 60
         return 0
 
-    def tp_distance_from_atr(self, atr_price_units: Optional[float]) -> float:
-        sl = self.sl_distance_from_atr(atr_price_units)
-        if sl <= 0:
+    def tp_distance_from_atr(self, atr_price_units: Optional[float], instrument: Optional[str] = None) -> float:
+        if atr_price_units is None or atr_price_units <= 0:
             return 0.0
-        return sl * max(1.0, self.tp_rr_multiple)
+        _, tp_mult = self._atr_multipliers_for(instrument)
+        return max(0.0, atr_price_units * tp_mult)
 
     def _update_peak_equity(self, equity: float) -> None:
         valid = _sanitize_equity(equity)

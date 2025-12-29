@@ -20,7 +20,7 @@
     "USD_JPY",
     "XAU_USD"
   ],
-  "max_open_trades": 1,
+  "max_open_trades": 3,
   "risk_per_trade": 0.08,
   "cooldown_minutes": 2,
   "risk": {
@@ -29,12 +29,19 @@
     "allow_trading_above_target": true,
     "equity_floor": 1000.0,
     "risk_per_trade_pct": 0.0025,
-    "max_concurrent_positions": 1,
+    "max_concurrent_positions": 3,
     "cooldown_minutes": 45,
     "daily_loss_cap_pct": 0.01,
     "weekly_loss_cap_pct": 0.03,
-    "atr_stop_mult": 1.8,
+    "sl_atr_mult": 1.2,
+    "tp_atr_mult": 1.0,
     "atr_period": 14,
+    "instrument_atr_multipliers": {
+      "XAU_USD": {
+        "sl_atr_mult": 1.6,
+        "tp_atr_mult": 0.8
+      }
+    },
     "spread_pips_limit": {
       "EUR_USD": 1.5,
       "AUD_USD": 1.8,
@@ -57,5 +64,10 @@
     "be_arm_pips": 6.0,
     "be_offset_pips": 1.0,
     "min_check_interval_sec": 0.0
+  },
+  "time_stop": {
+    "minutes": 90,
+    "min_pips": 2.0,
+    "xau_atr_mult": 0.35
   }
 }
