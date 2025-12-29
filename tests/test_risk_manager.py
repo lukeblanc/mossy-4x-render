@@ -243,3 +243,19 @@ def test_max_concurrent_positions_default_and_env_override(monkeypatch, state_di
     ok, reason = env_manager.should_open(now, 10_000.0, open_trades[:2], "USD_JPY", 0.1)
     assert ok is False
     assert reason == "max-positions"
+
+
+def test_daily_trade_cap_blocks_and_resets(state_dir):
+    manager = RiskManager({"max_trades_per_day": 2}, mode="paper")
+    now = _utc(2024, 1, 1, 9, 0)
+
+    manager.register_entry(now, "EUR_USD")
+    manager.register_entry(now + timedelta(minutes=5), "GBP_USD")
+
+    ok, reason = manager.should_open(now + timedelta(minutes=10), 10_000.0, [], "AUD_USD", 0.1)
+    assert ok is False
+    assert reason == "daily-trade-cap"
+
+    next_day = now + timedelta(days=1)
+    ok, reason = manager.should_open(next_day, 10_000.0, [], "AUD_USD", 0.1)
+    assert ok is True

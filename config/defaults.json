@@ -53,7 +53,8 @@
     "rollover_quiet_awst": {
       "start": "04:55",
       "end": "05:05"
-    }
+    },
+    "max_trades_per_day": 8
   },
   "trailing": {
     "arm_pips": 8.0,

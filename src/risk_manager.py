@@ -65,6 +65,7 @@ class RiskState:
     live_halted_on_equity_floor: bool = False
     max_drawdown_halt: bool = False
     daily_profit_cap_hit: bool = False
+    daily_entry_count: int = 0
 
     def to_dict(self) -> Dict:
         return {
@@ -85,6 +86,7 @@ class RiskState:
             "live_halted_on_equity_floor": self.live_halted_on_equity_floor,
             "max_drawdown_halt": self.max_drawdown_halt,
             "daily_profit_cap_hit": self.daily_profit_cap_hit,
+            "daily_entry_count": self.daily_entry_count,
         }
 
     @classmethod
@@ -109,6 +111,7 @@ class RiskState:
             ),
             max_drawdown_halt=bool(data.get("max_drawdown_halt", False)),
             daily_profit_cap_hit=bool(data.get("daily_profit_cap_hit", False)),
+            daily_entry_count=int(data.get("daily_entry_count", 0) or 0),
         )
 
 
@@ -156,6 +159,9 @@ class RiskManager:
         max_positions_cfg = self.config.get("max_concurrent_positions", self.config.get("max_open_trades", 3))
         self.max_concurrent_positions = int(env_max_positions or max_positions_cfg or 3)
         self.cooldown_candles = int(self.config.get("cooldown_candles", 9))
+        env_max_trades = os.getenv("MAX_TRADES_PER_DAY")
+        configured_max_trades = self.config.get("max_trades_per_day", 0)
+        self.max_trades_per_day = int(env_max_trades or configured_max_trades or 0)
         self.daily_loss_cap_pct = float(
             self.config.get("daily_loss_cap_pct", 0.02)
         )
@@ -294,6 +300,9 @@ class RiskManager:
         if self.state.max_drawdown_halt:
             return False, "max-drawdown"
 
+        if self.max_trades_per_day > 0 and self.state.daily_entry_count >= self.max_trades_per_day:
+            return False, "daily-trade-cap"
+
         if self.max_concurrent_positions > 0 and len(open_positions) >= self.max_concurrent_positions:
             return False, "max-positions"
 
@@ -330,6 +339,7 @@ class RiskManager:
     def register_entry(self, now_utc: datetime, instrument: str) -> None:
         self.state.last_entry_ts_utc = now_utc
         self.state.last_entry_per_instrument[instrument] = now_utc
+        self.state.daily_entry_count = int(self.state.daily_entry_count or 0) + 1
         cooldown_minutes = self._cooldown_minutes()
         if cooldown_minutes > 0:
             self.state.cooldown_until[instrument] = now_utc + timedelta(minutes=cooldown_minutes)
@@ -383,9 +393,12 @@ class RiskManager:
                 changed = True
 
         if valid_equity is None:
-            if self.state.day_id != day_id:
+            prev_day_id = self.state.day_id
+            if prev_day_id != day_id:
                 self.state.day_id = day_id
                 self.state.day_start_equity = None
+                if prev_day_id is not None:
+                    self.state.daily_entry_count = 0
                 changed = True
 
             if self.state.week_id != week_id:
@@ -399,10 +412,13 @@ class RiskManager:
                 self._save_state()
             return
 
-        if self.state.day_id != day_id:
+        prev_day_id = self.state.day_id
+        if prev_day_id != day_id:
             self.state.day_id = day_id
             self.state.day_start_equity = valid_equity
             self.state.daily_realized_pl = 0.0
+            if prev_day_id is not None:
+                self.state.daily_entry_count = 0
             changed = True
 
         if self.state.week_id != week_id:
