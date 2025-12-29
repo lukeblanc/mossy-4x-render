@@ -13,6 +13,7 @@
   "adx_filter": 20,
   "atr_length": 14,
   "min_atr": 0.00005,
+  "use_macd_confirmation": false,
   "instruments": [
     "EUR_USD",
     "AUD_USD",

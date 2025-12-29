@@ -27,3 +27,7 @@ The trailing exit is controlled via environment variables (all optional):
   - `TIME_STOP_MINUTES` (default `90`) — minimum trade age before evaluation.
   - `TIME_STOP_MIN_PIPS` (default `2`) — close if pips stay below this after the time threshold.
   - `TIME_STOP_XAU_ATR_MULT` (default `0.35`) — for `XAU_USD`, minimum pips can float on ATR (`atr/pip_size * multiplier`).
+
+## Entry confirmation
+
+- `USE_MACD_CONFIRMATION` (default `false`) — when enabled, the standard 12/26/9 MACD must agree with the existing EMA/RSI signal. MACD only filters entries; it never opens trades on its own.
