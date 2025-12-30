@@ -15,6 +15,7 @@ from app.broker import Broker
 from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
+import src.profit_protection as profit_protection
 from src.profit_protection import ProfitProtection
 from src import orb, session_filter
 from src import position_sizer
@@ -173,13 +174,19 @@ trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", trailing_config.get
 trail_arm_ccy = float(
     os.getenv(
         "TRAIL_ARM_CCY",
-        os.getenv("TRAIL_ARM_USD", trailing_config.get("arm_ccy", trailing_config.get("arm_usd", 0.75))),
+        os.getenv(
+            "TRAIL_ARM_USD",
+            trailing_config.get("arm_ccy", trailing_config.get("arm_usd", profit_protection.ARM_AT_CCY)),
+        ),
     )
 )
 trail_giveback_ccy = float(
     os.getenv(
         "TRAIL_GIVEBACK_CCY",
-        os.getenv("TRAIL_GIVEBACK_USD", trailing_config.get("giveback_ccy", trailing_config.get("giveback_usd", 0.5))),
+        os.getenv(
+            "TRAIL_GIVEBACK_USD",
+            trailing_config.get("giveback_ccy", trailing_config.get("giveback_usd", profit_protection.GIVEBACK_CCY)),
+        ),
     )
 )
 be_arm_pips = float(os.getenv("BE_ARM_PIPS", trailing_config.get("be_arm_pips", 0.0)))

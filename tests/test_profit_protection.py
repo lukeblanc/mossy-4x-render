@@ -18,10 +18,11 @@ from src import main as main_mod
 
 
 class DummyBroker:
-    def __init__(self, profits=None, pips=None):
+    def __init__(self, profits=None, pips=None, open_trades=None):
         self.profits = {k: list(v) for k, v in (profits or {}).items()}
         self.pips = {k: list(v) for k, v in (pips or {}).items()}
         self.closed = []
+        self.trades = list(open_trades) if open_trades is not None else None
 
     def get_unrealized_profit(self, instrument: str):
         values = self.profits.get(instrument)
@@ -47,6 +48,11 @@ class DummyBroker:
             return 0.1
         return 0.0001
 
+    def list_open_trades(self):
+        if self.trades is None:
+            return None
+        return list(self.trades)
+
 
 def _trade(trade_id: str, instrument: str, units: float, profit: float | None = None, pips: float | None = None):
     payload = {
@@ -62,7 +68,7 @@ def _trade(trade_id: str, instrument: str, units: float, profit: float | None = 
 
 
 def test_trailing_giveback_closes_at_floor(capsys):
-    broker = DummyBroker()
+    broker = DummyBroker(profits={"EUR_USD": [0.0, 0.8, 1.2, 0.6]})
     guard = ProfitProtection(
         broker,
         arm_ccy=0.75,
@@ -90,7 +96,7 @@ def test_trailing_giveback_closes_at_floor(capsys):
 
 
 def test_multiple_positions_do_not_share_state():
-    broker = DummyBroker()
+    broker = DummyBroker(profits={"EUR_USD": [0.6, 0.3, 0.2, 0.6]})
     guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
 
     t1 = _trade("T1", "EUR_USD", 1000, profit=0.6)
@@ -119,14 +125,14 @@ def test_multiple_positions_do_not_share_state():
 def test_closeout_missing_treated_as_closed_when_gone(capsys):
     class CloseoutBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
-            self.trades = []
+            super().__init__(profits={"GBP_USD": [0.8, 0.2]}, open_trades=[{"id": "T-MISS", "instrument": "GBP_USD", "currentUnits": 1000}])
 
         def close_trade(self, trade_id: str, instrument: str | None = None):
+            self.trades = []
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
 
         def list_open_trades(self):
-            return []
+            return list(self.trades)
 
     broker = CloseoutBroker()
     guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
@@ -144,8 +150,7 @@ def test_closeout_missing_treated_as_closed_when_gone(capsys):
 def test_closeout_missing_warns_when_position_still_open(capsys):
     class StickyBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
-            self.trades = [{"id": "T-STICK", "instrument": "GBP_USD"}]
+            super().__init__(profits={"GBP_USD": [0.8, 0.2]}, open_trades=[{"id": "T-STICK", "instrument": "GBP_USD", "currentUnits": 1000}])
 
         def close_trade(self, trade_id: str, instrument: str | None = None):
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
@@ -169,10 +174,10 @@ def test_closeout_missing_warns_when_position_still_open(capsys):
 def test_payload_with_missing_position_marks_closed(capsys):
     class PayloadBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
-            self.trades = [{"id": "T-PAY", "instrument": "EUR_USD"}]
+            super().__init__(profits={"EUR_USD": [0.8, 0.2]}, open_trades=[{"id": "T-PAY", "instrument": "EUR_USD", "currentUnits": 1000}])
 
         def close_trade(self, trade_id: str, instrument: str | None = None):
+            self.trades = []
             payload = {
                 "longOrderRejectTransaction": {
                     "rejectReason": "CLOSEOUT_POSITION_DOESNT_EXIST",
@@ -199,7 +204,7 @@ def test_payload_with_missing_position_marks_closed(capsys):
 def test_zero_units_snapshot_treated_as_closed(capsys):
     class ZeroUnitsBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
+            super().__init__(profits={"EUR_USD": [0.8, 0.2]})
             self.trades = [{"id": "T-ZERO", "instrument": "EUR_USD", "units": 0}]
 
         def close_trade(self, trade_id: str, instrument: str | None = None):
@@ -212,22 +217,23 @@ def test_zero_units_snapshot_treated_as_closed(capsys):
     guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
 
     armed = _trade("T-ZERO", "EUR_USD", 1000, profit=0.8)
-    guard.process_open_trades([armed])
+    first_closed = guard.process_open_trades([armed])
     drop = _trade("T-ZERO", "EUR_USD", 1000, profit=0.2)
     closed = guard.process_open_trades([drop])
 
-    assert closed == ["T-ZERO"]
+    assert first_closed == ["T-ZERO"]
+    assert closed == []
     out = capsys.readouterr().out
-    assert "[TRAIL][INFO] Broker missing position – treated as closed ticket=T-ZERO instrument=EUR_USD" in out
+    assert "reconcile_missing_position ticket=T-ZERO instrument=EUR_USD action=mark_closed" in out
 
 
 def test_missing_position_reconciles_without_warn(capsys):
     class MissingPositionBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
-            self.trades = []
+            super().__init__(profits={"USD_JPY": [0.8, 0.1]}, open_trades=[{"id": "T-404", "instrument": "USD_JPY", "currentUnits": 1000}])
 
         def close_trade(self, trade_id: str, instrument: str | None = None):
+            self.trades = []
             return {
                 "status": "ERROR",
                 "code": 400,
@@ -261,13 +267,14 @@ def test_missing_position_reconciles_without_warn(capsys):
 def test_missing_position_not_retried(capsys):
     class NoRetryBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
+            super().__init__(profits={"EUR_USD": [0.8, 0.1, 0.1]}, open_trades=[{"id": "T-NORETRY", "instrument": "EUR_USD", "currentUnits": 1000}])
             self.calls = 0
         def close_trade(self, trade_id: str, instrument: str | None = None):
             self.calls += 1
+            self.trades = []
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
         def list_open_trades(self):
-            return []
+            return list(self.trades)
 
     broker = NoRetryBroker()
     guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
@@ -286,7 +293,7 @@ def test_missing_position_not_retried(capsys):
 
 
 def test_trail_arms_at_one_and_closes_after_half_giveback(capsys):
-    broker = DummyBroker()
+    broker = DummyBroker(profits={"EUR_USD": [0.90, 1.00, 0.40]})
     guard = ProfitProtection(broker)  # defaults arm at 1.00, giveback 0.50
 
     open_trades = [_trade("T-ARM", "EUR_USD", 1000, profit=0.90)]
@@ -313,7 +320,7 @@ def test_trail_arms_at_one_and_closes_after_half_giveback(capsys):
 def test_trailing_close_not_blocked_by_interval(capsys):
     class CountingBroker(DummyBroker):
         def __init__(self):
-            super().__init__()
+            super().__init__(profits={"EUR_USD": [1.0, 0.5]})
             self.calls = 0
 
         def close_trade(self, trade_id: str, instrument: str | None = None):
@@ -339,6 +346,48 @@ def test_trailing_close_not_blocked_by_interval(capsys):
     out = capsys.readouterr().out
     assert "giveback_met ticket=T-INTERVAL instrument=EUR_USD" in out
     assert "attempting_close ticket=T-INTERVAL instrument=EUR_USD reason=pnl_profit_protection" in out
+
+
+def test_manual_close_reconciles_and_not_retried(capsys):
+    broker = DummyBroker(profits={"EUR_USD": [0.9]}, open_trades=[])
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
+
+    stale = _trade("T-MANUAL", "EUR_USD", 1000)
+    closed = guard.process_open_trades([stale])
+
+    assert closed == ["T-MANUAL"]
+    assert guard.snapshot() == {}
+    assert broker.closed == []
+    out = capsys.readouterr().out
+    assert "reconcile_missing_position ticket=T-MANUAL instrument=EUR_USD action=mark_closed" in out
+
+    # Second call should be skipped without attempting to close again.
+    closed_second = guard.process_open_trades([stale])
+    assert closed_second == []
+    assert broker.closed == []
+    out_second = capsys.readouterr().out
+    assert "attempting_close" not in out_second
+
+
+def test_broker_open_clears_local_closed_marker_and_continues_trailing(capsys):
+    broker = DummyBroker(
+        profits={"EUR_USD": [1.2, 0.6]},
+        open_trades=[{"id": "T-RESYNC", "instrument": "EUR_USD", "currentUnits": 1000}],
+    )
+    guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5)
+    guard._mark_locally_closed("T-RESYNC", "EUR_USD")
+
+    armed_trade = _trade("T-RESYNC", "EUR_USD", 1000)
+    guard.process_open_trades([armed_trade])
+
+    drop_trade = _trade("T-RESYNC", "EUR_USD", 1000)
+    closed = guard.process_open_trades([drop_trade])
+
+    assert closed == ["T-RESYNC"]
+    assert broker.closed == [{"trade_id": "T-RESYNC", "instrument": "EUR_USD"}]
+    out = capsys.readouterr().out
+    assert "clearing_local_closed_marker" in out
+    assert "giveback_met ticket=T-RESYNC instrument=EUR_USD" in out
 
 
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
