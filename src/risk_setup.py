@@ -11,7 +11,7 @@ from src.risk_manager import RiskManager
 DEFAULT_TRAILING_CONFIG = {
     "arm_pips": 0.0,
     "giveback_pips": 0.0,
-    "arm_ccy": 0.75,
+    "arm_ccy": 1.0,
     "giveback_ccy": 0.5,
     "use_pips": False,
     "be_arm_pips": 0.0,

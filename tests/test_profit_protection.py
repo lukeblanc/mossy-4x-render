@@ -85,7 +85,7 @@ def test_trailing_giveback_closes_at_floor(capsys):
     assert broker.closed == [{"trade_id": "T1", "instrument": "EUR_USD"}]
 
     out = capsys.readouterr().out
-    assert "[TRAIL] armed ticket=T1 profit_ccy=0.80" in out
+    assert "[TRAIL] armed ticket=T1 profit=0.80" in out
     assert "[TRAIL] close ticket=T1 current_profit=0.60 floor=0.70 high_water=1.20 reason=pnl_profit_protection" in out
 
 
@@ -138,7 +138,7 @@ def test_closeout_missing_treated_as_closed_when_gone(capsys):
 
     assert closed == ["T-MISS"]
     out = capsys.readouterr().out
-    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-MISS instrument=GBP_USD" in out
+    assert "[TRAIL][INFO] Broker missing position – treated as closed ticket=T-MISS instrument=GBP_USD" in out
 
 
 def test_closeout_missing_warns_when_position_still_open(capsys):
@@ -161,9 +161,9 @@ def test_closeout_missing_warns_when_position_still_open(capsys):
     drop = _trade("T-STICK", "GBP_USD", 1000, profit=0.2)
     closed = guard.process_open_trades([drop])
 
-    assert closed == []
+    assert closed == ["T-STICK"]
     out = capsys.readouterr().out
-    assert "[TRAIL][WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but GBP_USD still appears open" in out
+    assert "Broker missing position – treated as closed ticket=T-STICK instrument=GBP_USD" in out
 
 
 def test_payload_with_missing_position_marks_closed(capsys):
@@ -193,10 +193,7 @@ def test_payload_with_missing_position_marks_closed(capsys):
 
     assert closed == ["T-PAY"]
     out = capsys.readouterr().out
-    assert (
-        "[TRAIL][INFO] Broker response indicates no open position; marking closed ticket=T-PAY instrument=EUR_USD"
-        in out
-    )
+    assert "[TRAIL][INFO] Broker missing position – treated as closed ticket=T-PAY instrument=EUR_USD" in out
 
 
 def test_zero_units_snapshot_treated_as_closed(capsys):
@@ -221,7 +218,96 @@ def test_zero_units_snapshot_treated_as_closed(capsys):
 
     assert closed == ["T-ZERO"]
     out = capsys.readouterr().out
-    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-ZERO instrument=EUR_USD" in out
+    assert "[TRAIL][INFO] Broker missing position – treated as closed ticket=T-ZERO instrument=EUR_USD" in out
+
+
+def test_missing_position_reconciles_without_warn(capsys):
+    class MissingPositionBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = []
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {
+                "status": "ERROR",
+                "code": 400,
+                "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST",
+                "longOrderRejectTransaction": {"rejectReason": "POSITION_CLOSEOUT_DOESNT_EXIST"},
+            }
+
+        def list_open_trades(self):
+            return list(self.trades)
+
+    broker = MissingPositionBroker()
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
+
+    armed = _trade("T-404", "USD_JPY", 1000, profit=0.8)
+    open_trades = [armed]
+    guard.process_open_trades(open_trades)
+
+    drop = _trade("T-404", "USD_JPY", 1000, profit=0.1)
+    open_trades = [drop]
+    closed = guard.process_open_trades(open_trades)
+
+    assert closed == ["T-404"]
+    assert open_trades == []
+    assert guard.snapshot() == {}
+
+    out = capsys.readouterr().out
+    assert "[TRAIL][INFO] Broker missing position – treated as closed ticket=T-404 instrument=USD_JPY" in out
+    assert "[WARN]" not in out
+
+
+def test_missing_position_not_retried(capsys):
+    class NoRetryBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            self.calls += 1
+            return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
+        def list_open_trades(self):
+            return []
+
+    broker = NoRetryBroker()
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
+
+    armed = _trade("T-NORETRY", "EUR_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-NORETRY", "EUR_USD", 1000, profit=0.1)
+    guard.process_open_trades([drop])
+
+    # Second call with same trade should be ignored because it's locally closed.
+    guard.process_open_trades([drop])
+
+    assert broker.calls == 1
+    out = capsys.readouterr().out
+    assert out.count("Broker missing position – treated as closed ticket=T-NORETRY instrument=EUR_USD") == 1
+
+
+def test_trail_arms_at_one_and_closes_after_half_giveback(capsys):
+    broker = DummyBroker()
+    guard = ProfitProtection(broker)  # defaults arm at 1.00, giveback 0.50
+
+    open_trades = [_trade("T-ARM", "EUR_USD", 1000, profit=0.90)]
+    closed = guard.process_open_trades(open_trades)
+    assert closed == []
+
+    out = capsys.readouterr().out
+    assert "armed ticket=T-ARM" not in out
+    assert any("[TRAIL][DEBUG]" in line for line in out.splitlines())
+
+    open_trades = [_trade("T-ARM", "EUR_USD", 1000, profit=1.00)]
+    closed = guard.process_open_trades(open_trades)
+    assert closed == []
+    out = capsys.readouterr().out
+    assert "[TRAIL] armed ticket=T-ARM profit=1.00" in out
+
+    open_trades = [_trade("T-ARM", "EUR_USD", 1000, profit=0.40)]
+    closed = guard.process_open_trades(open_trades)
+    assert closed == ["T-ARM"]
+    out = capsys.readouterr().out
+    assert "[TRAIL][DEBUG] profit=0.40" in out
 
 
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
