@@ -138,6 +138,20 @@ config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
 config["use_macd_confirmation"] = _as_bool(
     os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
 )
+config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "STRICT").upper()
+config["session_off_session_vol_ratio"] = float(
+    os.getenv("SESSION_OFF_SESSION_VOL_RATIO", config.get("session_off_session_vol_ratio", 1.25))
+)
+config["session_off_session_risk_scale"] = float(
+    os.getenv("SESSION_OFF_SESSION_RISK_SCALE", config.get("session_off_session_risk_scale", 0.5))
+)
+config["xau_atr_guard_ratio"] = float(
+    os.getenv("XAU_ATR_GUARD_RATIO", config.get("xau_atr_guard_ratio", 1.8))
+)
+config["xau_atr_guard_action"] = (os.getenv("XAU_ATR_GUARD_ACTION") or config.get("xau_atr_guard_action") or "skip").lower()
+config["xau_atr_guard_size_scale"] = float(
+    os.getenv("XAU_ATR_GUARD_SIZE_SCALE", config.get("xau_atr_guard_size_scale", 0.5))
+)
 mode_env = os.getenv("MODE", config.get("mode", "paper")).lower()
 config["mode"] = "paper" if mode_env == "demo" else mode_env
 aggressive_mode = _as_bool(os.getenv("AGGRESSIVE_MODE", config.get("aggressive_mode", False)))
@@ -233,6 +247,15 @@ risk = build_risk_manager(
     state_dir=DATA_DIR,
 )
 
+suppression_counters = {
+    "signals_generated": 0,
+    "signals_executed": 0,
+    "blocked_off_session": 0,
+    "blocked_risk": 0,
+    "blocked_max_positions": 0,
+    "blocked_spread": 0,
+}
+
 
 def _profit_guard_for_mode(mode: str, broker_instance: Broker) -> ProfitProtection:
     return build_profit_protection(
@@ -266,11 +289,11 @@ def _trade_identifier(trade: Dict) -> str | None:
         return None
 
 
-def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool:
+def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> tuple[bool, str | None]:
     if evaluation.signal not in {"BUY", "SELL"}:
-        return False
+        return False, "non-entry"
     if not evaluation.market_active:
-        return False
+        return False, "inactive-market"
 
     max_open = int(config.get("max_open_trades", 1))
     if len(open_trades) >= max_open:
@@ -278,7 +301,7 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool
             f"[TRADE] Skipping {evaluation.instrument} signal due to max open trades {max_open}",
             flush=True,
         )
-        return False
+        return False, "max-open"
 
     active_instruments = {trade.get("instrument") for trade in open_trades if isinstance(trade, dict)}
     if evaluation.instrument in active_instruments:
@@ -286,16 +309,16 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> bool
             f"[TRADE] Skipping {evaluation.instrument} signal; trade already open",
             flush=True,
         )
-        return False
+        return False, "duplicate"
 
     if evaluation.reason == "cooldown":
         print(
             f"[TRADE] Skipping {evaluation.instrument} signal; instrument cooling down",
             flush=True,
         )
-        return False
+        return False, "cooldown"
 
-    return True
+    return True, None
 
 
 def _trend_aligned(signal: str, diagnostics: Dict[str, float] | None) -> tuple[bool, float, float]:
@@ -326,6 +349,35 @@ def _xau_blocked(signal: str, instrument: str, diagnostics: Dict[str, float] | N
     if signal == "BUY" and not math.isnan(rsi) and rsi > 82 and atr_ratio > 1.15:
         return True, rsi, atr_ratio
     return False, rsi, atr_ratio
+
+
+def _xau_guard(
+    signal: str,
+    instrument: str,
+    diagnostics: Dict[str, float] | None,
+    *,
+    guard_ratio: float,
+    guard_action: str,
+    guard_scale: float,
+) -> tuple[bool, float, str, float, float]:
+    if instrument != "XAU_USD" or diagnostics is None:
+        return False, 1.0, "n/a", math.nan, math.nan
+    try:
+        atr = float(diagnostics.get("atr", math.nan))
+        atr_baseline = float(diagnostics.get("atr_baseline_50", math.nan))
+    except (TypeError, ValueError):
+        return False, 1.0, "invalid-atr", math.nan, math.nan
+
+    if math.isnan(atr) or math.isnan(atr_baseline) or atr_baseline <= 0:
+        return False, 1.0, "missing-atr", atr, math.nan
+    atr_ratio = atr / atr_baseline
+    if atr_ratio <= guard_ratio:
+        return False, 1.0, "within-guard", atr, atr_ratio
+
+    action = (guard_action or "skip").lower()
+    if action == "scale":
+        return False, max(guard_scale, 0.1), "scale", atr, atr_ratio
+    return True, 0.0, "skip", atr, atr_ratio
 
 
 def _macd_confirmation_enabled() -> bool:
@@ -532,6 +584,14 @@ async def heartbeat() -> None:
         f"drawdown_pct={dd_pct_str} open_trades={open_count}",
         flush=True,
     )
+    print(
+        "[SUMMARY] signals_generated={signals_generated} signals_executed={signals_executed} "
+        "blocked_off_session={blocked_off_session} blocked_risk={blocked_risk} "
+        "blocked_max_positions={blocked_max_positions} blocked_spread={blocked_spread}".format(
+            **suppression_counters
+        ),
+        flush=True,
+    )
 
 
 async def decision_cycle() -> None:
@@ -562,31 +622,55 @@ async def decision_cycle() -> None:
                 and (_trade_identifier(trade) not in closed_by_trail)
             ]
 
-        session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
-        entries_allowed = session_filter.is_entry_session(now_utc, mode=session_mode)
+        session_mode = config.get("session_mode", "STRICT")
         session_snapshot = session_filter.current_session(now_utc, mode=session_mode)
-        if entries_allowed and session_snapshot is None:
-            start_awst = now_utc.astimezone(session_filter.AWST) - timedelta(minutes=15)
-            end_awst = start_awst + timedelta(minutes=15)
-            session_snapshot = session_filter.SessionSnapshot(
-                name="adhoc",
-                start_awst=start_awst,
-                end_awst=end_awst,
-                start_utc=start_awst.astimezone(timezone.utc),
-                end_utc=end_awst.astimezone(timezone.utc),
-            )
         if session_snapshot:
             orb.reset_for_session(session_snapshot)
-        if not entries_allowed:
-            ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
-            print(f"[FILTER] Entries paused (off-session) now_utc={ts}", flush=True)
 
         for evaluation in evaluations:
+            suppression_counters["signals_generated"] += 1
             _log_projector(evaluation, now_utc)
-            if not _should_place_trade(open_trades, evaluation):
+            diagnostics = evaluation.diagnostics or {}
+            trend_ok, ema_trend_fast, ema_trend_slow = _trend_aligned(evaluation.signal, diagnostics)
+            session_decision = session_filter.session_decision(
+                now_utc,
+                mode=session_mode,
+                atr=diagnostics.get("atr"),
+                atr_baseline=diagnostics.get("atr_baseline_50"),
+                trend_aligned=trend_ok,
+                max_off_session_vol_ratio=float(config.get("session_off_session_vol_ratio", 1.25)),
+                off_session_risk_scale=float(config.get("session_off_session_risk_scale", 0.5)),
+            )
+            active_session = session_decision.session
+            if session_decision.allowed and active_session is None:
+                start_awst = now_utc.astimezone(session_filter.AWST) - timedelta(minutes=15)
+                end_awst = start_awst + timedelta(minutes=15)
+                active_session = session_filter.SessionSnapshot(
+                    name="adhoc",
+                    start_awst=start_awst,
+                    end_awst=end_awst,
+                    start_utc=start_awst.astimezone(timezone.utc),
+                    end_utc=end_awst.astimezone(timezone.utc),
+                )
+                orb.reset_for_session(active_session)
+            elif active_session:
+                orb.reset_for_session(active_session)
+
+            if not session_decision.allowed:
+                suppression_counters["blocked_off_session"] += 1
+                ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
+                print(
+                    f"[FILTER] Entries paused (off-session) now_utc={ts} mode={session_mode} reason={session_decision.reason}",
+                    flush=True,
+                )
                 continue
 
-            diagnostics = evaluation.diagnostics or {}
+            should_trade, skip_reason = _should_place_trade(open_trades, evaluation)
+            if not should_trade:
+                if skip_reason == "max-open":
+                    suppression_counters["blocked_max_positions"] += 1
+                continue
+
             spread_pips = None
             try:
                 spread_pips = broker.current_spread(evaluation.instrument)
@@ -605,9 +689,12 @@ async def decision_cycle() -> None:
                     f"[TRADE] Skipping {evaluation.instrument} due to {reason}",
                     flush=True,
                 )
-                continue
-
-            if not entries_allowed:
+                if reason == "max-positions":
+                    suppression_counters["blocked_max_positions"] += 1
+                elif reason == "spread-too-wide":
+                    suppression_counters["blocked_spread"] += 1
+                else:
+                    suppression_counters["blocked_risk"] += 1
                 continue
 
             if getattr(risk, "demo_mode", False) and now_utc.weekday() >= 5:
@@ -622,11 +709,10 @@ async def decision_cycle() -> None:
             tp_distance = risk.tp_distance_from_atr(atr_val, instrument=evaluation.instrument)
             entry_price = diagnostics.get("close")
 
-            trend_ok, ema_fast, ema_slow = _trend_aligned(evaluation.signal, diagnostics)
             if not trend_ok:
                 print(
                     f"[FILTER] Trend misaligned {evaluation.instrument} signal={evaluation.signal} "
-                    f"ema50={ema_fast:.5f} ema200={ema_slow:.5f}",
+                    f"ema50={ema_trend_fast:.5f} ema200={ema_trend_slow:.5f}",
                     flush=True,
                 )
                 continue
@@ -634,11 +720,20 @@ async def decision_cycle() -> None:
             xau_blocked, rsi_val, atr_ratio = _xau_blocked(
                 evaluation.signal, evaluation.instrument, diagnostics
             )
-            if xau_blocked:
+            xau_guard_block, xau_risk_scale, xau_guard_reason, xau_atr_val, xau_atr_ratio = _xau_guard(
+                evaluation.signal,
+                evaluation.instrument,
+                diagnostics,
+                guard_ratio=float(config.get("xau_atr_guard_ratio", 1.8)),
+                guard_action=str(config.get("xau_atr_guard_action", "skip")),
+                guard_scale=float(config.get("xau_atr_guard_size_scale", 0.5)),
+            )
+            if xau_blocked or xau_guard_block:
                 print(
-                    f"[FILTER] XAU_USD blocked {evaluation.signal}: rsi={rsi_val:.2f} atr_ratio={atr_ratio:.2f}",
+                    f"[FILTER] XAU_USD blocked {evaluation.signal}: rsi={rsi_val:.2f} atr_ratio={atr_ratio:.2f} guard={xau_guard_reason} guard_atr={xau_atr_val:.5f} guard_ratio={xau_atr_ratio:.2f}",
                     flush=True,
                 )
+                suppression_counters["blocked_risk"] += 1
                 continue
 
             macd_ok, macd_line, macd_signal_line, macd_histogram = _macd_confirms(
@@ -659,7 +754,7 @@ async def decision_cycle() -> None:
 
             orb_ok, orb_reason, current_range = _orb_filter(
                 evaluation,
-                session_snapshot,
+                active_session,
                 now_utc,
             )
             if not orb_ok:
@@ -675,6 +770,9 @@ async def decision_cycle() -> None:
                 sl_distance,
                 risk.risk_per_trade_pct,
             )
+            risk_scale = session_decision.risk_scale * xau_risk_scale
+            if risk_scale < 1.0:
+                units = int(units * max(risk_scale, 0.1))
             if units <= 0:
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to zero position size",
@@ -694,6 +792,7 @@ async def decision_cycle() -> None:
                 engine.mark_trade(evaluation.instrument)
                 open_trades.append({"instrument": evaluation.instrument})
                 risk.register_entry(now_utc, evaluation.instrument)
+                suppression_counters["signals_executed"] += 1
                 sl_price, tp_price = _calc_exit_prices(evaluation.signal, entry_price, sl_distance, tp_distance)
                 ticket = _order_ticket(result)
                 print(

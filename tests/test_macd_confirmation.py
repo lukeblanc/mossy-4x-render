@@ -20,6 +20,10 @@ def _reset_clock(original):
     main.datetime = original  # type: ignore[assignment]
 
 
+def _allow_session_decision():
+    return main.session_filter.SessionDecision(True, True, None, "STRICT")
+
+
 def _set_heartbeat(monkeypatch):
     original_datetime = main.datetime
     monkeypatch.setattr(main, "datetime", Monday)
@@ -108,7 +112,7 @@ def test_macd_veto_blocks_trade(monkeypatch, capsys):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",
@@ -208,7 +212,7 @@ def test_macd_confirmation_allows_trade(monkeypatch):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",
@@ -264,7 +268,7 @@ def test_trailing_flow_unchanged_with_macd(monkeypatch):
     monkeypatch.setattr(main, "profit_guard", dummy_guard)
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [{"instrument": "EUR_USD", "id": "T1"}])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
 
     original_datetime, original_ts, before, watchdog = _set_heartbeat(monkeypatch)
 
@@ -349,7 +353,7 @@ def test_macd_does_not_create_new_signals(monkeypatch):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",
@@ -471,7 +475,7 @@ def test_macd_confirms_fx_and_xau(monkeypatch):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",
