@@ -6,13 +6,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Protocol
 
 
-ARM_AT_USD = 0.75
-GIVEBACK_USD = 0.50
+ARM_AT_CCY = 0.75
+GIVEBACK_CCY = 0.50
 
 
 @dataclass
 class TrailingState:
-    max_profit_usd: Optional[float] = None
+    max_profit_ccy: Optional[float] = None
     armed: bool = False
     last_update: Optional[datetime] = None
     open_time: Optional[datetime] = None
@@ -41,11 +41,13 @@ class ProfitProtection:
     def __init__(
         self,
         broker: BrokerLike,
-        trigger: float = ARM_AT_USD,
-        trail: float = GIVEBACK_USD,
+        trigger: float = ARM_AT_CCY,
+        trail: float = GIVEBACK_CCY,
         *,
         arm_pips: float = 0.0,
         giveback_pips: float = 0.0,
+        arm_ccy: Optional[float] = None,
+        giveback_ccy: Optional[float] = None,
         arm_usd: Optional[float] = None,
         giveback_usd: Optional[float] = None,
         use_pips: bool = False,
@@ -54,7 +56,7 @@ class ProfitProtection:
         min_check_interval_sec: float = 0.0,
         aggressive: bool = False,
         aggressive_max_hold_minutes: float = 45.0,
-        aggressive_max_loss_usd: float = 5.0,
+        aggressive_max_loss_ccy: float = 5.0,
         aggressive_max_loss_atr_mult: float = 1.2,
         time_stop_minutes: float = 90.0,
         time_stop_min_pips: float = 2.0,
@@ -63,11 +65,16 @@ class ProfitProtection:
         self.broker = broker
         self.arm_pips = float(arm_pips)
         self.giveback_pips = float(giveback_pips)
-        self.arm_usd = float(arm_usd if arm_usd is not None else trigger)
-        self.giveback_usd = float(giveback_usd if giveback_usd is not None else trail)
+        arm_value = arm_ccy if arm_ccy is not None else arm_usd
+        giveback_value = giveback_ccy if giveback_ccy is not None else giveback_usd
+        self.arm_ccy = float(arm_value if arm_value is not None else trigger)
+        self.giveback_ccy = float(giveback_value if giveback_value is not None else trail)
+        # Maintain legacy attribute names for compatibility with existing callers/tests.
+        self.arm_usd = self.arm_ccy
+        self.giveback_usd = self.giveback_ccy
         # Preserve legacy attributes for backwards compatibility/tests
-        self.trigger = self.arm_usd
-        self.trail = self.giveback_usd
+        self.trigger = self.arm_ccy
+        self.trail = self.giveback_ccy
         # Pip trailing is disabled; retain flag for compatibility only
         self.use_pips = False
         self.be_arm_pips = float(be_arm_pips)
@@ -75,7 +82,7 @@ class ProfitProtection:
         self.min_check_interval_sec = float(min_check_interval_sec)
         self.aggressive = aggressive
         self.aggressive_max_hold_minutes = float(aggressive_max_hold_minutes)
-        self.aggressive_max_loss_usd = float(aggressive_max_loss_usd)
+        self.aggressive_max_loss_ccy = float(aggressive_max_loss_ccy)
         self.aggressive_max_loss_atr_mult = float(aggressive_max_loss_atr_mult)
         self.time_stop_minutes = float(time_stop_minutes)
         self.time_stop_min_pips = float(time_stop_min_pips)
@@ -134,27 +141,27 @@ class ProfitProtection:
                 self._state.pop(trade_id, None)
                 continue
 
-            if profit is None or state.max_profit_usd is None:
+            if profit is None or state.max_profit_ccy is None:
                 continue
 
-            if not state.armed and state.max_profit_usd >= self.arm_usd:
+            if not state.armed and state.max_profit_ccy >= self.arm_ccy:
                 state.armed = True
-                print(f"[TRAIL] armed ticket={trade_id} profit_usd={profit:.2f}", flush=True)
+                print(f"[TRAIL] armed ticket={trade_id} profit_ccy={profit:.2f}", flush=True)
 
             if not state.armed:
                 continue
 
-            trailing_floor = state.max_profit_usd - self.giveback_usd
-            if (state.max_profit_usd - profit) >= self.giveback_usd:
+            trailing_floor = state.max_profit_ccy - self.giveback_ccy
+            if (state.max_profit_ccy - profit) >= self.giveback_ccy:
                 if self._close_trade(
                     trade_id,
                     instrument,
                     profit,
                     None,
                     trailing_floor,
-                    state.max_profit_usd,
+                    state.max_profit_ccy,
                     spread_pips,
-                    reason="usd_profit_protection",
+                    reason="pnl_profit_protection",
                 ):
                     closed_trades.append(trade_id)
                     self._state.pop(trade_id, None)
@@ -213,6 +220,7 @@ class ProfitProtection:
                     except (TypeError, ValueError):
                         break
         try:
+            # PnL values are in account currency as returned by broker.
             return self.broker.get_unrealized_profit(instrument)
         except AttributeError:
             return None
@@ -257,9 +265,9 @@ class ProfitProtection:
     ) -> None:
         if profit is None:
             return
-        if state.max_profit_usd is None or profit > state.max_profit_usd:
-            state.max_profit_usd = profit
-            print(f"[TRAIL] update ticket={trade_id} max_profit_usd={profit:.2f}", flush=True)
+        if state.max_profit_ccy is None or profit > state.max_profit_ccy:
+            state.max_profit_ccy = profit
+            print(f"[TRAIL] update ticket={trade_id} max_profit_ccy={profit:.2f}", flush=True)
 
     def _time_stop_threshold(self, instrument: str, atr_value: Optional[float]) -> float:
         base_threshold = max(0.0, self.time_stop_min_pips)
@@ -349,9 +357,9 @@ class ProfitProtection:
                 return True
 
         atr_val = self._atr_for_trade(trade)
-        usd_limit = profit <= -self.aggressive_max_loss_usd
+        ccy_limit = profit <= -self.aggressive_max_loss_ccy
         atr_limit = atr_val is not None and profit <= -(self.aggressive_max_loss_atr_mult * atr_val)
-        if profit <= 0 and (usd_limit or atr_limit):
+        if profit <= 0 and (ccy_limit or atr_limit):
             atr_str = "n/a" if atr_val is None else f"{atr_val:.4f}"
             if self._close_trade(
                 trade_id,

@@ -159,22 +159,37 @@ risk_tf_minutes = _granularity_minutes(config["timeframe"])
 risk_cooldown_candles = int(os.getenv("COOLDOWN_CANDLES", config.get("cooldown_candles", 9)))
 risk_config = config.get("risk", {}) or {}
 aggressive_max_hold_minutes = float(os.getenv("AGGRESSIVE_MAX_HOLD_MINUTES", config.get("aggressive_max_hold_minutes", 45)))
-aggressive_max_loss_usd = float(os.getenv("AGGRESSIVE_MAX_LOSS_USD", config.get("aggressive_max_loss_usd", 5.0)))
+aggressive_max_loss_ccy = float(
+    os.getenv(
+        "AGGRESSIVE_MAX_LOSS_CCY",
+        os.getenv("AGGRESSIVE_MAX_LOSS_USD", config.get("aggressive_max_loss_ccy", config.get("aggressive_max_loss_usd", 5.0))),
+    )
+)
 aggressive_max_loss_atr_mult = float(os.getenv("AGGRESSIVE_MAX_LOSS_ATR_MULT", config.get("aggressive_max_loss_atr_mult", 1.2)))
 trailing_config = config.get("trailing", {}) or {}
 trail_use_pips = False
 trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", trailing_config.get("arm_pips", 0.0)))
 trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", trailing_config.get("giveback_pips", 0.0)))
-trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", trailing_config.get("arm_usd", 0.75)))
-trail_giveback_usd = float(os.getenv("TRAIL_GIVEBACK_USD", trailing_config.get("giveback_usd", 0.5)))
+trail_arm_ccy = float(
+    os.getenv(
+        "TRAIL_ARM_CCY",
+        os.getenv("TRAIL_ARM_USD", trailing_config.get("arm_ccy", trailing_config.get("arm_usd", 0.75))),
+    )
+)
+trail_giveback_ccy = float(
+    os.getenv(
+        "TRAIL_GIVEBACK_CCY",
+        os.getenv("TRAIL_GIVEBACK_USD", trailing_config.get("giveback_ccy", trailing_config.get("giveback_usd", 0.5))),
+    )
+)
 be_arm_pips = float(os.getenv("BE_ARM_PIPS", trailing_config.get("be_arm_pips", 0.0)))
 be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", trailing_config.get("be_offset_pips", 0.0)))
 min_check_interval_sec = float(os.getenv("MIN_CHECK_INTERVAL_SEC", trailing_config.get("min_check_interval_sec", 0.0)))
 trailing_config = {
     "arm_pips": trail_arm_pips,
     "giveback_pips": trail_giveback_pips,
-    "arm_usd": trail_arm_usd,
-    "giveback_usd": trail_giveback_usd,
+    "arm_ccy": trail_arm_ccy,
+    "giveback_ccy": trail_giveback_ccy,
     "use_pips": trail_use_pips,
     "be_arm_pips": be_arm_pips,
     "be_offset_pips": be_offset_pips,
@@ -228,7 +243,7 @@ config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("ma
 risk_config["timeframe"] = config["timeframe"]
 config["aggressive_mode"] = aggressive_mode
 config["aggressive_max_hold_minutes"] = aggressive_max_hold_minutes
-config["aggressive_max_loss_usd"] = aggressive_max_loss_usd
+config["aggressive_max_loss_ccy"] = aggressive_max_loss_ccy
 config["aggressive_max_loss_atr_mult"] = aggressive_max_loss_atr_mult
 config["risk"] = risk_config
 
@@ -732,7 +747,7 @@ async def decision_cycle() -> None:
 
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val, instrument=evaluation.instrument)
-            tp_distance = 0.0  # Disable standard TP to avoid interfering with USD-based profit protection
+            tp_distance = 0.0  # Disable standard TP to avoid interfering with account-currency profit protection
             entry_price = diagnostics.get("close")
 
             if not trend_ok:
