@@ -551,7 +551,10 @@ class ProfitProtection:
                 f"{log_prefix}[INFO] close_cooldown_active ticket={trade_id} instrument={instrument} until={state.close_cooldown_until.isoformat()}",
                 flush=True,
             )
-            return False
+            self._reconcile_closed(trade_id, instrument, open_trades, state)
+            return True
+
+        result = self._execute_closeout(trade_id, instrument, long_units, short_units)
 
         spread_clause = f" spread={spread_pips:.2f}" if spread_pips is not None else ""
         if pips is not None:
@@ -686,6 +689,38 @@ class ProfitProtection:
             flush=True,
         )
         return False
+
+    def _execute_closeout(self, trade_id: str, instrument: str, long_units: float, short_units: float) -> Dict:
+        """Send a side-specific closeout request."""
+
+        try:
+            if hasattr(self.broker, "close_position"):
+                if short_units != 0 and long_units == 0:
+                    payload = {"long_units": "0", "short_units": "ALL"}
+                elif long_units != 0 and short_units == 0:
+                    payload = {"long_units": "ALL", "short_units": "0"}
+                elif short_units != 0 and long_units != 0:
+                    payload = {"long_units": "ALL", "short_units": "ALL"}
+                else:
+                    payload = {"long_units": "ALL", "short_units": "ALL"}
+
+                return self.broker.close_position(
+                    instrument,
+                    long_units=payload["long_units"],
+                    short_units=payload["short_units"],
+                    trade_id=trade_id,
+                )
+            if hasattr(self.broker, "close_trade"):
+                return self.broker.close_trade(trade_id, instrument=instrument)
+        except AttributeError:
+            return {"status": "ERROR", "errorCode": "close-not-supported"}
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(
+                f"[TRAIL][ERROR] Exception closing {instrument}: {exc}",
+                flush=True,
+            )
+            return {"status": "ERROR", "error": str(exc)}
+        return {"status": "ERROR", "errorCode": "close-not-supported"}
 
     @staticmethod
     def _close_payload(long_units: float, short_units: float) -> Dict[str, str]:
