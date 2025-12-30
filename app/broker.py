@@ -251,28 +251,61 @@ class Broker:
             )
             return 0.0
 
-    def close_position(self, instrument: str) -> Dict:
-        """Close any open position for the given instrument."""
+    def position_snapshot(self, instrument: str) -> Optional[Dict]:
+        """Return the broker position payload for the instrument, or None on error."""
+
+        if not instrument:
+            return None
+        if self.mode == "simulation" or not (self.key and self.account):
+            return {
+                "instrument": instrument,
+                "long": {"units": "0"},
+                "short": {"units": "0"},
+                "longUnits": "0",
+                "shortUnits": "0",
+            }
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/positions/{instrument}")
+                if resp.status_code != 200:
+                    return None
+                return resp.json().get("position", {}) or {}
+        except Exception:
+            return None
+
+    def close_position_side(self, instrument: str, long_units: float, short_units: float) -> Dict:
+        """Close a position using side-specific payloads for the OANDA positions close endpoint."""
+
         if not instrument:
             return {"status": "ERROR", "reason": "invalid-instrument"}
+
+        if long_units > 0 and short_units == 0:
+            payload: Dict[str, str] = {"longUnits": "ALL"}
+        elif short_units < 0 and long_units == 0:
+            payload = {"shortUnits": "ALL"}
+        elif long_units != 0 or short_units != 0:
+            payload = {"longUnits": "ALL", "shortUnits": "ALL"}
+        else:
+            payload = {"longUnits": "0", "shortUnits": "0"}
+
         if self.mode == "simulation":
-            print(f"[BROKER] SIMULATION close position {instrument}", flush=True)
-            return {"status": "SIMULATED"}
+            print(f"[BROKER] SIMULATION close position {instrument} payload={payload}", flush=True)
+            return {"status": "SIMULATED", "payload": payload}
         if not (self.key and self.account):
             print(
                 f"[BROKER] {self.mode.upper()} close failed: missing credentials.",
                 flush=True,
             )
             return {"status": "ERROR", "reason": "missing-creds"}
-        payload: Dict[str, str] = {"longUnits": "ALL", "shortUnits": "ALL"}
+
         try:
             with self._client() as client:
-                resp = client.put(
+                resp = client.post(
                     f"/v3/accounts/{self.account}/positions/{instrument}/close",
                     json=payload,
                 )
                 if resp.status_code in (200, 201):
-                    print(f"[OANDA] Closed position {instrument}", flush=True)
+                    print(f"[OANDA] Closed position {instrument} payload={payload}", flush=True)
                     return {"status": "CLOSED", "response": resp.json()}
                 print(
                     f"[OANDA] Failed to close {instrument} status={resp.status_code} body={resp.text}",
@@ -288,6 +321,25 @@ class Broker:
                 f"[OANDA] Exception closing position {instrument}: {exc}", flush=True
             )
             return {"status": "ERROR", "error": str(exc)}
+
+    # Backwards-compatible wrapper.
+    def close_position(
+        self,
+        instrument: str,
+        *,
+        long_units: str | None = "ALL",
+        short_units: str | None = "ALL",
+        trade_id: str | None = None,
+    ) -> Dict:
+        try:
+            long_val = 0.0 if long_units is None else float(long_units)
+        except (TypeError, ValueError):
+            long_val = 0.0
+        try:
+            short_val = 0.0 if short_units is None else float(short_units)
+        except (TypeError, ValueError):
+            short_val = 0.0
+        return self.close_position_side(instrument, long_val, short_val)
 
     def account_equity(self) -> float:
         if not (self.key and self.account):
