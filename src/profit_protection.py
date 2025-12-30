@@ -109,7 +109,15 @@ class ProfitProtection:
             if not trade_id or not instrument or units == 0:
                 continue
             if self._is_locally_closed(trade_id, instrument):
-                continue
+                broker_snapshot = self._list_open_trades_quietly()
+                instrument_open = None if broker_snapshot is None else self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
+                if instrument_open is False:
+                    print(
+                        f"[TRAIL][INFO] skipping ticket={trade_id} instrument={instrument} reason=locally_closed_and_absent",
+                        flush=True,
+                    )
+                    continue
+                self._unmark_locally_closed(trade_id, instrument)
 
             active_keys.add(trade_id)
             state = self._state.get(trade_id, TrailingState())
@@ -133,9 +141,6 @@ class ProfitProtection:
             ):
                 closed_trades.append(trade_id)
                 self._state.pop(trade_id, None)
-                continue
-
-            if self._interval_blocked(state, now_utc):
                 continue
 
             self._update_peak_profit(trade_id, state, profit)
@@ -168,6 +173,18 @@ class ProfitProtection:
                 continue
 
             if profit is not None and profit <= trailing_floor:
+                print(
+                    f"[TRAIL][INFO] giveback_met ticket={trade_id} instrument={instrument} "
+                    f"profit={profit:.2f} floor={trailing_floor:.2f} high_water={state.max_profit_ccy:.2f}",
+                    flush=True,
+                )
+                broker_snapshot = self._list_open_trades_quietly()
+                instrument_open = None if broker_snapshot is None else self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
+                print(
+                    f"[TRAIL][INFO] attempting_close ticket={trade_id} instrument={instrument} reason=pnl_profit_protection"
+                    + ("" if instrument_open is None else f" snapshot_open={instrument_open}"),
+                    flush=True,
+                )
                 if self._close_trade(
                     trade_id,
                     instrument,
@@ -208,6 +225,11 @@ class ProfitProtection:
         key = self._closed_key(trade_id, instrument)
         if key is not None:
             self._locally_closed.add(key)
+
+    def _unmark_locally_closed(self, trade_id: Optional[str], instrument: Optional[str]) -> None:
+        key = self._closed_key(trade_id, instrument)
+        if key is not None:
+            self._locally_closed.discard(key)
 
     @staticmethod
     def _trade_id(trade: Dict) -> Optional[str]:
