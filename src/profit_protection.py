@@ -577,6 +577,15 @@ class ProfitProtection:
 
         return False
 
+    @staticmethod
+    def _raw_units(trade: Dict) -> Optional[float]:
+        """Return the raw units value if present, preserving zeros."""
+
+        for key in ("currentUnits", "current_units", "units"):
+            if key in trade:
+                return trade.get(key)
+        return None
+
     def _broker_confirms_closed(self, trade_id: Optional[str], instrument: str) -> Optional[bool]:
         """Return True only if broker reports no open position for the instrument.
 
@@ -600,6 +609,11 @@ class ProfitProtection:
         for trade in trades or []:
             inst = trade.get("instrument")
             if instrument and inst == instrument:
+                raw_units = self._raw_units(trade)
+                if raw_units is not None:
+                    units = self._units_from_trade(trade)
+                    if units == 0:
+                        continue
                 # Instrument still open; if IDs match we know the trade is alive.
                 if trade_id is None:
                     return False
