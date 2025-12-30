@@ -266,7 +266,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                 "signal": "BUY",
                 "units": 100,
                 "sl_distance": expected_sl,
-                "tp_distance": dummy_risk.tp_distance_from_atr(0.01),
+                "tp_distance": 0.0,
                 "entry_price": 1.2345,
             }
         ]

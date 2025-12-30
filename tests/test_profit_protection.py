@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import pytest
 
+import src.profit_protection as profit_protection
 from src.profit_protection import ProfitProtection
 from src.decision_engine import Evaluation
 from src import main as main_mod
@@ -40,16 +47,16 @@ class DummyBroker:
         return 0.0001
 
 
-def _trade(trade_id: str, instrument: str, units: float, pips: float | None = None, profit: float | None = None):
+def _trade(trade_id: str, instrument: str, units: float, profit: float | None = None, pips: float | None = None):
     payload = {
         "id": trade_id,
         "instrument": instrument,
         "currentUnits": units,
     }
-    if pips is not None:
-        payload["unrealizedPips"] = pips
     if profit is not None:
         payload["unrealizedPL"] = profit
+    if pips is not None:
+        payload["unrealizedPips"] = pips
     return payload
 
 
@@ -57,57 +64,105 @@ def test_trailing_giveback_closes_at_floor(capsys):
     broker = DummyBroker()
     guard = ProfitProtection(
         broker,
-        arm_pips=8,
-        giveback_pips=4,
-        use_pips=True,
-        be_arm_pips=20,  # keep break-even out of the way
+        arm_usd=0.75,
+        giveback_usd=0.5,
     )
 
-    trade = _trade("T1", "EUR_USD", 1000, pips=0)
+    trade = _trade("T1", "EUR_USD", 1000, profit=0.0)
     guard.process_open_trades([trade])
 
-    trade = _trade("T1", "EUR_USD", 1000, pips=10)
+    trade = _trade("T1", "EUR_USD", 1000, profit=0.8)
     guard.process_open_trades([trade])
 
-    trade = _trade("T1", "EUR_USD", 1000, pips=12)
+    trade = _trade("T1", "EUR_USD", 1000, profit=1.20)
     guard.process_open_trades([trade])
 
-    trade = _trade("T1", "EUR_USD", 1000, pips=7)
+    trade = _trade("T1", "EUR_USD", 1000, profit=0.6)
     closed = guard.process_open_trades([trade])
 
     assert closed == ["T1"]
     assert broker.closed == [{"trade_id": "T1", "instrument": "EUR_USD"}]
 
     out = capsys.readouterr().out
-    assert "[TRAIL] armed ticket=T1 profit_pips=10.00" in out
-    assert "[TRAIL] close ticket=T1 current_pips=7.00 floor=8.00 high_water=12.00 reason=TRAIL_GIVEBACK" in out
+    assert "[TRAIL] armed ticket=T1 profit_usd=0.80" in out
+    assert "[TRAIL] close ticket=T1 current_profit=0.60 floor=0.70 high_water=1.20 reason=usd_profit_protection" in out
 
 
 def test_multiple_positions_do_not_share_state():
     broker = DummyBroker()
-    guard = ProfitProtection(broker, arm_pips=5, giveback_pips=2, use_pips=True)
+    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
 
-    t1 = _trade("T1", "EUR_USD", 1000, pips=6)
-    t2 = _trade("T2", "EUR_USD", -1000, pips=3)
+    t1 = _trade("T1", "EUR_USD", 1000, profit=0.6)
+    t2 = _trade("T2", "EUR_USD", -1000, profit=0.3)
     guard.process_open_trades([t1, t2])
 
     # Only T1 should be armed and have a high-water update
     snap = guard.snapshot()
-    assert "T1" in snap and snap["T1"].high_water_pips == pytest.approx(6)
-    assert "T2" in snap and snap["T2"].high_water_pips == pytest.approx(3)
-    assert snap["T1"].trail_active is True
-    assert snap["T2"].trail_active is False
+    assert "T1" in snap and snap["T1"].max_profit_usd == pytest.approx(0.6)
+    assert "T2" in snap and snap["T2"].max_profit_usd == pytest.approx(0.3)
+    assert snap["T1"].armed is True
+    assert snap["T2"].armed is False
 
     # Drop T1 to trigger close while T2 climbs without being capped by T1's state
-    t1_drop = _trade("T1", "EUR_USD", 1000, pips=3)
-    t2_rise = _trade("T2", "EUR_USD", -1000, pips=6)
+    t1_drop = _trade("T1", "EUR_USD", 1000, profit=0.2)
+    t2_rise = _trade("T2", "EUR_USD", -1000, profit=0.6)
     closed = guard.process_open_trades([t1_drop, t2_rise])
 
     assert "T1" in closed
     assert "T2" not in closed
     assert any(entry.get("trade_id") == "T1" for entry in broker.closed)
     # T2 should retain its state
-    assert guard.snapshot()["T2"].high_water_pips == pytest.approx(6)
+    assert guard.snapshot()["T2"].max_profit_usd == pytest.approx(0.6)
+
+
+def test_closeout_missing_treated_as_closed_when_gone(capsys):
+    class CloseoutBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = []
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
+
+        def list_open_trades(self):
+            return []
+
+    broker = CloseoutBroker()
+    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+
+    armed = _trade("T-MISS", "GBP_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-MISS", "GBP_USD", 1000, profit=0.2)
+    closed = guard.process_open_trades([drop])
+
+    assert closed == ["T-MISS"]
+    out = capsys.readouterr().out
+    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-MISS instrument=GBP_USD" in out
+
+
+def test_closeout_missing_warns_when_position_still_open(capsys):
+    class StickyBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = [{"id": "T-STICK", "instrument": "GBP_USD"}]
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
+
+        def list_open_trades(self):
+            return list(self.trades)
+
+    broker = StickyBroker()
+    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+
+    armed = _trade("T-STICK", "GBP_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-STICK", "GBP_USD", 1000, profit=0.2)
+    closed = guard.process_open_trades([drop])
+
+    assert closed == []
+    out = capsys.readouterr().out
+    assert "[TRAIL][WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but GBP_USD still appears open" in out
 
 
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
@@ -308,9 +363,9 @@ def test_demo_trailing_thresholds():
     live_guard = main_mod._profit_guard_for_mode("live", broker)
     paper_guard = main_mod._profit_guard_for_mode("paper", broker)
 
-    assert demo_guard.trigger == pytest.approx(1.0)
-    assert demo_guard.trail == pytest.approx(0.5)
-    assert live_guard.trigger == pytest.approx(3.0)
-    assert live_guard.trail == pytest.approx(0.5)
-    assert paper_guard.trigger == pytest.approx(3.0)
-    assert paper_guard.trail == pytest.approx(0.5)
+    assert demo_guard.trigger == pytest.approx(profit_protection.ARM_AT_USD)
+    assert demo_guard.trail == pytest.approx(profit_protection.GIVEBACK_USD)
+    assert live_guard.trigger == pytest.approx(profit_protection.ARM_AT_USD)
+    assert live_guard.trail == pytest.approx(profit_protection.GIVEBACK_USD)
+    assert paper_guard.trigger == pytest.approx(profit_protection.ARM_AT_USD)
+    assert paper_guard.trail == pytest.approx(profit_protection.GIVEBACK_USD)

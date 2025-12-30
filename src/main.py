@@ -162,13 +162,13 @@ aggressive_max_hold_minutes = float(os.getenv("AGGRESSIVE_MAX_HOLD_MINUTES", con
 aggressive_max_loss_usd = float(os.getenv("AGGRESSIVE_MAX_LOSS_USD", config.get("aggressive_max_loss_usd", 5.0)))
 aggressive_max_loss_atr_mult = float(os.getenv("AGGRESSIVE_MAX_LOSS_ATR_MULT", config.get("aggressive_max_loss_atr_mult", 1.2)))
 trailing_config = config.get("trailing", {}) or {}
-trail_use_pips = _as_bool(os.getenv("TRAIL_USE_PIPS", trailing_config.get("use_pips", True)))
-trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", trailing_config.get("arm_pips", 8.0)))
-trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", trailing_config.get("giveback_pips", 4.0)))
-trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", trailing_config.get("arm_usd", 3.0)))
+trail_use_pips = False
+trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", trailing_config.get("arm_pips", 0.0)))
+trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", trailing_config.get("giveback_pips", 0.0)))
+trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", trailing_config.get("arm_usd", 0.75)))
 trail_giveback_usd = float(os.getenv("TRAIL_GIVEBACK_USD", trailing_config.get("giveback_usd", 0.5)))
-be_arm_pips = float(os.getenv("BE_ARM_PIPS", trailing_config.get("be_arm_pips", 6.0)))
-be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", trailing_config.get("be_offset_pips", 1.0)))
+be_arm_pips = float(os.getenv("BE_ARM_PIPS", trailing_config.get("be_arm_pips", 0.0)))
+be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", trailing_config.get("be_offset_pips", 0.0)))
 min_check_interval_sec = float(os.getenv("MIN_CHECK_INTERVAL_SEC", trailing_config.get("min_check_interval_sec", 0.0)))
 trailing_config = {
     "arm_pips": trail_arm_pips,
@@ -732,7 +732,7 @@ async def decision_cycle() -> None:
 
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val, instrument=evaluation.instrument)
-            tp_distance = risk.tp_distance_from_atr(atr_val, instrument=evaluation.instrument)
+            tp_distance = 0.0  # Disable standard TP to avoid interfering with USD-based profit protection
             entry_price = diagnostics.get("close")
 
             if not trend_ok:

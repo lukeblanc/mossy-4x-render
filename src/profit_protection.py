@@ -3,14 +3,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Protocol, Tuple
+from typing import Dict, Iterable, List, Optional, Protocol
+
+
+ARM_AT_USD = 0.75
+GIVEBACK_USD = 0.50
 
 
 @dataclass
 class TrailingState:
-    high_water_pips: Optional[float] = None
-    high_water_profit: Optional[float] = None
-    trail_active: bool = False
+    max_profit_usd: Optional[float] = None
+    armed: bool = False
     last_update: Optional[datetime] = None
     open_time: Optional[datetime] = None
 
@@ -38,16 +41,16 @@ class ProfitProtection:
     def __init__(
         self,
         broker: BrokerLike,
-        trigger: float = 3.0,
-        trail: float = 0.5,
+        trigger: float = ARM_AT_USD,
+        trail: float = GIVEBACK_USD,
         *,
-        arm_pips: float = 8.0,
-        giveback_pips: float = 4.0,
+        arm_pips: float = 0.0,
+        giveback_pips: float = 0.0,
         arm_usd: Optional[float] = None,
         giveback_usd: Optional[float] = None,
-        use_pips: bool = True,
-        be_arm_pips: float = 6.0,
-        be_offset_pips: float = 1.0,
+        use_pips: bool = False,
+        be_arm_pips: float = 0.0,
+        be_offset_pips: float = 0.0,
         min_check_interval_sec: float = 0.0,
         aggressive: bool = False,
         aggressive_max_hold_minutes: float = 45.0,
@@ -65,7 +68,8 @@ class ProfitProtection:
         # Preserve legacy attributes for backwards compatibility/tests
         self.trigger = self.arm_usd
         self.trail = self.giveback_usd
-        self.use_pips = bool(use_pips)
+        # Pip trailing is disabled; retain flag for compatibility only
+        self.use_pips = False
         self.be_arm_pips = float(be_arm_pips)
         self.be_offset_pips = float(be_offset_pips)
         self.min_check_interval_sec = float(min_check_interval_sec)
@@ -121,43 +125,36 @@ class ProfitProtection:
             if self._interval_blocked(state, now_utc):
                 continue
 
-            self._update_high_water(trade_id, state, pips, profit)
+            self._update_peak_profit(trade_id, state, profit)
             state.last_update = now_utc
             self._state[trade_id] = state
-
-            metric, high_water, arm_threshold, giveback, metric_label = self._metric_bundle(
-                state, pips, profit
-            )
-
-            if metric is None or high_water is None:
-                continue
 
             if self.aggressive and self._maybe_aggressive_exit(trade, trade_id, instrument, profit, now_utc):
                 closed_trades.append(trade_id)
                 self._state.pop(trade_id, None)
                 continue
 
-            if not state.trail_active and metric >= arm_threshold:
-                state.trail_active = True
-                print(f"[TRAIL] armed ticket={trade_id} profit_{metric_label}={metric:.2f}", flush=True)
-
-            if not state.trail_active:
+            if profit is None or state.max_profit_usd is None:
                 continue
 
-            trailing_floor = high_water - giveback
-            if metric_label == "pips" and pips is not None and pips >= self.be_arm_pips:
-                trailing_floor = max(trailing_floor, self.be_offset_pips)
+            if not state.armed and state.max_profit_usd >= self.arm_usd:
+                state.armed = True
+                print(f"[TRAIL] armed ticket={trade_id} profit_usd={profit:.2f}", flush=True)
 
-            if metric <= trailing_floor:
+            if not state.armed:
+                continue
+
+            trailing_floor = state.max_profit_usd - self.giveback_usd
+            if (state.max_profit_usd - profit) >= self.giveback_usd:
                 if self._close_trade(
                     trade_id,
                     instrument,
                     profit,
-                    pips,
+                    None,
                     trailing_floor,
-                    high_water,
+                    state.max_profit_usd,
                     spread_pips,
-                    reason="TRAIL_GIVEBACK",
+                    reason="usd_profit_protection",
                 ):
                     closed_trades.append(trade_id)
                     self._state.pop(trade_id, None)
@@ -252,18 +249,17 @@ class ProfitProtection:
         except (TypeError, ValueError):
             return None
 
-    def _metric_bundle(
+    def _update_peak_profit(
         self,
+        trade_id: str,
         state: TrailingState,
-        pips: Optional[float],
         profit: Optional[float],
-    ) -> Tuple[Optional[float], Optional[float], float, float, str]:
-        if self.use_pips and pips is not None:
-            return pips, state.high_water_pips, self.arm_pips, self.giveback_pips, "pips"
-        if pips is None and profit is not None and self.use_pips:
-            # Fallback to USD when pip math not available
-            return profit, state.high_water_profit, self.arm_usd, self.giveback_usd, "usd"
-        return profit, state.high_water_profit, self.arm_usd, self.giveback_usd, "usd"
+    ) -> None:
+        if profit is None:
+            return
+        if state.max_profit_usd is None or profit > state.max_profit_usd:
+            state.max_profit_usd = profit
+            print(f"[TRAIL] update ticket={trade_id} max_profit_usd={profit:.2f}", flush=True)
 
     def _time_stop_threshold(self, instrument: str, atr_value: Optional[float]) -> float:
         base_threshold = max(0.0, self.time_stop_min_pips)
@@ -273,19 +269,6 @@ class ProfitProtection:
                 atr_pips = atr_value / pip_size
                 return max(base_threshold, atr_pips * self.time_stop_xau_atr_mult)
         return base_threshold
-
-    def _update_high_water(
-        self,
-        trade_id: str,
-        state: TrailingState,
-        pips: Optional[float],
-        profit: Optional[float],
-    ) -> None:
-        if pips is not None and (state.high_water_pips is None or pips > state.high_water_pips):
-            state.high_water_pips = pips
-            print(f"[TRAIL] update ticket={trade_id} high_water_pips={pips:.2f}", flush=True)
-        if profit is not None and (state.high_water_profit is None or profit > state.high_water_profit):
-            state.high_water_profit = profit
 
     def _interval_blocked(self, state: TrailingState, now_utc: datetime) -> bool:
         if self.min_check_interval_sec <= 0:
@@ -492,15 +475,28 @@ class ProfitProtection:
                 )
             return True
 
-        # If the broker did not acknowledge the close, perform a follow-up check
-        # to see whether the position already disappeared (e.g., previously closed
-        # or closed by another rule). Only then can we safely treat it as closed.
-        if self._broker_confirms_closed(trade_id, instrument):
+        error_code = self._extract_error_code(result)
+        if error_code == "CLOSEOUT_POSITION_DOESNT_EXIST":
+            if self._broker_confirms_closed(trade_id, instrument):
+                print(
+                    f"{log_prefix}[INFO] Trade already closed at broker; marking closed ticket={trade_id} instrument={instrument}{spread_clause}",
+                    flush=True,
+                )
+                return True
             print(
-                f"{log_prefix}[WARN] Close response inconclusive but {instrument} is no longer open; marking closed",
+                f"{log_prefix}[WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but {instrument} still appears open; ticket={trade_id} resp={result}{spread_clause}",
                 flush=True,
             )
-            return True
+        else:
+            # If the broker did not acknowledge the close, perform a follow-up check
+            # to see whether the position already disappeared (e.g., previously closed
+            # or closed by another rule). Only then can we safely treat it as closed.
+            if self._broker_confirms_closed(trade_id, instrument):
+                print(
+                    f"{log_prefix}[WARN] Close response inconclusive but {instrument} is no longer open; marking closed",
+                    flush=True,
+                )
+                return True
 
         print(
             f"{log_prefix}[WARN] Close failed ticket={trade_id} {metric_clause} floor={floor:.2f} "
@@ -508,6 +504,29 @@ class ProfitProtection:
             flush=True,
         )
         return False
+
+    @staticmethod
+    def _extract_error_code(result: Dict) -> Optional[str]:
+        if not isinstance(result, dict):
+            return None
+        for key in ("errorCode", "error_code"):
+            if key in result:
+                val = result.get(key)
+                if isinstance(val, str):
+                    return val
+        text = result.get("text")
+        if isinstance(text, str):
+            try:
+                import json
+
+                parsed = json.loads(text)
+                for key in ("errorCode", "error_code"):
+                    val = parsed.get(key)
+                    if isinstance(val, str):
+                        return val
+            except Exception:
+                return None
+        return None
 
     def _broker_confirms_closed(self, trade_id: Optional[str], instrument: str) -> bool:
         """Return True only if broker reports no open position for the instrument."""

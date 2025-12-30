@@ -9,13 +9,13 @@ from src.risk_manager import RiskManager
 
 
 DEFAULT_TRAILING_CONFIG = {
-    "arm_pips": 8.0,
-    "giveback_pips": 4.0,
-    "arm_usd": 3.0,
+    "arm_pips": 0.0,
+    "giveback_pips": 0.0,
+    "arm_usd": 0.75,
     "giveback_usd": 0.5,
-    "use_pips": True,
-    "be_arm_pips": 6.0,
-    "be_offset_pips": 1.0,
+    "use_pips": False,
+    "be_arm_pips": 0.0,
+    "be_offset_pips": 0.0,
     "min_check_interval_sec": 0.0,
 }
 
@@ -70,59 +70,22 @@ def build_profit_protection(
     ts_min_pips = float(ts_cfg.get("min_pips", DEFAULT_TIME_STOP["min_pips"]))
     ts_xau_mult = float(ts_cfg.get("xau_atr_mult", DEFAULT_TIME_STOP["xau_atr_mult"]))
 
-    if aggressive:
-        return ProfitProtection(
-            broker,
-            trigger=5.0,
-            trail=1.5,
-            arm_usd=5.0,
-            giveback_usd=1.5,
-            arm_pips=trailing_cfg["arm_pips"],
-            giveback_pips=trailing_cfg["giveback_pips"],
-            use_pips=trailing_cfg["use_pips"],
-            be_arm_pips=trailing_cfg["be_arm_pips"],
-            be_offset_pips=trailing_cfg["be_offset_pips"],
-            min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
-            aggressive=True,
-            aggressive_max_hold_minutes=float(trailing_cfg.get("aggressive_max_hold_minutes", 45.0)),
-            aggressive_max_loss_usd=float(trailing_cfg.get("aggressive_max_loss_usd", 5.0)),
-            aggressive_max_loss_atr_mult=float(trailing_cfg.get("aggressive_max_loss_atr_mult", 1.2)),
-            time_stop_minutes=ts_minutes,
-            time_stop_min_pips=ts_min_pips,
-            time_stop_xau_atr_mult=ts_xau_mult,
-        )
-
-    label = (mode or "").lower()
-    if label == "demo":
-        return ProfitProtection(
-            broker,
-            trigger=1.0,
-            trail=0.5,
-            arm_usd=1.0,
-            giveback_usd=0.5,
-            arm_pips=trailing_cfg["arm_pips"],
-            giveback_pips=trailing_cfg["giveback_pips"],
-            use_pips=trailing_cfg["use_pips"],
-            be_arm_pips=trailing_cfg["be_arm_pips"],
-            be_offset_pips=trailing_cfg["be_offset_pips"],
-            min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
-            time_stop_minutes=ts_minutes,
-            time_stop_min_pips=ts_min_pips,
-            time_stop_xau_atr_mult=ts_xau_mult,
-        )
-
     return ProfitProtection(
         broker,
-        trigger=3.0,
-        trail=0.5,
+        trigger=trailing_cfg["arm_usd"],
+        trail=trailing_cfg["giveback_usd"],
         arm_usd=trailing_cfg["arm_usd"],
         giveback_usd=trailing_cfg["giveback_usd"],
         arm_pips=trailing_cfg["arm_pips"],
         giveback_pips=trailing_cfg["giveback_pips"],
-        use_pips=trailing_cfg["use_pips"],
+        use_pips=False,
         be_arm_pips=trailing_cfg["be_arm_pips"],
         be_offset_pips=trailing_cfg["be_offset_pips"],
         min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
+        aggressive=aggressive,
+        aggressive_max_hold_minutes=float(trailing_cfg.get("aggressive_max_hold_minutes", 45.0)),
+        aggressive_max_loss_usd=float(trailing_cfg.get("aggressive_max_loss_usd", 5.0)),
+        aggressive_max_loss_atr_mult=float(trailing_cfg.get("aggressive_max_loss_atr_mult", 1.2)),
         time_stop_minutes=ts_minutes,
         time_stop_min_pips=ts_min_pips,
         time_stop_xau_atr_mult=ts_xau_mult,
