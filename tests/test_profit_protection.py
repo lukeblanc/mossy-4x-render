@@ -289,7 +289,11 @@ def test_time_stop_runs_when_entries_blocked(monkeypatch):
     monkeypatch.setattr(main_mod, "risk", DummyRisk())
     monkeypatch.setattr(main_mod, "engine", DummyEngine())
     monkeypatch.setattr(main_mod, "_open_trades_state", lambda: [open_trade])
-    monkeypatch.setattr(main_mod.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        main_mod.session_filter,
+        "session_decision",
+        lambda *args, **kwargs: main_mod.session_filter.SessionDecision(True, True, None, "STRICT"),
+    )
     monkeypatch.setattr(main_mod.position_sizer, "units_for_risk", lambda *args, **kwargs: 0)
 
     main_mod.asyncio.run(main_mod.decision_cycle())

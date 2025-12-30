@@ -25,6 +25,10 @@ def _reset_clock(original):
     main.datetime = original  # type: ignore[assignment]
 
 
+def _allow_session_decision():
+    return main.session_filter.SessionDecision(True, True, None, "STRICT")
+
+
 def test_xau_falling_knife_block(monkeypatch, capsys):
     class DummyRisk:
         risk_per_trade_pct = 0.001
@@ -107,7 +111,7 @@ def test_xau_falling_knife_block(monkeypatch, capsys):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",
@@ -228,7 +232,13 @@ def test_off_session_blocks_entries_but_trailing_runs(monkeypatch, capsys):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", dummy_guard)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [{"instrument": "EUR_USD"}])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        main.session_filter,
+        "session_decision",
+        lambda *args, **kwargs: main.session_filter.SessionDecision(
+            False, False, None, "STRICT", reason="off"
+        ),
+    )
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",

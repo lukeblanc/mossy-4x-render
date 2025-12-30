@@ -7,6 +7,9 @@ from typing import Iterable, List, Optional
 
 
 AWST = timezone(timedelta(hours=8))
+STRICT = "STRICT"
+EXTENDED = "EXTENDED"
+ALWAYS = "ALWAYS"
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,28 @@ class SessionSnapshot:
         start_date = self.start_awst.date().isoformat()
         start_ts = self.start_awst.strftime("%H%M")
         return f"{self.name}-{start_date}-{start_ts}"
+
+
+@dataclass(frozen=True)
+class SessionDecision:
+    allowed: bool
+    in_session: bool
+    session: SessionSnapshot | None
+    mode: str
+    risk_scale: float = 1.0
+    reason: str | None = None
+
+    @property
+    def off_session(self) -> bool:
+        return not self.in_session
+
+
+def _mode_from_env(mode: str | None) -> str:
+    env_mode = os.getenv("SESSION_MODE")
+    label = (env_mode or mode or STRICT).strip().upper()
+    if label in {STRICT, EXTENDED, ALWAYS}:
+        return label
+    return STRICT
 
 
 def _parse_awst_time(value: Optional[str], fallback: time) -> time:
@@ -84,11 +109,37 @@ def current_session(now_utc: datetime, *, mode: str | None = None) -> SessionSna
 _last_session: SessionSnapshot | None = None
 
 
-def is_entry_session(now_utc: datetime, *, mode: str | None = None) -> bool:
-    """Return True if new entries are allowed for the given UTC timestamp."""
+def _low_volatility(atr: Optional[float], atr_baseline: Optional[float], *, max_ratio: float) -> bool:
+    try:
+        if atr is None or atr_baseline is None:
+            return False
+        if atr_baseline <= 0:
+            return False
+        return float(atr) <= float(atr_baseline) * max_ratio
+    except (TypeError, ValueError):
+        return False
+
+
+def session_decision(
+    now_utc: datetime,
+    *,
+    mode: str | None = None,
+    atr: Optional[float] = None,
+    atr_baseline: Optional[float] = None,
+    trend_aligned: Optional[bool] = None,
+    max_off_session_vol_ratio: float = 1.25,
+    off_session_risk_scale: float = 0.5,
+) -> SessionDecision:
+    """Compute session gating with flexible modes."""
 
     global _last_session
     session = current_session(now_utc, mode=mode)
+    normalized_mode = _mode_from_env(mode)
+    in_session = session is not None
+    risk_scale = 1.0
+    allowed = in_session
+    reason: str | None = None
+
     if session and (_last_session is None or session.session_id != _last_session.session_id):
         print(
             f"[SESSION] Start {session.name} awst={session.start_awst.strftime('%H:%M')}..{session.end_awst.strftime('%H:%M')}",
@@ -100,7 +151,63 @@ def is_entry_session(now_utc: datetime, *, mode: str | None = None) -> bool:
             flush=True,
         )
     _last_session = session
-    return session is not None
+
+    if normalized_mode == ALWAYS:
+        allowed = True
+        if not in_session:
+            risk_scale = max(0.1, float(off_session_risk_scale))
+            reason = "off-session-risk-reduced"
+        return SessionDecision(
+            allowed=allowed,
+            in_session=in_session,
+            session=session,
+            mode=normalized_mode,
+            risk_scale=risk_scale,
+            reason=reason,
+        )
+
+    if normalized_mode == EXTENDED:
+        if in_session:
+            allowed = True
+        else:
+            low_vol = _low_volatility(atr, atr_baseline, max_ratio=max_off_session_vol_ratio)
+            trend_ok = bool(trend_aligned)
+            allowed = low_vol and trend_ok
+            reason = "off-session-conditional" if not allowed else None
+        return SessionDecision(
+            allowed=allowed,
+            in_session=in_session,
+            session=session,
+            mode=normalized_mode,
+            risk_scale=risk_scale,
+            reason=reason,
+        )
+
+    # STRICT default
+    return SessionDecision(
+        allowed=allowed,
+        in_session=in_session,
+        session=session,
+        mode=normalized_mode,
+        risk_scale=risk_scale,
+        reason="strict-off-session" if not allowed else None,
+    )
 
 
-__all__ = ["is_entry_session", "current_session", "SessionSnapshot", "AWST"]
+def is_entry_session(now_utc: datetime, *, mode: str | None = None) -> bool:
+    """Return True if new entries are allowed for the given UTC timestamp."""
+
+    decision = session_decision(now_utc, mode=mode)
+    return decision.allowed
+
+
+__all__ = [
+    "is_entry_session",
+    "current_session",
+    "SessionSnapshot",
+    "SessionDecision",
+    "AWST",
+    "STRICT",
+    "EXTENDED",
+    "ALWAYS",
+]

@@ -24,6 +24,10 @@ def sample_candles() -> List[Dict[str, float]]:
     ]
 
 
+def _allow_session_decision():
+    return main.session_filter.SessionDecision(True, True, None, "STRICT")
+
+
 def test_project_market_generates_bullish_projection(monkeypatch, sample_candles):
     monkeypatch.setenv("PROJECTOR_HORIZON", "4")
     monkeypatch.setenv("PROJECTOR_ATR_LENGTH", "3")
@@ -182,7 +186,7 @@ def test_projector_called_when_enabled(monkeypatch, capfd):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main.position_sizer, "units_for_risk", lambda *args, **kwargs: 100)
     monkeypatch.setattr(main, "project_market", fake_project)
 
@@ -300,7 +304,7 @@ def test_projector_not_called_when_disabled(monkeypatch, capfd):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main.position_sizer, "units_for_risk", lambda *args, **kwargs: 100)
     monkeypatch.setattr(main, "project_market", fake_project)
 

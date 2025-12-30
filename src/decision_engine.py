@@ -357,6 +357,10 @@ class DecisionEngine:
         ema_trend_fast = ema_trend_fast_series[-1] if ema_trend_fast_series else math.nan
         ema_trend_slow = ema_trend_slow_series[-1] if ema_trend_slow_series else math.nan
         rsi_val = self._rsi(closes, rsi_len)
+        rsi_prev = self._rsi(closes[:-1], rsi_len)
+        rsi_slope = math.nan
+        if not math.isnan(rsi_val) and not math.isnan(rsi_prev):
+            rsi_slope = rsi_val - rsi_prev
         atr_val, atr_baseline = self._atr_with_baseline(highs, lows, closes, atr_len, baseline_window=50)
         macd_line, macd_signal, macd_histogram = calculate_macd(
             closes,
@@ -378,6 +382,8 @@ class DecisionEngine:
             "ema_trend_fast": ema_trend_fast,
             "ema_trend_slow": ema_trend_slow,
             "rsi": rsi_val,
+            "rsi_prev": rsi_prev,
+            "rsi_slope": rsi_slope,
             "atr": atr_val,
             "atr_baseline_50": atr_baseline,
             "close": last_close,
@@ -391,6 +397,9 @@ class DecisionEngine:
         ema_fast = diagnostics.get("ema_fast", math.nan)
         ema_slow = diagnostics.get("ema_slow", math.nan)
         rsi_val = diagnostics.get("rsi", math.nan)
+        rsi_slope = diagnostics.get("rsi_slope", math.nan)
+        close_price = diagnostics.get("close", math.nan)
+        ema_trend_fast = diagnostics.get("ema_trend_fast", math.nan)
         atr_val = diagnostics.get("atr", 0.0)
 
         min_atr = float(self.config.get("min_atr", 0.0))
@@ -401,11 +410,29 @@ class DecisionEngine:
 
         rsi_buy = float(self.config.get("rsi_buy", 52))
         rsi_sell = float(self.config.get("rsi_sell", 48))
+        rsi_deadband = float(self.config.get("rsi_deadband", 1.0))
+        if not math.isnan(rsi_val) and abs(rsi_val - 50.0) < rsi_deadband:
+            return "HOLD", "rsi-jitter"
+
+        slope_rising = not math.isnan(rsi_slope) and rsi_slope >= 0
+        slope_falling = not math.isnan(rsi_slope) and rsi_slope <= 0
+        close_above_ema = (
+            not math.isnan(close_price)
+            and not math.isnan(ema_trend_fast)
+            and close_price >= ema_trend_fast
+        )
+        close_below_ema = (
+            not math.isnan(close_price)
+            and not math.isnan(ema_trend_fast)
+            and close_price <= ema_trend_fast
+        )
 
         if ema_fast > ema_slow and rsi_val >= rsi_buy:
-            return "BUY", "bullish"
+            if slope_rising or close_above_ema:
+                return "BUY", "bullish"
         if ema_fast < ema_slow and rsi_val <= rsi_sell:
-            return "SELL", "bearish"
+            if slope_falling or close_below_ema:
+                return "SELL", "bearish"
         return "HOLD", "neutral"
 
     # ------------------------------------------------------------------

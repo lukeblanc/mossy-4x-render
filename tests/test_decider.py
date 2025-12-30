@@ -40,6 +40,10 @@ def sample_config() -> Dict:
     }
 
 
+def _allow_session_decision():
+    return main.session_filter.SessionDecision(True, True, None, "STRICT")
+
+
 def test_scans_all_instruments(capfd, sample_config):
     prices: Dict[str, List[Dict[str, float]]] = {
         "EUR_USD": [
@@ -240,7 +244,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "datetime", Monday)
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(
         main.position_sizer,
         "units_for_risk",
@@ -423,7 +427,11 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
         lambda *args, **kwargs: calls.__setitem__("should_open", calls["should_open"] + 1) or (True, "ok"),
     )
     monkeypatch.setattr(main, "datetime", Monday)
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        main.session_filter,
+        "session_decision",
+        lambda *args, **kwargs: main.session_filter.SessionDecision(False, False, None, "STRICT", reason="off"),
+    )
     monkeypatch.setattr(main, "mode_env", "demo")
     monkeypatch.setattr(
         main.position_sizer,
@@ -434,6 +442,16 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
     before = Monday.now(timezone.utc) - timedelta(hours=1)
     original_ts = watchdog.last_decision_ts
     watchdog.last_decision_ts = before
+    main.suppression_counters.update(
+        {
+            "signals_generated": 0,
+            "signals_executed": 0,
+            "blocked_off_session": 0,
+            "blocked_risk": 0,
+            "blocked_max_positions": 0,
+            "blocked_spread": 0,
+        }
+    )
 
     asyncio.run(main.decision_cycle())
 
@@ -444,8 +462,11 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
         assert dummy_engine.marked == []
         assert dummy_broker.calls == []
         assert dummy_risk.entries == []
-        assert calls["should_open"] == 1
+        assert calls["should_open"] == 0
         assert watchdog.last_decision_ts > before
+        assert main.suppression_counters["signals_generated"] == 1
+        assert main.suppression_counters["signals_executed"] == 0
+        assert main.suppression_counters["blocked_off_session"] >= 1
     finally:
         watchdog.last_decision_ts = original_ts
         monkeypatch.setattr(main, "datetime", datetime)
@@ -552,7 +573,7 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
         "should_open",
         lambda *args, **kwargs: calls.__setitem__("should_open", calls["should_open"] + 1) or (True, "ok"),
     )
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main, "mode_env", "demo")
     monkeypatch.setattr(
         main.position_sizer,
@@ -674,7 +695,7 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main, "mode_env", "demo")
     monkeypatch.setattr(main, "datetime", Monday)
     monkeypatch.setattr(
@@ -796,7 +817,7 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main, "mode_env", "live")
     monkeypatch.setattr(main, "datetime", Sunday)
     monkeypatch.setattr(
