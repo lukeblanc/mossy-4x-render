@@ -554,8 +554,6 @@ class ProfitProtection:
             self._reconcile_closed(trade_id, instrument, open_trades, state)
             return True
 
-        result = self._execute_closeout(trade_id, instrument, long_units, short_units)
-
         spread_clause = f" spread={spread_pips:.2f}" if spread_pips is not None else ""
         if pips is not None:
             metric_clause = f"current_pips={pips:.2f}"
