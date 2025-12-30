@@ -1,6 +1,7 @@
 """Profit-protection logic for trailing unrealized gains."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Protocol
@@ -484,10 +485,17 @@ class ProfitProtection:
             return True
 
         error_code = self._extract_error_code(result)
+        closed_status = self._broker_confirms_closed(trade_id, instrument)
         if error_code == "CLOSEOUT_POSITION_DOESNT_EXIST":
-            if self._broker_confirms_closed(trade_id, instrument):
+            if closed_status is True:
                 print(
                     f"{log_prefix}[INFO] Trade already closed at broker; marking closed ticket={trade_id} instrument={instrument}{spread_clause}",
+                    flush=True,
+                )
+                return True
+            if closed_status is None and self._response_indicates_missing_position(result):
+                print(
+                    f"{log_prefix}[INFO] Broker response indicates no open position; marking closed ticket={trade_id} instrument={instrument}{spread_clause}",
                     flush=True,
                 )
                 return True
@@ -499,7 +507,7 @@ class ProfitProtection:
             # If the broker did not acknowledge the close, perform a follow-up check
             # to see whether the position already disappeared (e.g., previously closed
             # or closed by another rule). Only then can we safely treat it as closed.
-            if self._broker_confirms_closed(trade_id, instrument):
+            if closed_status is True:
                 print(
                     f"{log_prefix}[WARN] Close response inconclusive but {instrument} is no longer open; marking closed",
                     flush=True,
@@ -536,23 +544,76 @@ class ProfitProtection:
                 return None
         return None
 
-    def _broker_confirms_closed(self, trade_id: Optional[str], instrument: str) -> bool:
-        """Return True only if broker reports no open position for the instrument."""
+    def _response_indicates_missing_position(self, result: Dict) -> bool:
+        """Return True when the broker response clearly states no position exists."""
+
+        if not isinstance(result, dict):
+            return False
+
+        payload = None
+        text = result.get("text")
+        if isinstance(text, str):
+            try:
+                payload = json.loads(text)
+            except Exception:
+                if "CLOSEOUT_POSITION_DOESNT_EXIST" in text:
+                    return True
+
+        payload = payload or result
+
+        for key in ("errorCode", "error_code"):
+            code = payload.get(key)
+            if isinstance(code, str) and code == "CLOSEOUT_POSITION_DOESNT_EXIST":
+                return True
+
+        for leg in ("longOrderRejectTransaction", "shortOrderRejectTransaction"):
+            reject_reason = (payload.get(leg) or {}).get("rejectReason")
+            if isinstance(reject_reason, str) and "CLOSEOUT_POSITION_DOESNT_EXIST" in reject_reason:
+                return True
+
+        message = payload.get("errorMessage")
+        if isinstance(message, str) and "does not exist" in message:
+            return True
+
+        return False
+
+    @staticmethod
+    def _raw_units(trade: Dict) -> Optional[float]:
+        """Return the raw units value if present, preserving zeros."""
+
+        for key in ("currentUnits", "current_units", "units"):
+            if key in trade:
+                return trade.get(key)
+        return None
+
+    def _broker_confirms_closed(self, trade_id: Optional[str], instrument: str) -> Optional[bool]:
+        """Return True only if broker reports no open position for the instrument.
+
+        Returns False when the instrument is still present. Returns None when the broker
+        cannot confirm (missing capability or transient failure).
+        """
 
         try:
             if not hasattr(self.broker, "list_open_trades"):
-                return False
+                return None
             trades = self.broker.list_open_trades()
+            if trades is None:
+                return None
         except Exception as exc:  # pragma: no cover - defensive logging
             print(
                 f"[TRAIL][WARN] Unable to confirm closure for {instrument}: {exc}",
                 flush=True,
             )
-            return False
+            return None
 
         for trade in trades or []:
             inst = trade.get("instrument")
             if instrument and inst == instrument:
+                raw_units = self._raw_units(trade)
+                if raw_units is not None:
+                    units = self._units_from_trade(trade)
+                    if units == 0:
+                        continue
                 # Instrument still open; if IDs match we know the trade is alive.
                 if trade_id is None:
                     return False

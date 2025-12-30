@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sys
 
@@ -163,6 +164,64 @@ def test_closeout_missing_warns_when_position_still_open(capsys):
     assert closed == []
     out = capsys.readouterr().out
     assert "[TRAIL][WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but GBP_USD still appears open" in out
+
+
+def test_payload_with_missing_position_marks_closed(capsys):
+    class PayloadBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = [{"id": "T-PAY", "instrument": "EUR_USD"}]
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            payload = {
+                "longOrderRejectTransaction": {
+                    "rejectReason": "CLOSEOUT_POSITION_DOESNT_EXIST",
+                    "instrument": instrument,
+                },
+                "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST",
+                "errorMessage": "The Position requested to be closed out does not exist",
+            }
+            return {"status": "ERROR", "code": 400, "text": json.dumps(payload)}
+
+    broker = PayloadBroker()
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
+
+    armed = _trade("T-PAY", "EUR_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-PAY", "EUR_USD", 1000, profit=0.2)
+    closed = guard.process_open_trades([drop])
+
+    assert closed == ["T-PAY"]
+    out = capsys.readouterr().out
+    assert (
+        "[TRAIL][INFO] Broker response indicates no open position; marking closed ticket=T-PAY instrument=EUR_USD"
+        in out
+    )
+
+
+def test_zero_units_snapshot_treated_as_closed(capsys):
+    class ZeroUnitsBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = [{"id": "T-ZERO", "instrument": "EUR_USD", "units": 0}]
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
+
+        def list_open_trades(self):
+            return list(self.trades)
+
+    broker = ZeroUnitsBroker()
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
+
+    armed = _trade("T-ZERO", "EUR_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-ZERO", "EUR_USD", 1000, profit=0.2)
+    closed = guard.process_open_trades([drop])
+
+    assert closed == ["T-ZERO"]
+    out = capsys.readouterr().out
+    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-ZERO instrument=EUR_USD" in out
 
 
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
