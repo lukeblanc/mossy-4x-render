@@ -26,16 +26,16 @@ SUMMARY_INTERVAL = max(1, int(settings.METRIC_SUMMARY_INTERVAL))
 
 trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", "0.0"))
 trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", "0.0"))
-trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", "0.75"))
-trail_giveback_usd = float(os.getenv("TRAIL_GIVEBACK_USD", "0.5"))
+trail_arm_ccy = float(os.getenv("TRAIL_ARM_CCY", os.getenv("TRAIL_ARM_USD", "0.75")))
+trail_giveback_ccy = float(os.getenv("TRAIL_GIVEBACK_CCY", os.getenv("TRAIL_GIVEBACK_USD", "0.5")))
 be_arm_pips = float(os.getenv("BE_ARM_PIPS", "6.0"))
 be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", "1.0"))
 min_check_interval_sec = float(os.getenv("TRAIL_MIN_CHECK_INTERVAL", "0.0"))
 trailing_config = {
     "arm_pips": trail_arm_pips,
     "giveback_pips": trail_giveback_pips,
-    "arm_usd": trail_arm_usd,
-    "giveback_usd": trail_giveback_usd,
+    "arm_ccy": trail_arm_ccy,
+    "giveback_ccy": trail_giveback_ccy,
     "use_pips": False,
     "be_arm_pips": be_arm_pips,
     "be_offset_pips": be_offset_pips,

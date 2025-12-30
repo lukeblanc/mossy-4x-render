@@ -69,8 +69,8 @@
   "trailing": {
     "arm_pips": 0.0,
     "giveback_pips": 0.0,
-    "arm_usd": 0.75,
-    "giveback_usd": 0.5,
+    "arm_ccy": 0.75,
+    "giveback_ccy": 0.5,
     "use_pips": false,
     "be_arm_pips": 0.0,
     "be_offset_pips": 0.0,

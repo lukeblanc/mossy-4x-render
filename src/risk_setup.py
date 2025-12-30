@@ -11,8 +11,8 @@ from src.risk_manager import RiskManager
 DEFAULT_TRAILING_CONFIG = {
     "arm_pips": 0.0,
     "giveback_pips": 0.0,
-    "arm_usd": 0.75,
-    "giveback_usd": 0.5,
+    "arm_ccy": 0.75,
+    "giveback_ccy": 0.5,
     "use_pips": False,
     "be_arm_pips": 0.0,
     "be_offset_pips": 0.0,
@@ -69,13 +69,15 @@ def build_profit_protection(
     ts_minutes = float(ts_cfg.get("minutes", DEFAULT_TIME_STOP["minutes"]))
     ts_min_pips = float(ts_cfg.get("min_pips", DEFAULT_TIME_STOP["min_pips"]))
     ts_xau_mult = float(ts_cfg.get("xau_atr_mult", DEFAULT_TIME_STOP["xau_atr_mult"]))
+    arm_ccy = trailing_cfg.get("arm_ccy", trailing_cfg.get("arm_usd"))
+    giveback_ccy = trailing_cfg.get("giveback_ccy", trailing_cfg.get("giveback_usd"))
 
     return ProfitProtection(
         broker,
-        trigger=trailing_cfg["arm_usd"],
-        trail=trailing_cfg["giveback_usd"],
-        arm_usd=trailing_cfg["arm_usd"],
-        giveback_usd=trailing_cfg["giveback_usd"],
+        trigger=float(arm_ccy if arm_ccy is not None else DEFAULT_TRAILING_CONFIG["arm_ccy"]),
+        trail=float(giveback_ccy if giveback_ccy is not None else DEFAULT_TRAILING_CONFIG["giveback_ccy"]),
+        arm_ccy=arm_ccy,
+        giveback_ccy=giveback_ccy,
         arm_pips=trailing_cfg["arm_pips"],
         giveback_pips=trailing_cfg["giveback_pips"],
         use_pips=False,
@@ -84,7 +86,9 @@ def build_profit_protection(
         min_check_interval_sec=trailing_cfg["min_check_interval_sec"],
         aggressive=aggressive,
         aggressive_max_hold_minutes=float(trailing_cfg.get("aggressive_max_hold_minutes", 45.0)),
-        aggressive_max_loss_usd=float(trailing_cfg.get("aggressive_max_loss_usd", 5.0)),
+        aggressive_max_loss_ccy=float(
+            trailing_cfg.get("aggressive_max_loss_ccy", trailing_cfg.get("aggressive_max_loss_usd", 5.0))
+        ),
         aggressive_max_loss_atr_mult=float(trailing_cfg.get("aggressive_max_loss_atr_mult", 1.2)),
         time_stop_minutes=ts_minutes,
         time_stop_min_pips=ts_min_pips,

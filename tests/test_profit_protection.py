@@ -64,8 +64,8 @@ def test_trailing_giveback_closes_at_floor(capsys):
     broker = DummyBroker()
     guard = ProfitProtection(
         broker,
-        arm_usd=0.75,
-        giveback_usd=0.5,
+        arm_ccy=0.75,
+        giveback_ccy=0.5,
     )
 
     trade = _trade("T1", "EUR_USD", 1000, profit=0.0)
@@ -84,13 +84,13 @@ def test_trailing_giveback_closes_at_floor(capsys):
     assert broker.closed == [{"trade_id": "T1", "instrument": "EUR_USD"}]
 
     out = capsys.readouterr().out
-    assert "[TRAIL] armed ticket=T1 profit_usd=0.80" in out
-    assert "[TRAIL] close ticket=T1 current_profit=0.60 floor=0.70 high_water=1.20 reason=usd_profit_protection" in out
+    assert "[TRAIL] armed ticket=T1 profit_ccy=0.80" in out
+    assert "[TRAIL] close ticket=T1 current_profit=0.60 floor=0.70 high_water=1.20 reason=pnl_profit_protection" in out
 
 
 def test_multiple_positions_do_not_share_state():
     broker = DummyBroker()
-    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
 
     t1 = _trade("T1", "EUR_USD", 1000, profit=0.6)
     t2 = _trade("T2", "EUR_USD", -1000, profit=0.3)
@@ -98,8 +98,8 @@ def test_multiple_positions_do_not_share_state():
 
     # Only T1 should be armed and have a high-water update
     snap = guard.snapshot()
-    assert "T1" in snap and snap["T1"].max_profit_usd == pytest.approx(0.6)
-    assert "T2" in snap and snap["T2"].max_profit_usd == pytest.approx(0.3)
+    assert "T1" in snap and snap["T1"].max_profit_ccy == pytest.approx(0.6)
+    assert "T2" in snap and snap["T2"].max_profit_ccy == pytest.approx(0.3)
     assert snap["T1"].armed is True
     assert snap["T2"].armed is False
 
@@ -112,7 +112,7 @@ def test_multiple_positions_do_not_share_state():
     assert "T2" not in closed
     assert any(entry.get("trade_id") == "T1" for entry in broker.closed)
     # T2 should retain its state
-    assert guard.snapshot()["T2"].max_profit_usd == pytest.approx(0.6)
+    assert guard.snapshot()["T2"].max_profit_ccy == pytest.approx(0.6)
 
 
 def test_closeout_missing_treated_as_closed_when_gone(capsys):
@@ -128,7 +128,7 @@ def test_closeout_missing_treated_as_closed_when_gone(capsys):
             return []
 
     broker = CloseoutBroker()
-    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
 
     armed = _trade("T-MISS", "GBP_USD", 1000, profit=0.8)
     guard.process_open_trades([armed])
@@ -153,7 +153,7 @@ def test_closeout_missing_warns_when_position_still_open(capsys):
             return list(self.trades)
 
     broker = StickyBroker()
-    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
 
     armed = _trade("T-STICK", "GBP_USD", 1000, profit=0.8)
     guard.process_open_trades([armed])
@@ -363,9 +363,9 @@ def test_demo_trailing_thresholds():
     live_guard = main_mod._profit_guard_for_mode("live", broker)
     paper_guard = main_mod._profit_guard_for_mode("paper", broker)
 
-    assert demo_guard.trigger == pytest.approx(profit_protection.ARM_AT_USD)
-    assert demo_guard.trail == pytest.approx(profit_protection.GIVEBACK_USD)
-    assert live_guard.trigger == pytest.approx(profit_protection.ARM_AT_USD)
-    assert live_guard.trail == pytest.approx(profit_protection.GIVEBACK_USD)
-    assert paper_guard.trigger == pytest.approx(profit_protection.ARM_AT_USD)
-    assert paper_guard.trail == pytest.approx(profit_protection.GIVEBACK_USD)
+    assert demo_guard.trigger == pytest.approx(profit_protection.ARM_AT_CCY)
+    assert demo_guard.trail == pytest.approx(profit_protection.GIVEBACK_CCY)
+    assert live_guard.trigger == pytest.approx(profit_protection.ARM_AT_CCY)
+    assert live_guard.trail == pytest.approx(profit_protection.GIVEBACK_CCY)
+    assert paper_guard.trigger == pytest.approx(profit_protection.ARM_AT_CCY)
+    assert paper_guard.trail == pytest.approx(profit_protection.GIVEBACK_CCY)
