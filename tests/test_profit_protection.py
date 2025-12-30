@@ -23,6 +23,7 @@ class DummyBroker:
         self.pips = {k: list(v) for k, v in (pips or {}).items()}
         self.closed = []
         self.trades = list(open_trades) if open_trades is not None else None
+        self.side_payloads = []
 
     def get_unrealized_profit(self, instrument: str):
         values = self.profits.get(instrument)
@@ -30,9 +31,30 @@ class DummyBroker:
             return 0.0
         return values.pop(0)
 
-    def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
-        self.closed.append({"instrument": instrument, "long_units": long_units, "short_units": short_units, "trade_id": trade_id})
+    def close_position_side(self, instrument: str, long_units: float, short_units: float):
+        payload = {}
+        if long_units > 0 and short_units == 0:
+            payload = {"longUnits": "ALL"}
+        elif short_units < 0 and long_units == 0:
+            payload = {"shortUnits": "ALL"}
+        elif long_units != 0 or short_units != 0:
+            payload = {"longUnits": "ALL", "shortUnits": "ALL"}
+        else:
+            payload = {"longUnits": "0", "shortUnits": "0"}
+        self.side_payloads.append(payload)
+        self.closed.append({"instrument": instrument, "payload": payload})
         return {"status": "SIMULATED"}
+
+    def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        try:
+            long_val = float(long_units)
+        except (TypeError, ValueError):
+            long_val = 0.0
+        try:
+            short_val = float(short_units)
+        except (TypeError, ValueError):
+            short_val = 0.0
+        return self.close_position_side(instrument, long_val, short_val)
 
     def close_trade(self, trade_id: str, instrument: str | None = None):
         self.closed.append({"trade_id": trade_id, "instrument": instrument})
@@ -106,11 +128,25 @@ def test_trailing_giveback_closes_at_floor(capsys):
     closed = guard.process_open_trades([trade])
 
     assert closed == ["T1"]
-    assert broker.closed == [{"instrument": "EUR_USD", "long_units": "ALL", "short_units": "0", "trade_id": "T1"}]
+    assert broker.closed == [{"instrument": "EUR_USD", "payload": {"longUnits": "ALL"}}]
 
     out = capsys.readouterr().out
     assert "[TRAIL][INFO] armed ticket=T1 profit=0.80" in out
     assert "[TRAIL] close ticket=T1 current_profit=0.60 floor=0.70 high_water=1.20 reason=pnl_profit_protection" in out
+
+
+def test_close_position_side_payload_has_no_units_key():
+    broker = DummyBroker(profits={"EUR_USD": [1.2, 0.6]})
+    guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5)
+
+    armed = [_trade("T-PAYLOAD", "EUR_USD", 1000, profit=1.2)]
+    guard.process_open_trades(armed)
+
+    giveback = [_trade("T-PAYLOAD", "EUR_USD", 1000, profit=0.6)]
+    guard.process_open_trades(giveback)
+
+    assert broker.side_payloads[0] == {"longUnits": "ALL"}
+    assert "units" not in broker.side_payloads[0]
 
 
 def test_multiple_positions_do_not_share_state():
@@ -135,7 +171,7 @@ def test_multiple_positions_do_not_share_state():
 
     assert "T1" in closed
     assert "T2" not in closed
-    assert any(entry.get("trade_id") == "T1" for entry in broker.closed)
+    assert any(entry.get("instrument") == "EUR_USD" for entry in broker.closed)
     # T2 should retain its state
     assert guard.snapshot()["T2"].max_profit_ccy == pytest.approx(0.6)
 
@@ -145,7 +181,8 @@ def test_closeout_missing_treated_as_closed_when_gone(capsys):
         def __init__(self):
             super().__init__(profits={"GBP_USD": [0.8, 0.2]}, open_trades=[{"id": "T-MISS", "instrument": "GBP_USD", "currentUnits": 1000}])
 
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
+            super().close_position_side(instrument, long_units, short_units)
             self.trades = []
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
 
@@ -161,8 +198,12 @@ def test_closeout_missing_treated_as_closed_when_gone(capsys):
     closed = guard.process_open_trades([drop])
 
     assert closed == ["T-MISS"]
+    assert len(broker.side_payloads) == 1
+    # subsequent cycles should not re-attempt once treated as closed
+    guard.process_open_trades([drop])
+    assert len(broker.side_payloads) == 1
     out = capsys.readouterr().out
-    assert "broker_missing_position treating_closed ticket=T-MISS instrument=GBP_USD" in out
+    assert "treated_as_closed_after_missing_position ticket=T-MISS instrument=GBP_USD" in out
 
 
 def test_closeout_missing_warns_when_position_still_open(capsys):
@@ -170,7 +211,8 @@ def test_closeout_missing_warns_when_position_still_open(capsys):
         def __init__(self):
             super().__init__(profits={"GBP_USD": [0.8, 0.2]}, open_trades=[{"id": "T-STICK", "instrument": "GBP_USD", "currentUnits": 1000}])
 
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
+            super().close_position_side(instrument, long_units, short_units)
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
 
         def list_open_trades(self):
@@ -185,8 +227,9 @@ def test_closeout_missing_warns_when_position_still_open(capsys):
     closed = guard.process_open_trades([drop])
 
     assert closed == []
+    assert len(broker.side_payloads) == 2  # initial attempt + retry only
     out = capsys.readouterr().out
-    assert "broker_missing_position retry ticket=T-STICK" in out
+    assert "missing_position_but_snapshot_still_open ticket=T-STICK" in out
 
 
 def test_payload_with_missing_position_marks_closed(capsys):
@@ -194,7 +237,8 @@ def test_payload_with_missing_position_marks_closed(capsys):
         def __init__(self):
             super().__init__(profits={"EUR_USD": [0.8, 0.2]}, open_trades=[{"id": "T-PAY", "instrument": "EUR_USD", "currentUnits": 1000}])
 
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
+            super().close_position_side(instrument, long_units, short_units)
             self.trades = []
             payload = {
                 "longOrderRejectTransaction": {
@@ -216,7 +260,7 @@ def test_payload_with_missing_position_marks_closed(capsys):
 
     assert closed == ["T-PAY"]
     out = capsys.readouterr().out
-    assert "broker_missing_position treating_closed ticket=T-PAY instrument=EUR_USD" in out
+    assert "treated_as_closed_after_missing_position ticket=T-PAY instrument=EUR_USD" in out
 
 
 def test_zero_units_snapshot_treated_as_closed(capsys):
@@ -225,7 +269,8 @@ def test_zero_units_snapshot_treated_as_closed(capsys):
             super().__init__(profits={"EUR_USD": [0.8, 0.2]})
             self.trades = [{"id": "T-ZERO", "instrument": "EUR_USD", "units": 0}]
 
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
+            super().close_position_side(instrument, long_units, short_units)
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
 
         def list_open_trades(self):
@@ -250,7 +295,8 @@ def test_missing_position_reconciles_without_warn(capsys):
         def __init__(self):
             super().__init__(profits={"USD_JPY": [0.8, 0.1]}, open_trades=[{"id": "T-404", "instrument": "USD_JPY", "currentUnits": 1000}])
 
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
+            super().close_position_side(instrument, long_units, short_units)
             self.trades = []
             return {
                 "status": "ERROR",
@@ -278,7 +324,7 @@ def test_missing_position_reconciles_without_warn(capsys):
     assert guard.snapshot() == {}
 
     out = capsys.readouterr().out
-    assert "broker_missing_position treating_closed ticket=T-404 instrument=USD_JPY" in out
+    assert "treated_as_closed_after_missing_position ticket=T-404 instrument=USD_JPY" in out
     assert "[WARN]" not in out
 
 
@@ -287,8 +333,9 @@ def test_missing_position_not_retried(capsys):
         def __init__(self):
             super().__init__(profits={"EUR_USD": [0.8, 0.1, 0.1]}, open_trades=[{"id": "T-NORETRY", "instrument": "EUR_USD", "currentUnits": 1000}])
             self.calls = 0
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
             self.calls += 1
+            super().close_position_side(instrument, long_units, short_units)
             self.trades = []
             return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
         def list_open_trades(self):
@@ -306,8 +353,9 @@ def test_missing_position_not_retried(capsys):
     guard.process_open_trades([drop])
 
     assert broker.calls == 1
+    assert len(broker.side_payloads) == 1
     out = capsys.readouterr().out
-    assert out.count("broker_missing_position treating_closed ticket=T-NORETRY instrument=EUR_USD") == 1
+    assert out.count("treated_as_closed_after_missing_position ticket=T-NORETRY instrument=EUR_USD") == 1
 
 
 def test_trail_arms_at_one_and_closes_after_half_giveback(capsys):
@@ -341,9 +389,9 @@ def test_trailing_close_not_blocked_by_interval(capsys):
             super().__init__(profits={"EUR_USD": [1.0, 0.5]})
             self.calls = 0
 
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
             self.calls += 1
-            return super().close_position(instrument, long_units=long_units, short_units=short_units, trade_id=trade_id)
+            return super().close_position_side(instrument, long_units, short_units)
 
         def list_open_trades(self):
             return [{"id": "T-INTERVAL", "instrument": "EUR_USD", "currentUnits": 1000}]
@@ -360,7 +408,7 @@ def test_trailing_close_not_blocked_by_interval(capsys):
 
     assert closed == ["T-INTERVAL"]
     assert broker.calls == 1
-    assert broker.closed == [{"instrument": "EUR_USD", "long_units": "ALL", "short_units": "0", "trade_id": "T-INTERVAL"}]
+    assert broker.closed == [{"instrument": "EUR_USD", "payload": {"longUnits": "ALL"}}]
     out = capsys.readouterr().out
     assert "giveback_met ticket=T-INTERVAL instrument=EUR_USD" in out
     assert "attempting_close ticket=T-INTERVAL instrument=EUR_USD reason=pnl_profit_protection" in out
@@ -371,9 +419,9 @@ def test_trailing_not_blocked_by_cooldown_and_uses_broker_profit(capsys):
         def __init__(self):
             super().__init__(profits={"EUR_USD": [1.2, 0.46]})
             self.calls = 0
-        def close_position(self, instrument: str, *, long_units="ALL", short_units="ALL", trade_id=None):
+        def close_position_side(self, instrument: str, long_units: float, short_units: float):
             self.calls += 1
-            return super().close_position(instrument, long_units=long_units, short_units=short_units, trade_id=trade_id)
+            return super().close_position_side(instrument, long_units, short_units)
         def list_open_trades(self):
             return [{"id": "T-COOL", "instrument": "EUR_USD", "currentUnits": 1000}]
 
@@ -442,9 +490,9 @@ def test_correct_side_closeout_long_and_short():
     closed = guard.process_open_trades(giveback)
 
     assert set(closed) == {"T-LONG", "T-SHORT"}
-    payloads = {(c["instrument"], c["long_units"], c["short_units"]) for c in broker.closed}
-    assert ("EUR_USD", "ALL", "0") in payloads
-    assert ("GBP_USD", "0", "ALL") in payloads
+    payloads = {(c["instrument"], frozenset(c["payload"].items())) for c in broker.closed}
+    assert ("EUR_USD", frozenset({"longUnits": "ALL"}.items())) in payloads
+    assert ("GBP_USD", frozenset({"shortUnits": "ALL"}.items())) in payloads
 
 
 def test_broker_open_clears_local_closed_marker_and_continues_trailing(capsys):
@@ -462,7 +510,7 @@ def test_broker_open_clears_local_closed_marker_and_continues_trailing(capsys):
     closed = guard.process_open_trades([drop_trade])
 
     assert closed == ["T-RESYNC"]
-    assert broker.closed == [{"instrument": "EUR_USD", "long_units": "ALL", "short_units": "0", "trade_id": "T-RESYNC"}]
+    assert broker.closed == [{"instrument": "EUR_USD", "payload": {"longUnits": "ALL"}}]
     out = capsys.readouterr().out
     assert "clearing_local_closed_marker" in out
     assert "giveback_met ticket=T-RESYNC instrument=EUR_USD" in out
@@ -542,7 +590,7 @@ def test_time_exit_only_in_aggressive_mode(capsys):
     )
     closed = aggressive_guard.process_open_trades(trades)
     assert closed == ["T-EXIT"]
-    assert aggressive_broker.closed[0]["trade_id"] == "T-EXIT"
+    assert aggressive_broker.closed[0]["instrument"] == "EUR_USD"
 
     normal_broker = DummyBroker()
     normal_guard = ProfitProtection(
@@ -558,7 +606,7 @@ def test_time_exit_only_in_aggressive_mode(capsys):
 
     output = capsys.readouterr().out
     assert "[TIME-EXIT] Closing EUR_USD" in output
-    assert output.count("[TIME-EXIT]") == 2
+    assert output.count("[TIME-EXIT]") == 3
 
 
 def test_time_stop_uses_atr_fraction_for_xau(capsys):
@@ -582,7 +630,7 @@ def test_time_stop_uses_atr_fraction_for_xau(capsys):
     closed = guard.process_open_trades([trade], now_utc=opened_at + timedelta(minutes=120))
 
     assert closed == ["XAU-TS"]
-    assert broker.closed == [{"instrument": "XAU_USD", "long_units": "ALL", "short_units": "0", "trade_id": "XAU-TS"}]
+    assert broker.closed == [{"instrument": "XAU_USD", "payload": {"longUnits": "ALL"}}]
     output = capsys.readouterr().out
     assert "[TIME-STOP] TIME_STOP XAU_USD" in output
 
