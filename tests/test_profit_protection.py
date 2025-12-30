@@ -138,7 +138,7 @@ def test_closeout_missing_treated_as_closed_when_gone(capsys):
 
     assert closed == ["T-MISS"]
     out = capsys.readouterr().out
-    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-MISS instrument=GBP_USD" in out
+    assert "[TRAIL][INFO] Broker reports position already closed; state reconciled" in out
 
 
 def test_closeout_missing_warns_when_position_still_open(capsys):
@@ -221,7 +221,44 @@ def test_zero_units_snapshot_treated_as_closed(capsys):
 
     assert closed == ["T-ZERO"]
     out = capsys.readouterr().out
-    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-ZERO instrument=EUR_USD" in out
+    assert "[TRAIL][INFO] Broker reports position already closed; state reconciled" in out
+
+
+def test_missing_position_reconciles_without_warn(capsys):
+    class MissingPositionBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = []
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {
+                "status": "ERROR",
+                "code": 400,
+                "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST",
+                "longOrderRejectTransaction": {"rejectReason": "POSITION_CLOSEOUT_DOESNT_EXIST"},
+            }
+
+        def list_open_trades(self):
+            return list(self.trades)
+
+    broker = MissingPositionBroker()
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.25)
+
+    armed = _trade("T-404", "USD_JPY", 1000, profit=0.8)
+    open_trades = [armed]
+    guard.process_open_trades(open_trades)
+
+    drop = _trade("T-404", "USD_JPY", 1000, profit=0.1)
+    open_trades = [drop]
+    closed = guard.process_open_trades(open_trades)
+
+    assert closed == ["T-404"]
+    assert open_trades == []
+    assert guard.snapshot() == {}
+
+    out = capsys.readouterr().out
+    assert "[TRAIL][INFO] Broker reports position already closed; state reconciled" in out
+    assert "[WARN]" not in out
 
 
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
