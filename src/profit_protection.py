@@ -702,6 +702,8 @@ class ProfitProtection:
         if state:
             state.armed = False
             state.max_profit_ccy = None
+            state.last_update = None
+            state.open_time = None
         if open_trades is not None:
             remaining = []
             for trade in open_trades:
@@ -710,6 +712,8 @@ class ProfitProtection:
                 if (trade_id is not None and tid is not None and str(tid) == str(trade_id)) or (
                     instrument and inst == instrument
                 ):
+                    if isinstance(trade, dict):
+                        trade["state"] = "CLOSED"
                     continue
                 remaining.append(trade)
             open_trades[:] = remaining
