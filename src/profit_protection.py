@@ -475,15 +475,28 @@ class ProfitProtection:
                 )
             return True
 
-        # If the broker did not acknowledge the close, perform a follow-up check
-        # to see whether the position already disappeared (e.g., previously closed
-        # or closed by another rule). Only then can we safely treat it as closed.
-        if self._broker_confirms_closed(trade_id, instrument):
+        error_code = self._extract_error_code(result)
+        if error_code == "CLOSEOUT_POSITION_DOESNT_EXIST":
+            if self._broker_confirms_closed(trade_id, instrument):
+                print(
+                    f"{log_prefix}[INFO] Trade already closed at broker; marking closed ticket={trade_id} instrument={instrument}{spread_clause}",
+                    flush=True,
+                )
+                return True
             print(
-                f"{log_prefix}[WARN] Close response inconclusive but {instrument} is no longer open; marking closed",
+                f"{log_prefix}[WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but {instrument} still appears open; ticket={trade_id} resp={result}{spread_clause}",
                 flush=True,
             )
-            return True
+        else:
+            # If the broker did not acknowledge the close, perform a follow-up check
+            # to see whether the position already disappeared (e.g., previously closed
+            # or closed by another rule). Only then can we safely treat it as closed.
+            if self._broker_confirms_closed(trade_id, instrument):
+                print(
+                    f"{log_prefix}[WARN] Close response inconclusive but {instrument} is no longer open; marking closed",
+                    flush=True,
+                )
+                return True
 
         print(
             f"{log_prefix}[WARN] Close failed ticket={trade_id} {metric_clause} floor={floor:.2f} "
@@ -491,6 +504,29 @@ class ProfitProtection:
             flush=True,
         )
         return False
+
+    @staticmethod
+    def _extract_error_code(result: Dict) -> Optional[str]:
+        if not isinstance(result, dict):
+            return None
+        for key in ("errorCode", "error_code"):
+            if key in result:
+                val = result.get(key)
+                if isinstance(val, str):
+                    return val
+        text = result.get("text")
+        if isinstance(text, str):
+            try:
+                import json
+
+                parsed = json.loads(text)
+                for key in ("errorCode", "error_code"):
+                    val = parsed.get(key)
+                    if isinstance(val, str):
+                        return val
+            except Exception:
+                return None
+        return None
 
     def _broker_confirms_closed(self, trade_id: Optional[str], instrument: str) -> bool:
         """Return True only if broker reports no open position for the instrument."""

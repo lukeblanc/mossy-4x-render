@@ -115,6 +115,56 @@ def test_multiple_positions_do_not_share_state():
     assert guard.snapshot()["T2"].max_profit_usd == pytest.approx(0.6)
 
 
+def test_closeout_missing_treated_as_closed_when_gone(capsys):
+    class CloseoutBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = []
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
+
+        def list_open_trades(self):
+            return []
+
+    broker = CloseoutBroker()
+    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+
+    armed = _trade("T-MISS", "GBP_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-MISS", "GBP_USD", 1000, profit=0.2)
+    closed = guard.process_open_trades([drop])
+
+    assert closed == ["T-MISS"]
+    out = capsys.readouterr().out
+    assert "[TRAIL][INFO] Trade already closed at broker; marking closed ticket=T-MISS instrument=GBP_USD" in out
+
+
+def test_closeout_missing_warns_when_position_still_open(capsys):
+    class StickyBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.trades = [{"id": "T-STICK", "instrument": "GBP_USD"}]
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            return {"status": "ERROR", "code": 400, "errorCode": "CLOSEOUT_POSITION_DOESNT_EXIST"}
+
+        def list_open_trades(self):
+            return list(self.trades)
+
+    broker = StickyBroker()
+    guard = ProfitProtection(broker, arm_usd=0.5, giveback_usd=0.25)
+
+    armed = _trade("T-STICK", "GBP_USD", 1000, profit=0.8)
+    guard.process_open_trades([armed])
+    drop = _trade("T-STICK", "GBP_USD", 1000, profit=0.2)
+    closed = guard.process_open_trades([drop])
+
+    assert closed == []
+    out = capsys.readouterr().out
+    assert "[TRAIL][WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but GBP_USD still appears open" in out
+
+
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
     class DummyGuard:
         def __init__(self):
