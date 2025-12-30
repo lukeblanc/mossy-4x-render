@@ -101,7 +101,7 @@ class ProfitProtection:
         active_keys = set()
         closed_trades: List[str] = []
 
-        for trade in open_trades:
+        for trade in list(open_trades):
             trade_id = self._trade_id(trade)
             instrument = self._instrument_from_trade(trade)
             units = self._units_from_trade(trade)
@@ -125,6 +125,8 @@ class ProfitProtection:
                 minutes_open,
                 atr_val,
                 spread_pips,
+                open_trades=open_trades,
+                state=state,
             ):
                 closed_trades.append(trade_id)
                 self._state.pop(trade_id, None)
@@ -137,7 +139,9 @@ class ProfitProtection:
             state.last_update = now_utc
             self._state[trade_id] = state
 
-            if self.aggressive and self._maybe_aggressive_exit(trade, trade_id, instrument, profit, now_utc):
+            if self.aggressive and self._maybe_aggressive_exit(
+                trade, trade_id, instrument, profit, now_utc, open_trades=open_trades, state=state
+            ):
                 closed_trades.append(trade_id)
                 self._state.pop(trade_id, None)
                 continue
@@ -163,6 +167,8 @@ class ProfitProtection:
                     state.max_profit_ccy,
                     spread_pips,
                     reason="pnl_profit_protection",
+                    open_trades=open_trades,
+                    state=state,
                 ):
                     closed_trades.append(trade_id)
                     self._state.pop(trade_id, None)
@@ -295,6 +301,8 @@ class ProfitProtection:
         minutes_open: Optional[float],
         atr_value: Optional[float],
         spread_pips: Optional[float],
+        open_trades: Optional[List[Dict]] = None,
+        state: Optional[TrailingState] = None,
     ) -> bool:
         if self.time_stop_minutes <= 0 or self.time_stop_min_pips < 0:
             return False
@@ -322,6 +330,8 @@ class ProfitProtection:
             log_prefix="[TIME-STOP]",
             reason="TIME_STOP",
             summary=summary,
+            open_trades=open_trades,
+            state=state,
         ):
             return True
         return False
@@ -333,6 +343,8 @@ class ProfitProtection:
         instrument: str,
         profit: float,
         now_utc: datetime,
+        open_trades: Optional[List[Dict]] = None,
+        state: Optional[TrailingState] = None,
     ) -> bool:
         if profit is None:
             return False
@@ -354,6 +366,8 @@ class ProfitProtection:
                 log_prefix="[TIME-EXIT]",
                 reason=f"age>{minutes_open:.1f}m",
                 summary=f"Closing {instrument} after {minutes_open:.1f} minutes, profit={profit:.2f}",
+                open_trades=open_trades,
+                state=state,
             ):
                 return True
 
@@ -373,6 +387,8 @@ class ProfitProtection:
                 log_prefix="[LOSS-FLOOR]",
                 reason="LOSS_FLOOR",
                 summary=f"Closing {instrument} loss={profit:.2f} atr={atr_str}",
+                open_trades=open_trades,
+                state=state,
             ):
                 return True
         return False
@@ -440,6 +456,8 @@ class ProfitProtection:
         log_prefix: str = "[TRAIL]",
         reason: str,
         summary: Optional[str] = None,
+        open_trades: Optional[List[Dict]] = None,
+        state: Optional[TrailingState] = None,
     ) -> bool:
         """Attempt to close a trade and only return True on confirmed closure.
 
@@ -485,7 +503,22 @@ class ProfitProtection:
             return True
 
         error_code = self._extract_error_code(result)
-        closed_status = self._broker_confirms_closed(trade_id, instrument)
+        missing_position_flag = error_code == "CLOSEOUT_POSITION_DOESNT_EXIST" or self._response_indicates_missing_position(result)
+        broker_snapshot = None
+
+        if missing_position_flag:
+            broker_snapshot = self._list_open_trades_quietly()
+            instrument_open = self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
+            if broker_snapshot is not None and not instrument_open:
+                self._reconcile_closed(trade_id, instrument, open_trades, state)
+                print("[TRAIL][INFO] Broker reports position already closed; state reconciled", flush=True)
+                return True
+
+        closed_status = (
+            False
+            if self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
+            else self._broker_confirms_closed(trade_id, instrument)
+        )
         if error_code == "CLOSEOUT_POSITION_DOESNT_EXIST":
             if closed_status is True:
                 print(
@@ -556,7 +589,7 @@ class ProfitProtection:
             try:
                 payload = json.loads(text)
             except Exception:
-                if "CLOSEOUT_POSITION_DOESNT_EXIST" in text:
+                if "CLOSEOUT_POSITION_DOESNT_EXIST" in text or "POSITION_CLOSEOUT_DOESNT_EXIST" in text:
                     return True
 
         payload = payload or result
@@ -568,7 +601,9 @@ class ProfitProtection:
 
         for leg in ("longOrderRejectTransaction", "shortOrderRejectTransaction"):
             reject_reason = (payload.get(leg) or {}).get("rejectReason")
-            if isinstance(reject_reason, str) and "CLOSEOUT_POSITION_DOESNT_EXIST" in reject_reason:
+            if isinstance(reject_reason, str) and (
+                "CLOSEOUT_POSITION_DOESNT_EXIST" in reject_reason or "POSITION_CLOSEOUT_DOESNT_EXIST" in reject_reason
+            ):
                 return True
 
         message = payload.get("errorMessage")
@@ -606,23 +641,7 @@ class ProfitProtection:
             )
             return None
 
-        for trade in trades or []:
-            inst = trade.get("instrument")
-            if instrument and inst == instrument:
-                raw_units = self._raw_units(trade)
-                if raw_units is not None:
-                    units = self._units_from_trade(trade)
-                    if units == 0:
-                        continue
-                # Instrument still open; if IDs match we know the trade is alive.
-                if trade_id is None:
-                    return False
-                live_id = trade.get("id") or trade.get("tradeID") or trade.get("position_id")
-                if live_id is None:
-                    return False
-                if str(live_id) == str(trade_id):
-                    return False
-        return True
+        return not self._instrument_open_in_snapshot(trades, instrument, trade_id)
 
     def _pip_size(self, instrument: str) -> float:
         try:
@@ -642,3 +661,57 @@ class ProfitProtection:
             return None if spread is None else float(spread)
         except Exception:
             return None
+
+    def _list_open_trades_quietly(self) -> Optional[List[Dict]]:
+        try:
+            if not hasattr(self.broker, "list_open_trades"):
+                return None
+            return self.broker.list_open_trades()
+        except Exception:
+            return None
+
+    def _instrument_open_in_snapshot(
+        self, trades: Optional[List[Dict]], instrument: str, trade_id: Optional[str]
+    ) -> bool:
+        for trade in trades or []:
+            inst = trade.get("instrument")
+            if instrument and inst != instrument:
+                continue
+            raw_units = self._raw_units(trade)
+            if raw_units is not None:
+                units = self._units_from_trade(trade)
+                if units == 0:
+                    continue
+            if trade_id is None:
+                return True
+            live_id = trade.get("id") or trade.get("tradeID") or trade.get("position_id")
+            if live_id is None:
+                return True
+            if str(live_id) == str(trade_id):
+                return True
+        return False
+
+    def _reconcile_closed(
+        self,
+        trade_id: Optional[str],
+        instrument: str,
+        open_trades: Optional[List[Dict]],
+        state: Optional[TrailingState],
+    ) -> None:
+        state = state or self._state.get(trade_id or "")
+        if state:
+            state.armed = False
+            state.max_profit_ccy = None
+        if open_trades is not None:
+            remaining = []
+            for trade in open_trades:
+                tid = self._trade_id(trade)
+                inst = trade.get("instrument")
+                if (trade_id is not None and tid is not None and str(tid) == str(trade_id)) or (
+                    instrument and inst == instrument
+                ):
+                    continue
+                remaining.append(trade)
+            open_trades[:] = remaining
+        if trade_id is not None:
+            self._state.pop(trade_id, None)
