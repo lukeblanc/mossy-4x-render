@@ -5,7 +5,7 @@ import json
 import os
 import sys
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -16,7 +16,7 @@ from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
 from src.profit_protection import ProfitProtection
-from src import session_filter
+from src import orb, session_filter
 from src import position_sizer
 from src.projector import project_market
 from src.risk_setup import (
@@ -347,15 +347,118 @@ def _macd_confirms(signal: str, diagnostics: Dict[str, float] | None) -> tuple[b
     macd_line = _coerce(diagnostics.get("macd_line"))
     macd_signal = _coerce(diagnostics.get("macd_signal"))
     macd_histogram = _coerce(diagnostics.get("macd_histogram"))
+    macd_histogram_prev = _coerce(diagnostics.get("macd_histogram_prev"))
 
     if any(math.isnan(val) for val in (macd_line, macd_signal, macd_histogram)):
         return False, macd_line, macd_signal, macd_histogram
 
+    hist_rising = False
+    hist_falling = False
+    if not math.isnan(macd_histogram_prev):
+        hist_rising = macd_histogram > macd_histogram_prev
+        hist_falling = macd_histogram < macd_histogram_prev
+
     if signal == "BUY":
-        return macd_line > macd_signal and macd_histogram >= 0, macd_line, macd_signal, macd_histogram
+        ok = macd_line > macd_signal and (macd_histogram >= 0 or hist_rising)
+        return ok, macd_line, macd_signal, macd_histogram
     if signal == "SELL":
-        return macd_line < macd_signal and macd_histogram <= 0, macd_line, macd_signal, macd_histogram
+        ok = macd_line < macd_signal and (macd_histogram <= 0 or hist_falling)
+        return ok, macd_line, macd_signal, macd_histogram
     return False, macd_line, macd_signal, macd_histogram
+
+
+def _seed_opening_range_bounds(
+    candles: List[Dict[str, float]],
+    *,
+    timeframe_minutes: int,
+    session_start: datetime,
+    now_utc: datetime,
+    range_minutes: int = 15,
+) -> tuple[float, float] | None:
+    if timeframe_minutes <= 0 or not candles:
+        return None
+    elapsed_minutes = (now_utc - session_start).total_seconds() / 60.0
+    if elapsed_minutes < 0:
+        return None
+    bars_since_start = int(elapsed_minutes // timeframe_minutes) + 1
+    start_index = max(0, len(candles) - bars_since_start)
+    opening_bars = max(1, math.ceil(range_minutes / timeframe_minutes))
+    slice_end = start_index + opening_bars
+    window = candles[start_index:slice_end]
+    highs: List[float] = []
+    lows: List[float] = []
+    for candle in window:
+        try:
+            highs.append(float(candle["h"]))
+            lows.append(float(candle["l"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not highs or not lows:
+        return None
+    return max(highs), min(lows)
+
+
+def _orb_filter(
+    evaluation: Evaluation,
+    session: session_filter.SessionSnapshot | None,
+    now_utc: datetime,
+) -> tuple[bool, str | None, orb.OpeningRange | None]:
+    if session is None:
+        return False, "off-session", None
+
+    candles = evaluation.candles or []
+    candle_high = candles[-1].get("h") if candles else evaluation.diagnostics.get("close") if evaluation.diagnostics else None  # type: ignore[index]
+    candle_low = candles[-1].get("l") if candles else evaluation.diagnostics.get("close") if evaluation.diagnostics else None  # type: ignore[index]
+    if candle_high is None or candle_low is None:
+        return False, "missing-candle", None
+
+    prev_range = orb.opening_range_for(evaluation.instrument, session)
+    if prev_range is None and now_utc >= session.start_utc:
+        timeframe_minutes = _granularity_minutes(config.get("timeframe", "M5"))
+        seeded = _seed_opening_range_bounds(
+            candles,
+            timeframe_minutes=timeframe_minutes,
+            session_start=session.start_utc,
+            now_utc=now_utc,
+        )
+        if seeded:
+            candle_high, candle_low = seeded
+
+    range_before = None if prev_range is None else (prev_range.high, prev_range.low, prev_range.finalized)
+    current_range = orb.update_opening_range(
+        evaluation.instrument,
+        session,
+        candle_high=float(candle_high),
+        candle_low=float(candle_low),
+        now_utc=now_utc,
+    )
+
+    if range_before != (current_range.high, current_range.low, current_range.finalized):
+        print(
+            f"[ORB] {evaluation.instrument} session={session.session_id} "
+            f"high={current_range.high:.5f} low={current_range.low:.5f} "
+            f"finalized={'yes' if current_range.finalized else 'no'}",
+            flush=True,
+        )
+
+    if now_utc < current_range.end_utc and not current_range.finalized:
+        return False, "opening-range-forming", current_range
+
+    close_price = evaluation.diagnostics.get("close") if evaluation.diagnostics else None
+    if close_price is None:
+        return False, "missing-close", current_range
+    breakout_dir = orb.breakout_direction(float(close_price), current_range)
+    if breakout_dir is None:
+        return False, "inside-opening-range", current_range
+    if breakout_dir != evaluation.signal:
+        return False, f"breakout-mismatch-{breakout_dir.lower()}", current_range
+
+    print(
+        f"[ORB] Breakout {evaluation.instrument} dir={breakout_dir} close={float(close_price):.5f} "
+        f"range=({current_range.low:.5f}..{current_range.high:.5f})",
+        flush=True,
+    )
+    return True, None, current_range
 
 
 def _projector_enabled() -> bool:
@@ -461,6 +564,19 @@ async def decision_cycle() -> None:
 
         session_mode = "demo" if getattr(risk, "demo_mode", False) else mode_env
         entries_allowed = session_filter.is_entry_session(now_utc, mode=session_mode)
+        session_snapshot = session_filter.current_session(now_utc, mode=session_mode)
+        if entries_allowed and session_snapshot is None:
+            start_awst = now_utc.astimezone(session_filter.AWST) - timedelta(minutes=15)
+            end_awst = start_awst + timedelta(minutes=15)
+            session_snapshot = session_filter.SessionSnapshot(
+                name="adhoc",
+                start_awst=start_awst,
+                end_awst=end_awst,
+                start_utc=start_awst.astimezone(timezone.utc),
+                end_utc=end_awst.astimezone(timezone.utc),
+            )
+        if session_snapshot:
+            orb.reset_for_session(session_snapshot)
         if not entries_allowed:
             ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
             print(f"[FILTER] Entries paused (off-session) now_utc={ts}", flush=True)
@@ -532,6 +648,23 @@ async def decision_cycle() -> None:
                 print(
                     f"[FILTER] MACD veto {evaluation.instrument} macd={macd_line:.5f} "
                     f"signal={macd_signal_line:.5f} hist={macd_histogram:.5f}",
+                    flush=True,
+                )
+                continue
+            print(
+                f"[MACD] Confirmed {evaluation.instrument} macd={macd_line:.5f} "
+                f"signal={macd_signal_line:.5f} hist={macd_histogram:.5f}",
+                flush=True,
+            )
+
+            orb_ok, orb_reason, current_range = _orb_filter(
+                evaluation,
+                session_snapshot,
+                now_utc,
+            )
+            if not orb_ok:
+                print(
+                    f"[FILTER] ORB block {evaluation.instrument} reason={orb_reason}",
                     flush=True,
                 )
                 continue

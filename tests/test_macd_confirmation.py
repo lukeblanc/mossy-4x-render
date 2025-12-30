@@ -164,6 +164,11 @@ def test_macd_confirmation_allows_trade(monkeypatch):
                     },
                     reason="bullish",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 )
             ]
 
@@ -400,6 +405,11 @@ def test_macd_confirms_fx_and_xau(monkeypatch):
                     },
                     reason="bullish",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 ),
                 Evaluation(
                     instrument="XAU_USD",
@@ -408,7 +418,7 @@ def test_macd_confirms_fx_and_xau(monkeypatch):
                         "atr": 1.2,
                         "atr_baseline_50": 1.0,
                         "rsi": 45.0,
-                        "close": 1900.0,
+                        "close": 1898.0,
                         "ema_trend_fast": 1890.0,
                         "ema_trend_slow": 1900.0,
                         "macd_line": -0.5,
@@ -417,6 +427,11 @@ def test_macd_confirms_fx_and_xau(monkeypatch):
                     },
                     reason="bearish",
                     market_active=True,
+                    candles=[
+                        {"o": 1901.0, "h": 1905.0, "l": 1899.0, "c": 1902.0},
+                        {"o": 1902.0, "h": 1903.0, "l": 1900.0, "c": 1901.5},
+                        {"o": 1901.5, "h": 1902.0, "l": 1900.5, "c": 1901.0},
+                    ],
                 ),
             ]
 
@@ -471,3 +486,17 @@ def test_macd_confirms_fx_and_xau(monkeypatch):
     assert dummy_risk.entries == ["EUR_USD", "XAU_USD"]
     watchdog.last_decision_ts = original_ts
     _reset_clock(original_datetime)
+
+
+def test_macd_histogram_rising_allows_negative_hist(monkeypatch):
+    monkeypatch.setitem(main.config, "use_macd_confirmation", True)
+    macd_result = main._macd_confirms(
+        "BUY",
+        {
+            "macd_line": 0.5,
+            "macd_signal": 0.1,
+            "macd_histogram": -0.01,
+            "macd_histogram_prev": -0.05,
+        },
+    )
+    assert macd_result[0] is True
