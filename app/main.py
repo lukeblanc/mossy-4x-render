@@ -24,9 +24,9 @@ STATE_DIR = resolve_state_dir(Path(__file__).resolve().parent.parent / "data")
 METRICS_FILE = STATE_DIR / "render_decisions.jsonl"
 SUMMARY_INTERVAL = max(1, int(settings.METRIC_SUMMARY_INTERVAL))
 
-trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", "8.0"))
-trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", "4.0"))
-trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", "3.0"))
+trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", "0.0"))
+trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", "0.0"))
+trail_arm_usd = float(os.getenv("TRAIL_ARM_USD", "0.75"))
 trail_giveback_usd = float(os.getenv("TRAIL_GIVEBACK_USD", "0.5"))
 be_arm_pips = float(os.getenv("BE_ARM_PIPS", "6.0"))
 be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", "1.0"))
@@ -36,7 +36,7 @@ trailing_config = {
     "giveback_pips": trail_giveback_pips,
     "arm_usd": trail_arm_usd,
     "giveback_usd": trail_giveback_usd,
-    "use_pips": True,
+    "use_pips": False,
     "be_arm_pips": be_arm_pips,
     "be_offset_pips": be_offset_pips,
     "min_check_interval_sec": min_check_interval_sec,
@@ -246,7 +246,7 @@ async def decision_tick():
 
     atr_val = diag.get("atr")
     sl_distance = risk.sl_distance_from_atr(atr_val, instrument=settings.INSTRUMENT)
-    tp_distance = risk.tp_distance_from_atr(atr_val, instrument=settings.INSTRUMENT)
+    tp_distance = 0.0  # Disable standard TP to avoid interfering with USD-based profit protection
     expected_r = tp_distance / sl_distance if sl_distance > 0 else None
     entry_price = _entry_price_from_diag(diag)
     pip_size = diag.get("pip_size") or broker._pip_size(settings.INSTRUMENT)  # type: ignore[attr-defined]
