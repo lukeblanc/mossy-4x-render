@@ -101,6 +101,7 @@ class ProfitProtection:
         now_utc = now_utc or datetime.now(timezone.utc)
         active_keys = set()
         closed_trades: List[str] = []
+        broker_snapshot = self._list_open_trades_quietly()
 
         for trade in list(open_trades):
             trade_id = self._trade_id(trade)
@@ -109,7 +110,6 @@ class ProfitProtection:
             if not trade_id or not instrument or units == 0:
                 continue
             if self._is_locally_closed(trade_id, instrument):
-                broker_snapshot = self._list_open_trades_quietly()
                 instrument_open = None if broker_snapshot is None else self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
                 if instrument_open is False:
                     print(
@@ -117,7 +117,23 @@ class ProfitProtection:
                         flush=True,
                     )
                     continue
-                self._unmark_locally_closed(trade_id, instrument)
+                if instrument_open:
+                    print(
+                        f"[TRAIL][INFO] broker_reports_open ticket={trade_id} instrument={instrument} clearing_local_closed_marker",
+                        flush=True,
+                    )
+                    self._unmark_locally_closed(trade_id, instrument)
+
+            instrument_open = None if broker_snapshot is None else self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
+            if instrument_open is False:
+                print(
+                    f"[TRAIL][INFO] reconcile_missing_position ticket={trade_id} instrument={instrument} action=mark_closed",
+                    flush=True,
+                )
+                self._reconcile_closed(trade_id, instrument, open_trades, self._state.get(trade_id))
+                if trade_id:
+                    closed_trades.append(trade_id)
+                continue
 
             active_keys.add(trade_id)
             state = self._state.get(trade_id, TrailingState())
@@ -268,15 +284,8 @@ class ProfitProtection:
             return 0.0
 
     def _profit_from_trade(self, trade: Dict, instrument: str) -> Optional[float]:
-        if isinstance(trade, dict):
-            for key in ("unrealizedPL", "unrealized_pl", "profit", "floating"):
-                if key in trade:
-                    try:
-                        return float(trade[key])
-                    except (TypeError, ValueError):
-                        break
+        """Always source unrealized PnL from the broker (account currency)."""
         try:
-            # PnL values are in account currency as returned by broker.
             return self.broker.get_unrealized_profit(instrument)
         except AttributeError:
             return None
