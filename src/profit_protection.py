@@ -449,6 +449,15 @@ class ProfitProtection:
         reason: str,
         summary: Optional[str] = None,
     ) -> bool:
+        """Attempt to close a trade and only return True on confirmed closure.
+
+        False-positive closes are dangerous: if we drop a trade from local state
+        before the broker has actually closed it, the strategy can immediately
+        re-enter on the same instrument and double exposure. Guardrails below
+        require either an explicit broker success response or a follow-up check
+        that the trade is no longer present.
+        """
+
         try:
             if hasattr(self.broker, "close_trade"):
                 result = self.broker.close_trade(trade_id, instrument=instrument)
@@ -458,7 +467,7 @@ class ProfitProtection:
             return False
         except Exception as exc:  # pragma: no cover - defensive logging
             print(
-                f"[TRAIL] Exception closing {instrument}: {exc}",
+                f"[TRAIL][ERROR] Exception closing {instrument}: {exc}",
                 flush=True,
             )
             return False
@@ -483,11 +492,48 @@ class ProfitProtection:
                 )
             return True
 
+        # If the broker did not acknowledge the close, perform a follow-up check
+        # to see whether the position already disappeared (e.g., previously closed
+        # or closed by another rule). Only then can we safely treat it as closed.
+        if self._broker_confirms_closed(trade_id, instrument):
+            print(
+                f"{log_prefix}[WARN] Close response inconclusive but {instrument} is no longer open; marking closed",
+                flush=True,
+            )
+            return True
+
         print(
-            f"{log_prefix} Attempted close ticket={trade_id} {metric_clause} floor={floor:.2f} "
+            f"{log_prefix}[WARN] Close failed ticket={trade_id} {metric_clause} floor={floor:.2f} "
             f"high_water={high_water:.2f} reason={reason} resp={result}{spread_clause}",
             flush=True,
         )
+        return False
+
+    def _broker_confirms_closed(self, trade_id: Optional[str], instrument: str) -> bool:
+        """Return True only if broker reports no open position for the instrument."""
+
+        try:
+            if not hasattr(self.broker, "list_open_trades"):
+                return False
+            trades = self.broker.list_open_trades()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(
+                f"[TRAIL][WARN] Unable to confirm closure for {instrument}: {exc}",
+                flush=True,
+            )
+            return False
+
+        for trade in trades or []:
+            inst = trade.get("instrument")
+            if instrument and inst == instrument:
+                # Instrument still open; if IDs match we know the trade is alive.
+                if trade_id is None:
+                    return False
+                live_id = trade.get("id") or trade.get("tradeID") or trade.get("position_id")
+                if live_id is None:
+                    return False
+                if str(live_id) == str(trade_id):
+                    return False
         return True
 
     def _pip_size(self, instrument: str) -> float:

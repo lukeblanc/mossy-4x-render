@@ -280,6 +280,9 @@ def _open_trades_state() -> List[Dict]:
     except AttributeError:
         # Older broker implementations may not yet expose list_open_trades.
         return []
+    except Exception as exc:
+        print(f"[TRADE][WARN] Unable to refresh open trades: {exc}", flush=True)
+        return []
 
 
 def _trade_identifier(trade: Dict) -> str | None:
@@ -319,6 +322,21 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> tupl
         return False, "cooldown"
 
     return True, None
+
+
+def _instrument_open_on_broker(instrument: str) -> bool:
+    """Cross-check broker state to prevent duplicate exposure."""
+
+    try:
+        trades = broker.list_open_trades()
+    except Exception as exc:
+        print(f"[TRADE][WARN] Unable to verify broker positions for {instrument}: {exc}", flush=True)
+        return False
+
+    for trade in trades or []:
+        if trade.get("instrument") == instrument:
+            return True
+    return False
 
 
 def _trend_aligned(signal: str, diagnostics: Dict[str, float] | None) -> tuple[bool, float, float]:
@@ -669,6 +687,14 @@ async def decision_cycle() -> None:
             if not should_trade:
                 if skip_reason == "max-open":
                     suppression_counters["blocked_max_positions"] += 1
+                continue
+
+            # Final broker-side duplicate guard before risk checks or order submission.
+            if _instrument_open_on_broker(evaluation.instrument):
+                print(
+                    f"[TRADE] Skipping {evaluation.instrument}; broker reports existing open position",
+                    flush=True,
+                )
                 continue
 
             spread_pips = None
