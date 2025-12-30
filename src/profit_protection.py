@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Protocol
 
 
-ARM_AT_CCY = 0.75
+ARM_AT_CCY = 1.00
 GIVEBACK_CCY = 0.50
 
 
@@ -152,15 +152,22 @@ class ProfitProtection:
             if profit is None or state.max_profit_ccy is None:
                 continue
 
-            if not state.armed and state.max_profit_ccy >= self.arm_ccy:
-                state.armed = True
-                print(f"[TRAIL] armed ticket={trade_id} profit_ccy={profit:.2f}", flush=True)
+            trailing_floor = state.max_profit_ccy - self.giveback_ccy if state.max_profit_ccy is not None else None
+            if state.max_profit_ccy is not None and profit is not None:
+                print(
+                    f"[TRAIL][DEBUG] profit={profit:.2f} high={state.max_profit_ccy:.2f} "
+                    f"floor={trailing_floor:.2f} armed={state.armed}",
+                    flush=True,
+                )
 
-            if not state.armed:
+            if not state.armed and state.max_profit_ccy is not None and state.max_profit_ccy >= self.arm_ccy:
+                state.armed = True
+                print(f"[TRAIL] armed ticket={trade_id} profit={profit:.2f}", flush=True)
+
+            if not state.armed or trailing_floor is None:
                 continue
 
-            trailing_floor = state.max_profit_ccy - self.giveback_ccy
-            if (state.max_profit_ccy - profit) >= self.giveback_ccy:
+            if profit is not None and profit <= trailing_floor:
                 if self._close_trade(
                     trade_id,
                     instrument,
