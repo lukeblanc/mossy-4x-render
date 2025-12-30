@@ -23,7 +23,17 @@ class BrokerLike(Protocol):
     def get_unrealized_profit(self, instrument: str) -> Optional[float]:
         ...
 
-    def close_position(self, instrument: str) -> Dict:
+    def position_snapshot(self, instrument: str) -> Optional[Dict]:
+        ...
+
+    def close_position(
+        self,
+        instrument: str,
+        *,
+        long_units: Optional[str] = "ALL",
+        short_units: Optional[str] = "ALL",
+        trade_id: Optional[str] = None,
+    ) -> Dict:
         ...
 
     def close_trade(self, trade_id: str, instrument: Optional[str] = None) -> Dict:
@@ -154,6 +164,7 @@ class ProfitProtection:
                 spread_pips,
                 open_trades=open_trades,
                 state=state,
+                units=units,
             ):
                 closed_trades.append(trade_id)
                 self._state.pop(trade_id, None)
@@ -164,7 +175,7 @@ class ProfitProtection:
             self._state[trade_id] = state
 
             if self.aggressive and self._maybe_aggressive_exit(
-                trade, trade_id, instrument, profit, now_utc, open_trades=open_trades, state=state
+                trade, trade_id, instrument, profit, now_utc, open_trades=open_trades, state=state, units=units
             ):
                 closed_trades.append(trade_id)
                 self._state.pop(trade_id, None)
@@ -183,7 +194,7 @@ class ProfitProtection:
 
             if not state.armed and state.max_profit_ccy is not None and state.max_profit_ccy >= self.arm_ccy:
                 state.armed = True
-                print(f"[TRAIL] armed ticket={trade_id} profit={profit:.2f}", flush=True)
+                print(f"[TRAIL][INFO] armed ticket={trade_id} profit={profit:.2f}", flush=True)
 
             if not state.armed or trailing_floor is None:
                 continue
@@ -191,7 +202,7 @@ class ProfitProtection:
             if profit is not None and profit <= trailing_floor:
                 print(
                     f"[TRAIL][INFO] giveback_met ticket={trade_id} instrument={instrument} "
-                    f"profit={profit:.2f} floor={trailing_floor:.2f} high_water={state.max_profit_ccy:.2f}",
+                    f"profit={profit:.2f} floor={trailing_floor:.2f} high_water={state.max_profit_ccy:.2f} giveback={self.giveback_ccy:.2f}",
                     flush=True,
                 )
                 broker_snapshot = self._list_open_trades_quietly()
@@ -212,6 +223,7 @@ class ProfitProtection:
                     reason="pnl_profit_protection",
                     open_trades=open_trades,
                     state=state,
+                    units=units,
                 ):
                     closed_trades.append(trade_id)
                     self._state.pop(trade_id, None)
@@ -332,7 +344,7 @@ class ProfitProtection:
             return
         if state.max_profit_ccy is None or profit > state.max_profit_ccy:
             state.max_profit_ccy = profit
-            print(f"[TRAIL] update ticket={trade_id} max_profit_ccy={profit:.2f}", flush=True)
+            print(f"[TRAIL][INFO] update ticket={trade_id} max_profit_ccy={profit:.2f}", flush=True)
 
     def _time_stop_threshold(self, instrument: str, atr_value: Optional[float]) -> float:
         base_threshold = max(0.0, self.time_stop_min_pips)
@@ -361,6 +373,7 @@ class ProfitProtection:
         spread_pips: Optional[float],
         open_trades: Optional[List[Dict]] = None,
         state: Optional[TrailingState] = None,
+        units: Optional[float] = None,
     ) -> bool:
         if self.time_stop_minutes <= 0 or self.time_stop_min_pips < 0:
             return False
@@ -384,13 +397,14 @@ class ProfitProtection:
             pips,
             threshold,
             threshold,
-            spread_pips,
-            log_prefix="[TIME-STOP]",
-            reason="TIME_STOP",
-            summary=summary,
-            open_trades=open_trades,
-            state=state,
-        ):
+                spread_pips,
+                log_prefix="[TIME-STOP]",
+                reason="TIME_STOP",
+                summary=summary,
+                open_trades=open_trades,
+                state=state,
+                units=units,
+            ):
             return True
         return False
 
@@ -403,6 +417,7 @@ class ProfitProtection:
         now_utc: datetime,
         open_trades: Optional[List[Dict]] = None,
         state: Optional[TrailingState] = None,
+        units: Optional[float] = None,
     ) -> bool:
         if profit is None:
             return False
@@ -426,6 +441,7 @@ class ProfitProtection:
                 summary=f"Closing {instrument} after {minutes_open:.1f} minutes, profit={profit:.2f}",
                 open_trades=open_trades,
                 state=state,
+                units=units,
             ):
                 return True
 
@@ -447,6 +463,7 @@ class ProfitProtection:
                 summary=f"Closing {instrument} loss={profit:.2f} atr={atr_str}",
                 open_trades=open_trades,
                 state=state,
+                units=units,
             ):
                 return True
         return False
@@ -516,6 +533,7 @@ class ProfitProtection:
         summary: Optional[str] = None,
         open_trades: Optional[List[Dict]] = None,
         state: Optional[TrailingState] = None,
+        units: Optional[float] = None,
     ) -> bool:
         """Attempt to close a trade and only return True on confirmed closure."""
         # False-positive closes are dangerous: if we drop a trade from local state
@@ -524,28 +542,34 @@ class ProfitProtection:
         # require either an explicit broker success response or a follow-up check
         # that the trade is no longer present.
 
-        try:
-            if hasattr(self.broker, "close_trade"):
-                result = self.broker.close_trade(trade_id, instrument=instrument)
-            else:
-                result = self.broker.close_position(instrument)
-        except AttributeError:
-            return False
-        except Exception as exc:  # pragma: no cover - defensive logging
+        spread_clause = f" spread={spread_pips:.2f}" if spread_pips is not None else ""
+        if pips is not None:
+            metric_clause = f"current_pips={pips:.2f}"
+        elif profit is not None:
+            metric_clause = f"current_profit={profit:.2f}"
+        else:
+            metric_clause = "current_profit=unknown"
+
+        initial_snapshot = self._position_snapshot(instrument, fallback_units=units)
+        long_units, short_units, snapshot_ok = self._snapshot_units(initial_snapshot, trade_id)
+        snapshot_clause = "snapshot=missing" if not snapshot_ok else f"long={long_units:.0f} short={short_units:.0f}"
+        print(
+            f"{log_prefix}[INFO] close_side_detected ticket={trade_id} instrument={instrument} {snapshot_clause}",
+            flush=True,
+        )
+
+        if snapshot_ok and long_units == 0 and short_units == 0:
             print(
-                f"[TRAIL][ERROR] Exception closing {instrument}: {exc}",
+                f"{log_prefix}[INFO] snapshot_shows_closed ticket={trade_id} instrument={instrument} {snapshot_clause}",
                 flush=True,
             )
-            return False
+            self._reconcile_closed(trade_id, instrument, open_trades, state)
+            return True
+
+        result = self._execute_closeout(trade_id, instrument, long_units, short_units)
 
         status = result.get("status") if isinstance(result, dict) else None
         success = status in {"CLOSED", "SIMULATED", "FILLED"}
-        spread_clause = ""
-        if spread_pips is not None:
-            spread_clause = f" spread={spread_pips:.2f}"
-        metric_clause = (
-            f"current_pips={pips:.2f}" if pips is not None else f"current_profit={profit:.2f}"
-        )
 
         if success:
             if summary:
@@ -556,61 +580,78 @@ class ProfitProtection:
                     f"high_water={high_water:.2f} reason={reason}{spread_clause} [Broker confirmed close]",
                     flush=True,
                 )
-            self._mark_locally_closed(trade_id, instrument)
+            self._reconcile_closed(trade_id, instrument, open_trades, state)
             return True
 
         error_code = self._extract_error_code(result)
         missing_position_flag = error_code == "CLOSEOUT_POSITION_DOESNT_EXIST" or self._response_indicates_missing_position(result)
-        broker_snapshot = None
 
         if missing_position_flag:
-            broker_snapshot = self._list_open_trades_quietly()
-            instrument_open = self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
-            self._reconcile_closed(trade_id, instrument, open_trades, state)
-            snapshot_clause = " snapshot=unavailable"
-            if broker_snapshot is not None:
-                snapshot_clause = " snapshot=open" if instrument_open else " snapshot=absent"
-            print(
-                f"{log_prefix}[INFO] Broker missing position – treated as closed ticket={trade_id} instrument={instrument}{spread_clause}{snapshot_clause}",
-                flush=True,
+            refreshed_snapshot = self._position_snapshot(instrument)
+            refreshed_long, refreshed_short, refreshed_ok = self._snapshot_units(refreshed_snapshot, trade_id)
+            refreshed_clause = (
+                "snapshot=missing" if not refreshed_ok else f"long={refreshed_long:.0f} short={refreshed_short:.0f}"
             )
-            return True
+            if refreshed_ok and refreshed_long == 0 and refreshed_short == 0:
+                print(
+                    f"{log_prefix}[INFO] broker_missing_position treating_closed ticket={trade_id} instrument={instrument} {refreshed_clause}{spread_clause}",
+                    flush=True,
+                )
+                self._reconcile_closed(trade_id, instrument, open_trades, state)
+                return True
+            if not refreshed_ok:
+                snapshot_after = self._list_open_trades_quietly()
+                instrument_open = self._instrument_open_in_snapshot(snapshot_after, instrument, trade_id)
+                if instrument_open is False:
+                    print(
+                        f"{log_prefix}[INFO] broker_missing_position treating_closed ticket={trade_id} instrument={instrument} snapshot=absent{spread_clause}",
+                        flush=True,
+                    )
+                    self._reconcile_closed(trade_id, instrument, open_trades, state)
+                    return True
 
+            if refreshed_ok:
+                print(
+                    f"{log_prefix}[WARN] broker_missing_position retry ticket={trade_id} instrument={instrument} {refreshed_clause}{spread_clause}",
+                    flush=True,
+                )
+                retry_result = self._execute_closeout(trade_id, instrument, refreshed_long, refreshed_short)
+                retry_status = retry_result.get("status") if isinstance(retry_result, dict) else None
+                retry_success = retry_status in {"CLOSED", "SIMULATED", "FILLED"}
+                if retry_success:
+                    self._reconcile_closed(trade_id, instrument, open_trades, state)
+                    print(
+                        f"{log_prefix}[INFO] retry_close_success ticket={trade_id} instrument={instrument}{spread_clause}",
+                        flush=True,
+                    )
+                    return True
+
+                retry_error = self._extract_error_code(retry_result)
+                if retry_error == "CLOSEOUT_POSITION_DOESNT_EXIST" or self._response_indicates_missing_position(retry_result):
+                    refreshed_snapshot = self._position_snapshot(instrument)
+                    refreshed_long, refreshed_short, refreshed_ok = self._snapshot_units(refreshed_snapshot, trade_id)
+                    if refreshed_ok and refreshed_long == 0 and refreshed_short == 0:
+                        print(
+                            f"{log_prefix}[INFO] retry_missing_position treating_closed ticket={trade_id} instrument={instrument}{spread_clause}",
+                            flush=True,
+                        )
+                        self._reconcile_closed(trade_id, instrument, open_trades, state)
+                        return True
+
+        broker_snapshot = self._list_open_trades_quietly()
         closed_status = (
             False
             if self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
             else self._broker_confirms_closed(trade_id, instrument)
         )
-        if error_code == "CLOSEOUT_POSITION_DOESNT_EXIST":
-            if closed_status is True:
-                self._mark_locally_closed(trade_id, instrument)
-                print(
-                    f"{log_prefix}[INFO] Trade already closed at broker; marking closed ticket={trade_id} instrument={instrument}{spread_clause}",
-                    flush=True,
-                )
-                return True
-            if closed_status is None and self._response_indicates_missing_position(result):
-                self._mark_locally_closed(trade_id, instrument)
-                print(
-                    f"{log_prefix}[INFO] Broker response indicates no open position; marking closed ticket={trade_id} instrument={instrument}{spread_clause}",
-                    flush=True,
-                )
-                return True
+
+        if closed_status is True:
+            self._reconcile_closed(trade_id, instrument, open_trades, state)
             print(
-                f"{log_prefix}[WARN] Broker reported CLOSEOUT_POSITION_DOESNT_EXIST but {instrument} still appears open; ticket={trade_id} resp={result}{spread_clause}",
+                f"{log_prefix}[INFO] Broker confirmed close via snapshot ticket={trade_id} instrument={instrument}{spread_clause}",
                 flush=True,
             )
-        else:
-            # If the broker did not acknowledge the close, perform a follow-up check
-            # to see whether the position already disappeared (e.g., previously closed
-            # or closed by another rule). Only then can we safely treat it as closed.
-            if closed_status is True:
-                self._mark_locally_closed(trade_id, instrument)
-                print(
-                    f"{log_prefix}[INFO] Broker confirmed close via snapshot ticket={trade_id} instrument={instrument}{spread_clause}",
-                    flush=True,
-                )
-                return True
+            return True
 
         print(
             f"{log_prefix}[WARN] Close failed ticket={trade_id} {metric_clause} floor={floor:.2f} "
@@ -618,6 +659,38 @@ class ProfitProtection:
             flush=True,
         )
         return False
+
+    def _execute_closeout(self, trade_id: str, instrument: str, long_units: float, short_units: float) -> Dict:
+        """Send a side-specific closeout request."""
+
+        try:
+            if hasattr(self.broker, "close_position"):
+                if short_units != 0 and long_units == 0:
+                    payload = {"long_units": "0", "short_units": "ALL"}
+                elif long_units != 0 and short_units == 0:
+                    payload = {"long_units": "ALL", "short_units": "0"}
+                elif short_units != 0 and long_units != 0:
+                    payload = {"long_units": "ALL", "short_units": "ALL"}
+                else:
+                    payload = {"long_units": "ALL", "short_units": "ALL"}
+
+                return self.broker.close_position(
+                    instrument,
+                    long_units=payload["long_units"],
+                    short_units=payload["short_units"],
+                    trade_id=trade_id,
+                )
+            if hasattr(self.broker, "close_trade"):
+                return self.broker.close_trade(trade_id, instrument=instrument)
+        except AttributeError:
+            return {"status": "ERROR", "errorCode": "close-not-supported"}
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(
+                f"[TRAIL][ERROR] Exception closing {instrument}: {exc}",
+                flush=True,
+            )
+            return {"status": "ERROR", "error": str(exc)}
+        return {"status": "ERROR", "errorCode": "close-not-supported"}
 
     @staticmethod
     def _extract_error_code(result: Dict) -> Optional[str]:
@@ -785,3 +858,50 @@ class ProfitProtection:
             open_trades[:] = remaining
         if trade_id is not None:
             self._state.pop(trade_id, None)
+
+    def _position_snapshot(self, instrument: str, fallback_units: Optional[float] = None) -> Optional[Dict]:
+        snapshot = None
+        try:
+            if hasattr(self.broker, "position_snapshot"):
+                snapshot = self.broker.position_snapshot(instrument)
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if snapshot is not None:
+            return snapshot
+        try:
+            if hasattr(self.broker, "list_open_trades"):
+                for trade in self.broker.list_open_trades() or []:
+                    if trade.get("instrument") != instrument:
+                        continue
+                    units = self._units_from_trade(trade)
+                    if units == 0:
+                        return {"instrument": instrument, "longUnits": "0", "shortUnits": "0"}
+                    if units > 0:
+                        return {"instrument": instrument, "longUnits": str(units), "shortUnits": "0"}
+                        return {"instrument": instrument, "longUnits": "0", "shortUnits": str(units)}
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if fallback_units is not None:
+            if fallback_units == 0:
+                return {"instrument": instrument, "longUnits": "0", "shortUnits": "0"}
+            if fallback_units > 0:
+                return {"instrument": instrument, "longUnits": str(fallback_units), "shortUnits": "0"}
+            return {"instrument": instrument, "longUnits": "0", "shortUnits": str(fallback_units)}
+        return None
+
+    @staticmethod
+    def _snapshot_units(snapshot: Optional[Dict], trade_id: Optional[str]) -> tuple[float, float, bool]:
+        """Extract long/short units from a broker snapshot."""
+        if not isinstance(snapshot, dict):
+            return 0.0, 0.0, False
+        long_raw = snapshot.get("longUnits") or (snapshot.get("long") or {}).get("units")
+        short_raw = snapshot.get("shortUnits") or (snapshot.get("short") or {}).get("units")
+        try:
+            long_val = float(long_raw)
+        except (TypeError, ValueError):
+            long_val = 0.0
+        try:
+            short_val = float(short_raw)
+        except (TypeError, ValueError):
+            short_val = 0.0
+        return long_val, short_val, True

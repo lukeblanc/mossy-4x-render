@@ -251,12 +251,54 @@ class Broker:
             )
             return 0.0
 
-    def close_position(self, instrument: str) -> Dict:
-        """Close any open position for the given instrument."""
+    def position_snapshot(self, instrument: str) -> Optional[Dict]:
+        """Return the broker position payload for the instrument, or None on error."""
+
+        if not instrument:
+            return None
+        if self.mode == "simulation" or not (self.key and self.account):
+            return {
+                "instrument": instrument,
+                "long": {"units": "0"},
+                "short": {"units": "0"},
+                "longUnits": "0",
+                "shortUnits": "0",
+            }
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/positions/{instrument}")
+                if resp.status_code != 200:
+                    return None
+                return resp.json().get("position", {}) or {}
+        except Exception:
+            return None
+
+    def close_position(
+        self,
+        instrument: str,
+        *,
+        long_units: str | None = "ALL",
+        short_units: str | None = "ALL",
+        trade_id: str | None = None,
+    ) -> Dict:
+        """Close any open position for the given instrument using side-specific payloads."""
+
         if not instrument:
             return {"status": "ERROR", "reason": "invalid-instrument"}
+
+        payload: Dict[str, str] = {}
+        if long_units is not None:
+            payload["longUnits"] = str(long_units)
+        if short_units is not None:
+            payload["shortUnits"] = str(short_units)
+        if not payload:
+            payload = {"longUnits": "ALL", "shortUnits": "ALL"}
+
         if self.mode == "simulation":
-            print(f"[BROKER] SIMULATION close position {instrument}", flush=True)
+            print(
+                f"[BROKER] SIMULATION close position {instrument} payload={payload} trade_id={trade_id}",
+                flush=True,
+            )
             return {"status": "SIMULATED"}
         if not (self.key and self.account):
             print(
@@ -264,7 +306,7 @@ class Broker:
                 flush=True,
             )
             return {"status": "ERROR", "reason": "missing-creds"}
-        payload: Dict[str, str] = {"longUnits": "ALL", "shortUnits": "ALL"}
+
         try:
             with self._client() as client:
                 resp = client.put(
@@ -272,7 +314,7 @@ class Broker:
                     json=payload,
                 )
                 if resp.status_code in (200, 201):
-                    print(f"[OANDA] Closed position {instrument}", flush=True)
+                    print(f"[OANDA] Closed position {instrument} payload={payload}", flush=True)
                     return {"status": "CLOSED", "response": resp.json()}
                 print(
                     f"[OANDA] Failed to close {instrument} status={resp.status_code} body={resp.text}",
