@@ -364,6 +364,12 @@ class DecisionEngine:
             slow_length=26,
             signal_length=9,
         )
+        macd_line_prev, macd_signal_prev, macd_histogram_prev = calculate_macd(
+            closes[:-1],
+            fast_length=12,
+            slow_length=26,
+            signal_length=9,
+        )
 
         last_close = closes[-1] if closes else math.nan
         return {
@@ -378,6 +384,7 @@ class DecisionEngine:
             "macd_line": macd_line,
             "macd_signal": macd_signal,
             "macd_histogram": macd_histogram,
+            "macd_histogram_prev": macd_histogram_prev,
         }
 
     def _generate_signal(self, diagnostics: Dict[str, float]) -> (str, str):

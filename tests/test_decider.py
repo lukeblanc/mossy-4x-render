@@ -178,6 +178,11 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                     },
                     reason="trend",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 )
             ]
 
@@ -362,6 +367,11 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
                     },
                     reason="trend",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 )
             ]
 
@@ -487,6 +497,11 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
                     },
                     reason="trend",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 )
             ]
 
@@ -611,6 +626,11 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
                     },
                     reason="trend",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 )
             ]
 
@@ -728,6 +748,11 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
                     },
                     reason="trend",
                     market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
                 )
             ]
 
