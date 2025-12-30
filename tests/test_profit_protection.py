@@ -310,6 +310,37 @@ def test_trail_arms_at_one_and_closes_after_half_giveback(capsys):
     assert "[TRAIL][DEBUG] profit=0.40" in out
 
 
+def test_trailing_close_not_blocked_by_interval(capsys):
+    class CountingBroker(DummyBroker):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def close_trade(self, trade_id: str, instrument: str | None = None):
+            self.calls += 1
+            return super().close_trade(trade_id, instrument=instrument)
+
+        def list_open_trades(self):
+            return [{"id": "T-INTERVAL", "instrument": "EUR_USD", "currentUnits": 1000}]
+
+    broker = CountingBroker()
+    guard = ProfitProtection(broker, arm_ccy=0.5, giveback_ccy=0.5, min_check_interval_sec=60)
+
+    now = datetime.now(timezone.utc)
+    armed_trade = [_trade("T-INTERVAL", "EUR_USD", 1000, profit=1.0)]
+    guard.process_open_trades(armed_trade, now_utc=now)
+
+    giveback_trade = [_trade("T-INTERVAL", "EUR_USD", 1000, profit=0.5)]
+    closed = guard.process_open_trades(giveback_trade, now_utc=now + timedelta(seconds=5))
+
+    assert closed == ["T-INTERVAL"]
+    assert broker.calls == 1
+    assert broker.closed == [{"trade_id": "T-INTERVAL", "instrument": "EUR_USD"}]
+    out = capsys.readouterr().out
+    assert "giveback_met ticket=T-INTERVAL instrument=EUR_USD" in out
+    assert "attempting_close ticket=T-INTERVAL instrument=EUR_USD reason=pnl_profit_protection" in out
+
+
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):
     class DummyGuard:
         def __init__(self):
