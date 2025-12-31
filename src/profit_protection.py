@@ -192,10 +192,19 @@ class ProfitProtection:
                 state.armed = True
                 print(f"[TRAIL][INFO] armed ticket={trade_id} profit={profit:.2f}", flush=True)
 
-            if not state.armed or trailing_floor is None:
+            if trailing_floor is None or profit is None:
                 continue
 
-            if profit is not None and profit <= trailing_floor:
+            giveback_reached = (
+                profit <= trailing_floor
+                and state.max_profit_ccy is not None
+                and state.max_profit_ccy >= self.giveback_ccy
+            )
+
+            if not state.armed and not giveback_reached:
+                continue
+
+            if giveback_reached:
                 print(
                     f"[TRAIL][INFO] giveback_met ticket={trade_id} instrument={instrument} "
                     f"profit={profit:.2f} floor={trailing_floor:.2f} high_water={state.max_profit_ccy:.2f} giveback={self.giveback_ccy:.2f}",

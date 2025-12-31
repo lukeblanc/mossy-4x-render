@@ -159,6 +159,27 @@ def test_trailing_giveback_closes_at_floor(capsys):
     assert "[TRAIL] close ticket=T1 current_profit=0.60 floor=0.70 high_water=1.20 reason=pnl_profit_protection" in out
 
 
+def test_giveback_triggers_without_meeting_arm_threshold(capsys):
+    broker = DummyBroker(profits={"EUR_USD": [0.4, 0.8, 0.25]})
+    guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5)
+
+    trade = _trade("T-RETRACE", "EUR_USD", 1000, profit=0.4)
+    guard.process_open_trades([trade])
+
+    trade = _trade("T-RETRACE", "EUR_USD", 1000, profit=0.8)
+    guard.process_open_trades([trade])
+
+    trade = _trade("T-RETRACE", "EUR_USD", 1000, profit=0.25)
+    closed = guard.process_open_trades([trade])
+
+    assert closed == ["T-RETRACE"]
+    assert broker.closed == [{"instrument": "EUR_USD", "payload": {"longUnits": "ALL"}}]
+
+    out = capsys.readouterr().out
+    assert "[TRAIL][INFO] giveback_met ticket=T-RETRACE instrument=EUR_USD profit=0.25" in out
+    assert "[TRAIL][DEBUG] profit=0.80 high=0.80 floor=0.30 armed=False" in out
+
+
 def test_close_position_side_payload_has_no_units_key():
     broker = DummyBroker(profits={"EUR_USD": [1.2, 0.6]})
     guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5)
