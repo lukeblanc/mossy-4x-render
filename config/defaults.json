@@ -74,7 +74,8 @@
     "use_pips": false,
     "be_arm_pips": 0.0,
     "be_offset_pips": 0.0,
-    "min_check_interval_sec": 0.0
+    "min_check_interval_sec": 0.0,
+    "soft_scalp_mode": false
   },
   "time_stop": {
     "minutes": 90,

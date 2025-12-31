@@ -180,6 +180,26 @@ def test_giveback_triggers_without_meeting_arm_threshold(capsys):
     assert "[TRAIL][DEBUG] profit=0.80 high=0.80 floor=0.30 armed=False" in out
 
 
+def test_trade_summary_emitted_once_with_profits(capsys):
+    start = datetime.now(timezone.utc) - timedelta(seconds=30)
+    broker = DummyBroker(profits={"EUR_USD": [1.2, 0.6]})
+    guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5)
+
+    first = _trade("T-SUMMARY", "EUR_USD", 1000, profit=1.2)
+    first["openTime"] = start.isoformat()
+    guard.process_open_trades([first], now_utc=start)
+
+    second = _trade("T-SUMMARY", "EUR_USD", 1000, profit=0.6)
+    second["openTime"] = start.isoformat()
+    closed = guard.process_open_trades([second], now_utc=start + timedelta(seconds=30))
+
+    assert closed == ["T-SUMMARY"]
+    out = capsys.readouterr().out
+    assert out.count("[TRADE-SUMMARY]") == 1
+    assert "max_profit_ccy=1.20" in out
+    assert "final_profit_ccy=0.60" in out
+
+
 def test_close_position_side_payload_has_no_units_key():
     broker = DummyBroker(profits={"EUR_USD": [1.2, 0.6]})
     guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5)
@@ -401,6 +421,7 @@ def test_missing_position_not_retried(capsys):
     assert len(broker.side_payloads) == 1
     out = capsys.readouterr().out
     assert out.count("treated_as_closed_after_missing_position ticket=T-NORETRY instrument=EUR_USD") == 1
+    assert out.count("[TRADE-SUMMARY]") == 1
 
 
 def test_trail_arms_at_one_and_closes_after_half_giveback(capsys):
@@ -559,6 +580,37 @@ def test_broker_open_clears_local_closed_marker_and_continues_trailing(capsys):
     out = capsys.readouterr().out
     assert "clearing_local_closed_marker" in out
     assert "giveback_met ticket=T-RESYNC instrument=EUR_USD" in out
+
+
+def test_soft_scalp_mode_allows_unarmed_giveback_exit(capsys):
+    broker = DummyBroker(profits={"EUR_USD": [0.3, -0.25]})
+    guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5, soft_scalp_mode=True)
+
+    first = _trade("T-SOFT", "EUR_USD", 1000, profit=0.3)
+    guard.process_open_trades([first])
+
+    second = _trade("T-SOFT", "EUR_USD", 1000, profit=-0.25)
+    closed = guard.process_open_trades([second])
+
+    assert closed == ["T-SOFT"]
+    out = capsys.readouterr().out
+    assert "giveback_met ticket=T-SOFT instrument=EUR_USD" in out
+    assert out.count("[TRADE-SUMMARY]") == 1
+
+
+def test_soft_scalp_mode_default_preserves_behavior(capsys):
+    broker = DummyBroker(profits={"EUR_USD": [0.3, -0.25]})
+    guard = ProfitProtection(broker, arm_ccy=1.0, giveback_ccy=0.5, soft_scalp_mode=False)
+
+    first = _trade("T-HARD", "EUR_USD", 1000, profit=0.3)
+    guard.process_open_trades([first])
+
+    second = _trade("T-HARD", "EUR_USD", 1000, profit=-0.25)
+    closed = guard.process_open_trades([second])
+
+    assert closed == []
+    out = capsys.readouterr().out
+    assert out.count("[TRADE-SUMMARY]") == 0
 
 
 def test_daily_profit_cap_does_not_block_trailing(monkeypatch):

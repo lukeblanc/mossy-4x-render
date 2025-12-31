@@ -17,6 +17,7 @@ DEFAULT_TRAILING_CONFIG = {
     "be_arm_pips": 0.0,
     "be_offset_pips": 0.0,
     "min_check_interval_sec": 0.0,
+    "soft_scalp_mode": False,
 }
 
 DEFAULT_TIME_STOP = {
@@ -93,4 +94,5 @@ def build_profit_protection(
         time_stop_minutes=ts_minutes,
         time_stop_min_pips=ts_min_pips,
         time_stop_xau_atr_mult=ts_xau_mult,
+        soft_scalp_mode=bool(trailing_cfg.get("soft_scalp_mode", False)),
     )
