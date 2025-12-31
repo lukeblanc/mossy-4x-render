@@ -10,7 +10,8 @@ from app.config import settings
 
 
 class DummyResponse:
-    status_code = 201
+    def __init__(self, status_code: int = 201):
+        self.status_code = status_code
 
     @staticmethod
     def json():
@@ -30,7 +31,14 @@ class DummyClient:
     def post(self, path: str, json):
         self.recorder["path"] = path
         self.recorder["payload"] = json
+        self.recorder["method"] = "post"
         return DummyResponse()
+
+    def put(self, path: str, json):
+        self.recorder["path"] = path
+        self.recorder["payload"] = json
+        self.recorder["method"] = "put"
+        return DummyResponse(status_code=200)
 
 
 def _configure_settings(monkeypatch):
@@ -126,3 +134,17 @@ def test_usd_jpy_tp_price_is_rounded(monkeypatch, capsys):
 
     logs = capsys.readouterr().out
     assert "[ORDER_FMT] instrument=USD_JPY raw_tp=156.16919 rounded_tp=156.169" in logs
+
+
+def test_close_position_side_uses_put(monkeypatch):
+    _configure_settings(monkeypatch)
+    recorded = {}
+    monkeypatch.setattr(Broker, "_client", lambda self: DummyClient(recorded))
+
+    broker = Broker()
+    result = broker.close_position_side("EUR_USD", long_units=1, short_units=0)
+
+    assert result["status"] == "CLOSED"
+    assert recorded["method"] == "put"
+    assert recorded["path"] == "/v3/accounts/acct-123/positions/EUR_USD/close"
+    assert recorded["payload"] == {"longUnits": "ALL"}
