@@ -132,7 +132,7 @@ def _build_trailing_config(config: Dict) -> Dict:
         soft_scalp_source = trailing_config.get("soft_scalp_mode", False)
     soft_scalp_mode = _as_bool(soft_scalp_source)
 
-    return {
+    resolved = {
         "arm_pips": trail_arm_pips,
         "giveback_pips": trail_giveback_pips,
         "arm_ccy": trail_arm_ccy,
@@ -143,6 +143,20 @@ def _build_trailing_config(config: Dict) -> Dict:
         "min_check_interval_sec": min_check_interval_sec,
         "soft_scalp_mode": soft_scalp_mode,
     }
+
+    warnings: list[str] = []
+    if trail_arm_ccy <= 0:
+        warnings.append("arm_ccy")
+    if trail_giveback_ccy <= 0:
+        warnings.append("giveback_ccy")
+    for field in warnings:
+        value = resolved.get(field)
+        print(
+            f"[TRAIL][WARN] Non-positive trailing threshold {field}={value}; check environment/config",
+            flush=True,
+        )
+
+    return resolved
 
 
 def _calc_exit_prices(signal: str, entry_price: float | None, sl_distance: float | None, tp_distance: float | None) -> tuple[float | None, float | None]:
@@ -222,6 +236,7 @@ aggressive_max_loss_ccy = float(
 aggressive_max_loss_atr_mult = float(os.getenv("AGGRESSIVE_MAX_LOSS_ATR_MULT", config.get("aggressive_max_loss_atr_mult", 1.2)))
 trailing_config = _build_trailing_config(config)
 config["trailing"] = trailing_config
+print(f"[CONFIG] trailing resolved={trailing_config}", flush=True)
 time_stop_cfg = config.get("time_stop", {}) or {}
 time_stop_minutes = float(os.getenv("TIME_STOP_MINUTES", time_stop_cfg.get("minutes", 90)))
 time_stop_min_pips = float(os.getenv("TIME_STOP_MIN_PIPS", time_stop_cfg.get("min_pips", 2.0)))
