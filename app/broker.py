@@ -300,7 +300,7 @@ class Broker:
 
         try:
             with self._client() as client:
-                resp = client.post(
+                resp = client.put(
                     f"/v3/accounts/{self.account}/positions/{instrument}/close",
                     json=payload,
                 )
