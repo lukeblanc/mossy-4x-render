@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Dict, Iterable, List, Optional, Protocol
 
 
@@ -15,10 +16,12 @@ GIVEBACK_CCY = 0.50
 class TrailingState:
     max_profit_ccy: Optional[float] = None
     armed: bool = False
+    last_profit_ccy: Optional[float] = None
     last_update: Optional[datetime] = None
     open_time: Optional[datetime] = None
     close_cooldown_until: Optional[datetime] = None
     missing_retry_attempted: bool = False
+    summary_emitted: bool = False
 
 
 class BrokerLike(Protocol):
@@ -67,6 +70,7 @@ class ProfitProtection:
         time_stop_minutes: float = 90.0,
         time_stop_min_pips: float = 2.0,
         time_stop_xau_atr_mult: float = 0.35,
+        soft_scalp_mode: bool = False,
     ) -> None:
         self.broker = broker
         self.arm_pips = float(arm_pips)
@@ -93,8 +97,11 @@ class ProfitProtection:
         self.time_stop_minutes = float(time_stop_minutes)
         self.time_stop_min_pips = float(time_stop_min_pips)
         self.time_stop_xau_atr_mult = float(time_stop_xau_atr_mult)
+        env_soft_scalp = os.getenv("SOFT_SCALP_MODE")
+        self.soft_scalp_mode = soft_scalp_mode or (str(env_soft_scalp).lower() in {"1", "true", "yes", "on"})
         self._state: Dict[str, TrailingState] = {}
         self._locally_closed: set[str] = set()
+        self._summaries_emitted: set[str] = set()
 
     def snapshot(self) -> Dict[str, TrailingState]:
         """Return a shallow copy of the current per-trade trailing state (test helper)."""
@@ -135,7 +142,16 @@ class ProfitProtection:
                     f"[TRAIL][INFO] reconcile_missing_position ticket={trade_id} instrument={instrument} action=mark_closed",
                     flush=True,
                 )
-                self._reconcile_closed(trade_id, instrument, open_trades, self._state.get(trade_id))
+                self._reconcile_closed(
+                    trade_id,
+                    instrument,
+                    open_trades,
+                    self._state.get(trade_id),
+                    reason="MISSING_POSITION",
+                    closed_by="broker_missing_position",
+                    final_profit=None,
+                    now_utc=now_utc,
+                )
                 if trade_id:
                     closed_trades.append(trade_id)
                 continue
@@ -167,6 +183,7 @@ class ProfitProtection:
                 continue
 
             self._update_peak_profit(trade_id, state, profit)
+            state.last_profit_ccy = profit if profit is not None else state.last_profit_ccy
             state.last_update = now_utc
             self._state[trade_id] = state
 
@@ -195,14 +212,20 @@ class ProfitProtection:
             if trailing_floor is None or profit is None:
                 continue
 
-            giveback_reached = (
-                profit <= trailing_floor
-                and state.max_profit_ccy is not None
-                and state.max_profit_ccy >= self.giveback_ccy
-            )
+            if self.soft_scalp_mode:
+                giveback_reached = profit <= trailing_floor
+            else:
+                giveback_reached = (
+                    profit <= trailing_floor
+                    and state.max_profit_ccy is not None
+                    and state.max_profit_ccy >= self.giveback_ccy
+                )
 
-            if not state.armed and not giveback_reached:
-                continue
+            if not giveback_reached:
+                if self.soft_scalp_mode:
+                    continue
+                if not state.armed:
+                    continue
 
             if giveback_reached:
                 print(
@@ -555,12 +578,22 @@ class ProfitProtection:
         # that the trade is no longer present.
 
         now_utc = now_utc or datetime.now(timezone.utc)
+        final_profit_val = profit if profit is not None else (state.last_profit_ccy if state else None)
         if state and state.close_cooldown_until and now_utc < state.close_cooldown_until:
             print(
                 f"{log_prefix}[INFO] close_cooldown_active ticket={trade_id} instrument={instrument} until={state.close_cooldown_until.isoformat()}",
                 flush=True,
             )
-            self._reconcile_closed(trade_id, instrument, open_trades, state)
+            self._reconcile_closed(
+                trade_id,
+                instrument,
+                open_trades,
+                state,
+                reason=reason,
+                closed_by="broker_missing_position",
+                final_profit=final_profit_val,
+                now_utc=now_utc,
+            )
             return True
 
         spread_clause = f" spread={spread_pips:.2f}" if spread_pips is not None else ""
@@ -584,7 +617,16 @@ class ProfitProtection:
                 f"{log_prefix}[INFO] snapshot_shows_closed ticket={trade_id} instrument={instrument} {snapshot_clause}",
                 flush=True,
             )
-            self._reconcile_closed(trade_id, instrument, open_trades, state)
+            self._reconcile_closed(
+                trade_id,
+                instrument,
+                open_trades,
+                state,
+                reason=reason,
+                closed_by="broker_missing_position",
+                final_profit=final_profit_val,
+                now_utc=now_utc,
+            )
             return True
 
         payload = self._close_payload(long_units, short_units)
@@ -606,7 +648,16 @@ class ProfitProtection:
                     f"high_water={high_water:.2f} reason={reason}{spread_clause} [Broker confirmed close]",
                     flush=True,
                 )
-            self._reconcile_closed(trade_id, instrument, open_trades, state)
+            self._reconcile_closed(
+                trade_id,
+                instrument,
+                open_trades,
+                state,
+                reason=reason,
+                closed_by="broker_confirmed",
+                final_profit=final_profit_val,
+                now_utc=now_utc,
+            )
             return True
 
         error_code = self._extract_error_code(result)
@@ -623,7 +674,16 @@ class ProfitProtection:
                     f"{log_prefix}[INFO] treated_as_closed_after_missing_position ticket={trade_id} instrument={instrument} {refreshed_clause}{spread_clause}",
                     flush=True,
                 )
-                self._reconcile_closed(trade_id, instrument, open_trades, state)
+                self._reconcile_closed(
+                    trade_id,
+                    instrument,
+                    open_trades,
+                    state,
+                    reason=reason,
+                    closed_by="broker_missing_position",
+                    final_profit=final_profit_val,
+                    now_utc=now_utc,
+                )
                 return True
             if not refreshed_ok:
                 snapshot_after = self._list_open_trades_quietly()
@@ -633,7 +693,16 @@ class ProfitProtection:
                         f"{log_prefix}[INFO] treated_as_closed_after_missing_position ticket={trade_id} instrument={instrument} snapshot=absent{spread_clause}",
                         flush=True,
                     )
-                    self._reconcile_closed(trade_id, instrument, open_trades, state)
+                    self._reconcile_closed(
+                        trade_id,
+                        instrument,
+                        open_trades,
+                        state,
+                        reason=reason,
+                        closed_by="broker_missing_position",
+                        final_profit=final_profit_val,
+                        now_utc=now_utc,
+                    )
                     return True
 
             if refreshed_ok:
@@ -645,7 +714,16 @@ class ProfitProtection:
                 retry_status = retry_result.get("status") if isinstance(retry_result, dict) else None
                 retry_success = retry_status in {"CLOSED", "SIMULATED", "FILLED"}
                 if retry_success:
-                    self._reconcile_closed(trade_id, instrument, open_trades, state)
+                    self._reconcile_closed(
+                        trade_id,
+                        instrument,
+                        open_trades,
+                        state,
+                        reason=reason,
+                        closed_by="broker_confirmed",
+                        final_profit=final_profit_val,
+                        now_utc=now_utc,
+                    )
                     print(
                         f"{log_prefix}[INFO] retry_close_success ticket={trade_id} instrument={instrument}{spread_clause}",
                         flush=True,
@@ -661,7 +739,16 @@ class ProfitProtection:
                             f"{log_prefix}[INFO] retry_missing_position treating_closed ticket={trade_id} instrument={instrument}{spread_clause}",
                             flush=True,
                         )
-                        self._reconcile_closed(trade_id, instrument, open_trades, state)
+                        self._reconcile_closed(
+                            trade_id,
+                            instrument,
+                            open_trades,
+                            state,
+                            reason=reason,
+                            closed_by="broker_missing_position",
+                            final_profit=final_profit_val,
+                            now_utc=now_utc,
+                        )
                         return True
                 if state:
                     state.missing_retry_attempted = True
@@ -683,7 +770,16 @@ class ProfitProtection:
         )
 
         if closed_status is True:
-            self._reconcile_closed(trade_id, instrument, open_trades, state)
+            self._reconcile_closed(
+                trade_id,
+                instrument,
+                open_trades,
+                state,
+                reason=reason,
+                closed_by="broker_confirmed",
+                final_profit=final_profit_val,
+                now_utc=now_utc,
+            )
             print(
                 f"{log_prefix}[INFO] Broker confirmed close via snapshot ticket={trade_id} instrument={instrument}{spread_clause}",
                 flush=True,
@@ -894,14 +990,82 @@ class ProfitProtection:
                 return True
         return False
 
+    @staticmethod
+    def _format_ccy(value: Optional[float]) -> str:
+        if value is None:
+            return "nan"
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return "nan"
+
+    @staticmethod
+    def _reason_label(reason: Optional[str]) -> str:
+        if not reason:
+            return "UNKNOWN"
+        mapping = {
+            "pnl_profit_protection": "GIVEBACK",
+            "TIME_STOP": "TIME_STOP",
+            "LOSS_FLOOR": "LOSS_FLOOR",
+        }
+        return mapping.get(reason, str(reason))
+
+    def _emit_summary_once(
+        self,
+        trade_id: Optional[str],
+        instrument: Optional[str],
+        *,
+        reason: Optional[str],
+        state: Optional[TrailingState],
+        final_profit: Optional[float],
+        closed_by: str,
+        now_utc: datetime,
+    ) -> None:
+        key = self._closed_key(trade_id, instrument)
+        if (key and key in self._summaries_emitted) or (state and state.summary_emitted):
+            return
+        max_profit = state.max_profit_ccy if state else None
+        final_val = final_profit if final_profit is not None else (state.last_profit_ccy if state else None)
+        duration_sec = 0
+        if state and state.open_time:
+            delta = now_utc - state.open_time
+            duration_sec = max(0, int(delta.total_seconds()))
+        print(
+            "[TRADE-SUMMARY] "
+            f"ticket={trade_id or 'unknown'} instrument={instrument or 'unknown'} "
+            f"reason={self._reason_label(reason)} "
+            f"max_profit_ccy={self._format_ccy(max_profit)} "
+            f"final_profit_ccy={self._format_ccy(final_val)} "
+            f"duration_sec={duration_sec} closed_by={closed_by}",
+            flush=True,
+        )
+        if key:
+            self._summaries_emitted.add(key)
+        if state:
+            state.summary_emitted = True
+
     def _reconcile_closed(
         self,
         trade_id: Optional[str],
         instrument: str,
         open_trades: Optional[List[Dict]],
         state: Optional[TrailingState],
+        *,
+        reason: Optional[str],
+        closed_by: str,
+        final_profit: Optional[float],
+        now_utc: Optional[datetime] = None,
     ) -> None:
         state = state or self._state.get(trade_id or "")
+        self._emit_summary_once(
+            trade_id,
+            instrument,
+            reason=reason,
+            state=state,
+            final_profit=final_profit,
+            closed_by=closed_by,
+            now_utc=now_utc or datetime.now(timezone.utc),
+        )
         if state:
             state.armed = False
             state.max_profit_ccy = None
@@ -909,6 +1073,7 @@ class ProfitProtection:
             state.open_time = None
             state.close_cooldown_until = None
             state.missing_retry_attempted = False
+            state.summary_emitted = True
         self._mark_locally_closed(trade_id, instrument)
         if open_trades is not None:
             remaining = []
