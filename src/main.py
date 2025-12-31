@@ -92,6 +92,59 @@ def _as_bool(value: object) -> bool:
     return bool(value)
 
 
+def _coerce_float(value: object, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _build_trailing_config(config: Dict) -> Dict:
+    trailing_config = config.get("trailing", {}) or {}
+    trail_use_pips = False
+    trail_arm_pips = _coerce_float(os.getenv("TRAIL_ARM_PIPS"), trailing_config.get("arm_pips", 0.0))
+    trail_giveback_pips = _coerce_float(os.getenv("TRAIL_GIVEBACK_PIPS"), trailing_config.get("giveback_pips", 0.0))
+
+    arm_default = trailing_config.get("arm_ccy", trailing_config.get("arm_usd", profit_protection.ARM_AT_CCY))
+    giveback_default = trailing_config.get("giveback_ccy", trailing_config.get("giveback_usd", profit_protection.GIVEBACK_CCY))
+    arm_env = os.getenv("TRAIL_ARM_CCY")
+    if arm_env is None:
+        arm_env = os.getenv("TRAIL_ARM_USD")
+    giveback_env = os.getenv("TRAIL_GIVEBACK_CCY")
+    if giveback_env is None:
+        giveback_env = os.getenv("TRAIL_GIVEBACK_USD")
+    trail_arm_ccy = _coerce_float(arm_env, arm_default)
+    trail_giveback_ccy = _coerce_float(giveback_env, giveback_default)
+
+    be_arm_pips = _coerce_float(os.getenv("BE_ARM_PIPS"), trailing_config.get("be_arm_pips", 0.0))
+    be_offset_pips = _coerce_float(os.getenv("BE_OFFSET_PIPS"), trailing_config.get("be_offset_pips", 0.0))
+
+    min_check_env = os.getenv("MIN_CHECK_INTERVAL_SEC")
+    if min_check_env is None:
+        min_check_env = os.getenv("TRAIL_MIN_CHECK_INTERVAL")
+    min_check_interval_sec = _coerce_float(
+        min_check_env,
+        trailing_config.get("min_check_interval_sec", 0.0),
+    )
+
+    soft_scalp_source = os.getenv("SOFT_SCALP_MODE")
+    if soft_scalp_source is None:
+        soft_scalp_source = trailing_config.get("soft_scalp_mode", False)
+    soft_scalp_mode = _as_bool(soft_scalp_source)
+
+    return {
+        "arm_pips": trail_arm_pips,
+        "giveback_pips": trail_giveback_pips,
+        "arm_ccy": trail_arm_ccy,
+        "giveback_ccy": trail_giveback_ccy,
+        "use_pips": trail_use_pips,
+        "be_arm_pips": be_arm_pips,
+        "be_offset_pips": be_offset_pips,
+        "min_check_interval_sec": min_check_interval_sec,
+        "soft_scalp_mode": soft_scalp_mode,
+    }
+
+
 def _calc_exit_prices(signal: str, entry_price: float | None, sl_distance: float | None, tp_distance: float | None) -> tuple[float | None, float | None]:
     if entry_price is None:
         return None, None
@@ -167,41 +220,7 @@ aggressive_max_loss_ccy = float(
     )
 )
 aggressive_max_loss_atr_mult = float(os.getenv("AGGRESSIVE_MAX_LOSS_ATR_MULT", config.get("aggressive_max_loss_atr_mult", 1.2)))
-trailing_config = config.get("trailing", {}) or {}
-trail_use_pips = False
-trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", trailing_config.get("arm_pips", 0.0)))
-trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", trailing_config.get("giveback_pips", 0.0)))
-trail_arm_ccy = float(
-    os.getenv(
-        "TRAIL_ARM_CCY",
-        os.getenv(
-            "TRAIL_ARM_USD",
-            trailing_config.get("arm_ccy", trailing_config.get("arm_usd", profit_protection.ARM_AT_CCY)),
-        ),
-    )
-)
-trail_giveback_ccy = float(
-    os.getenv(
-        "TRAIL_GIVEBACK_CCY",
-        os.getenv(
-            "TRAIL_GIVEBACK_USD",
-            trailing_config.get("giveback_ccy", trailing_config.get("giveback_usd", profit_protection.GIVEBACK_CCY)),
-        ),
-    )
-)
-be_arm_pips = float(os.getenv("BE_ARM_PIPS", trailing_config.get("be_arm_pips", 0.0)))
-be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", trailing_config.get("be_offset_pips", 0.0)))
-min_check_interval_sec = float(os.getenv("MIN_CHECK_INTERVAL_SEC", trailing_config.get("min_check_interval_sec", 0.0)))
-trailing_config = {
-    "arm_pips": trail_arm_pips,
-    "giveback_pips": trail_giveback_pips,
-    "arm_ccy": trail_arm_ccy,
-    "giveback_ccy": trail_giveback_ccy,
-    "use_pips": trail_use_pips,
-    "be_arm_pips": be_arm_pips,
-    "be_offset_pips": be_offset_pips,
-    "min_check_interval_sec": min_check_interval_sec,
-}
+trailing_config = _build_trailing_config(config)
 config["trailing"] = trailing_config
 time_stop_cfg = config.get("time_stop", {}) or {}
 time_stop_minutes = float(os.getenv("TIME_STOP_MINUTES", time_stop_cfg.get("minutes", 90)))
