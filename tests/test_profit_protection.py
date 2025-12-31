@@ -107,6 +107,30 @@ def _trade(trade_id: str, instrument: str, units: float, profit: float | None = 
     return payload
 
 
+def test_close_trade_handles_missing_snapshot_without_units():
+    broker = DummyBroker()
+    guard = ProfitProtection(broker)
+
+    result = guard._close_trade(  # noqa: SLF001
+        "T-no-snapshot",
+        "EUR_USD",
+        profit=0.0,
+        pips=None,
+        floor=0.0,
+        high_water=0.0,
+        spread_pips=None,
+        log_prefix="[TEST]",
+        reason="MISSING_SNAPSHOT",
+        summary=None,
+        open_trades=None,
+        state=None,
+        units=None,
+    )
+
+    assert result is True
+    assert broker.closed[-1]["payload"] == {"longUnits": "0", "shortUnits": "0"}
+
+
 def test_trailing_giveback_closes_at_floor(capsys):
     broker = DummyBroker(profits={"EUR_USD": [0.0, 0.8, 1.2, 0.6]})
     guard = ProfitProtection(
