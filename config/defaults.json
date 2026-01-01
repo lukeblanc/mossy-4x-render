@@ -64,7 +64,11 @@
       "start": "04:55",
       "end": "05:05"
     },
-    "max_trades_per_day": 50
+    "max_trades_per_day": 50,
+    "equity_adjustment_pct": 0.05,
+    "equity_adjustment_abs": 20.0,
+    "EQUITY_ADJUSTMENT_PCT": 0.05,
+    "EQUITY_ADJUSTMENT_ABS": 20.0
   },
   "trailing": {
     "arm_pips": 0.0,

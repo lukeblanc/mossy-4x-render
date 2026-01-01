@@ -53,7 +53,10 @@ class RiskState:
     day_id_utc: Optional[str] = None
     day_start_equity: Optional[float] = None
     day_start_equity_utc: Optional[float] = None
+    peak_equity_today: Optional[float] = None
     week_start_equity: Optional[float] = None
+    daily_pl: float = 0.0
+    drawdown_pct: float = 0.0
     daily_realized_pl: float = 0.0
     weekly_realized_pl: float = 0.0
     last_entry_ts_utc: Optional[datetime] = None
@@ -65,6 +68,7 @@ class RiskState:
     live_halted_on_equity_floor: bool = False
     max_drawdown_halt: bool = False
     daily_profit_cap_hit: bool = False
+    daily_loss_cap_hit: bool = False
     daily_entry_count: int = 0
 
     def to_dict(self) -> Dict:
@@ -74,7 +78,10 @@ class RiskState:
             "day_id_utc": self.day_id_utc,
             "day_start_equity": self.day_start_equity,
             "day_start_equity_utc": self.day_start_equity_utc,
+            "peak_equity_today": self.peak_equity_today,
             "week_start_equity": self.week_start_equity,
+            "daily_pl": self.daily_pl,
+            "drawdown_pct": self.drawdown_pct,
             "daily_realized_pl": self.daily_realized_pl,
             "weekly_realized_pl": self.weekly_realized_pl,
             "last_entry_ts_utc": _iso(self.last_entry_ts_utc),
@@ -86,6 +93,7 @@ class RiskState:
             "live_halted_on_equity_floor": self.live_halted_on_equity_floor,
             "max_drawdown_halt": self.max_drawdown_halt,
             "daily_profit_cap_hit": self.daily_profit_cap_hit,
+            "daily_loss_cap_hit": self.daily_loss_cap_hit,
             "daily_entry_count": self.daily_entry_count,
         }
 
@@ -97,7 +105,10 @@ class RiskState:
             day_id_utc=data.get("day_id_utc"),
             day_start_equity=data.get("day_start_equity"),
             day_start_equity_utc=data.get("day_start_equity_utc"),
+            peak_equity_today=_sanitize_equity(data.get("peak_equity_today")),
             week_start_equity=data.get("week_start_equity"),
+            daily_pl=float(data.get("daily_pl", 0.0)),
+            drawdown_pct=float(data.get("drawdown_pct", 0.0)),
             daily_realized_pl=float(data.get("daily_realized_pl", 0.0)),
             weekly_realized_pl=float(data.get("weekly_realized_pl", 0.0)),
             last_entry_ts_utc=_from_iso(data.get("last_entry_ts_utc")),
@@ -111,6 +122,7 @@ class RiskState:
             ),
             max_drawdown_halt=bool(data.get("max_drawdown_halt", False)),
             daily_profit_cap_hit=bool(data.get("daily_profit_cap_hit", False)),
+            daily_loss_cap_hit=bool(data.get("daily_loss_cap_hit", False)),
             daily_entry_count=int(data.get("daily_entry_count", 0) or 0),
         )
 
@@ -132,6 +144,8 @@ class RiskManager:
     state: RiskState = field(default_factory=RiskState)
     state_dir: Optional[Path] = None
     demo_mode: bool = False
+    _last_equity_seen: Optional[float] = field(default=None, init=False, repr=False)
+    _startup_reset_done: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.mode = (self.mode or "paper").lower()
@@ -193,6 +207,14 @@ class RiskManager:
         self.rollover_end = _parse_time(self.rollover_quiet.get("end"))
         self.timeframe = (self.config.get("timeframe") or "M5").upper()
         self.max_drawdown_cap_pct = float(self.config.get("max_drawdown_cap_pct", 0.10))
+        equity_adjustment_pct_cfg = self.config.get(
+            "equity_adjustment_pct", self.config.get("EQUITY_ADJUSTMENT_PCT", 0.05)
+        )
+        equity_adjustment_abs_cfg = self.config.get(
+            "equity_adjustment_abs", self.config.get("EQUITY_ADJUSTMENT_ABS", 20.0)
+        )
+        self.equity_adjustment_pct = max(0.0, float(equity_adjustment_pct_cfg))
+        self.equity_adjustment_abs = max(0.0, float(equity_adjustment_abs_cfg))
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -226,6 +248,7 @@ class RiskManager:
     ) -> None:
         self._rollover(now_utc, equity)
         self._update_peak_equity(equity)
+        self._remember_equity(equity)
         if self._breached_max_drawdown(equity):
             self.state.max_drawdown_halt = True
             self._save_state()
@@ -261,6 +284,8 @@ class RiskManager:
         spread_pips: Optional[float],
     ) -> Tuple[bool, str]:
         self._rollover(now_utc, equity)
+        open_positions_count = len(open_positions) if open_positions is not None else None
+        self._maybe_shift_baselines_for_adjustment(equity, open_positions_count)
         self._update_peak_equity(equity)
 
         if self.mode == "live":
@@ -358,6 +383,99 @@ class RiskManager:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _remember_equity(self, equity: Optional[float]) -> None:
+        """Track the latest sanitized equity value for adjustment detection."""
+        self._last_equity_seen = _sanitize_equity(equity)
+
+    def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0) -> None:
+        """
+        Reset daily baselines after startup equity retrieval.
+
+        Demo: always apply.
+        Live: apply only at startup (assumed no open trades) and only once.
+        """
+
+        if self._startup_reset_done:
+            return
+
+        if not self.demo_mode and self.mode != "live":
+            # Only demo or live need the startup hygiene at present.
+            return
+
+        valid_equity = _sanitize_equity(equity)
+        if valid_equity is None:
+            return
+
+        if self.mode == "live" and open_positions_count > 0 and not self.demo_mode:
+            # Avoid altering live baselines mid-trade
+            return
+
+        self.state.day_start_equity = valid_equity
+        self.state.day_start_equity_utc = valid_equity
+        self.state.peak_equity_today = valid_equity
+        self.state.daily_pl = 0.0
+        self.state.drawdown_pct = 0.0
+        self.state.daily_profit_cap_hit = False
+        self.state.daily_loss_cap_hit = False
+        self._last_equity_seen = valid_equity
+        self._startup_reset_done = True
+        self._save_state()
+
+        mode_label = "demo" if self.demo_mode else "live"
+        print(
+            f"[STARTUP-RESET][WARN] mode={mode_label} equity={valid_equity:.2f}; daily baselines reset.",
+            flush=True,
+        )
+
+    def _maybe_shift_baselines_for_adjustment(
+        self, equity: float, open_positions_count: Optional[int]
+    ) -> None:
+        """
+        Detect large balance adjustments (deposits/withdrawals/demo top-ups) when
+        there are no open trades, and shift day/week baselines to keep caps honest.
+        """
+
+        valid_equity = _sanitize_equity(equity)
+        if valid_equity is None:
+            self._last_equity_seen = None
+            return
+
+        if self._last_equity_seen is None:
+            self._last_equity_seen = valid_equity
+            return
+
+        if open_positions_count is None:
+            self._last_equity_seen = valid_equity
+            return
+
+        delta = valid_equity - self._last_equity_seen
+        ref = max(abs(self._last_equity_seen), 1e-9)
+        looks_like_adjustment = (
+            abs(delta) >= self.equity_adjustment_abs
+            and (abs(delta) / ref) >= self.equity_adjustment_pct
+        )
+
+        if looks_like_adjustment and open_positions_count == 0:
+            if self.state.day_start_equity is not None:
+                self.state.day_start_equity += delta
+            if self.state.day_start_equity_utc is not None:
+                self.state.day_start_equity_utc += delta
+            if self.state.week_start_equity is not None:
+                self.state.week_start_equity += delta
+            if self.state.peak_equity is not None:
+                self.state.peak_equity = max(self.state.peak_equity + delta, valid_equity)
+            else:
+                self.state.peak_equity = valid_equity
+            print(
+                f"[EQUITY-ADJUST][WARN] Detected balance adjustment delta={delta:.2f}; shifted baselines.",
+                flush=True,
+            )
+            self._last_equity_seen = valid_equity
+            self._save_state()
+            return
+
+        self._last_equity_seen = valid_equity
+
     def _rollover(self, now_utc: datetime, equity: float) -> None:
         awst_now = now_utc.astimezone(AWST)
         day_id = awst_now.strftime("%Y-%m-%d")
@@ -488,7 +606,7 @@ class RiskManager:
             return False
         if self.state.peak_equity is None:
             return False
-        drawdown = self.state.peak_equity - equity
+        drawdown = max(self.state.peak_equity - equity, 0.0)
         return drawdown >= self.state.peak_equity * self.max_drawdown_cap_pct
 
     def _in_rollover_window(self, now_utc: datetime) -> bool:

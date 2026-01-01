@@ -146,6 +146,90 @@ def test_demo_profit_cap_blocks_and_resets_next_day(state_dir, capsys):
     assert manager.state.daily_profit_cap_hit is False
 
 
+def test_balance_adjustment_shifts_baselines(state_dir, capsys):
+    manager = RiskManager(
+        {
+            "equity_adjustment_pct": 0.05,
+            "equity_adjustment_abs": 20.0,
+            "daily_profit_target_usd": 5.0,
+        },
+        mode="paper",
+        demo_mode=True,
+    )
+    now = _utc(2024, 1, 1, 0, 0)
+
+    ok, reason = manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+    pre_adjust_daily_pl = 1_000.0 - manager.state.day_start_equity
+    capsys.readouterr()
+
+    adjusted_now = now + timedelta(hours=1)
+    ok, reason = manager.should_open(adjusted_now, 1_060.0, [], "EUR_USD", 0.2)
+    log = capsys.readouterr().out
+
+    assert ok is True
+    assert reason == "ok"
+    assert "[EQUITY-ADJUST][WARN]" in log
+    assert manager.state.day_start_equity == pytest.approx(1_060.0)
+    assert manager.state.day_start_equity_utc == pytest.approx(1_060.0)
+    assert manager.state.week_start_equity == pytest.approx(1_060.0)
+    assert manager.state.daily_profit_cap_hit is False
+    post_adjust_daily_pl = 1_060.0 - manager.state.day_start_equity
+    assert pre_adjust_daily_pl == pytest.approx(post_adjust_daily_pl)
+
+
+def test_balance_adjustment_skips_when_positions_open(state_dir):
+    manager = RiskManager(
+        {
+            "equity_adjustment_pct": 0.05,
+            "equity_adjustment_abs": 20.0,
+        },
+        mode="paper",
+    )
+    now = _utc(2024, 1, 1, 0, 0)
+
+    ok, reason = manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+
+    open_positions = [{"instrument": "EUR_USD"}]
+    later = now + timedelta(minutes=30)
+    ok, reason = manager.should_open(later, 1_100.0, open_positions, "EUR_USD", 0.2)
+
+    assert ok is True
+    assert reason == "ok"
+    assert manager.state.day_start_equity == pytest.approx(1_000.0)
+    assert manager.state.week_start_equity == pytest.approx(1_000.0)
+
+
+def test_startup_reset_applies_in_demo(state_dir, capsys):
+    manager = RiskManager({}, mode="paper", demo_mode=True)
+
+    manager.startup_daily_reset(1_234.0, open_positions_count=0)
+    log = capsys.readouterr().out
+
+    assert "[STARTUP-RESET][WARN]" in log
+    assert manager.state.day_start_equity == pytest.approx(1_234.0)
+    assert manager.state.day_start_equity_utc == pytest.approx(1_234.0)
+    assert manager.state.peak_equity_today == pytest.approx(1_234.0)
+    assert manager.state.daily_pl == pytest.approx(0.0)
+    assert manager.state.drawdown_pct == pytest.approx(0.0)
+    assert manager.state.daily_profit_cap_hit is False
+    assert manager.state.daily_loss_cap_hit is False
+
+
+def test_startup_reset_live_requires_no_open_positions(state_dir):
+    manager = RiskManager({}, mode="live")
+
+    manager.startup_daily_reset(2_000.0, open_positions_count=1)
+    assert manager.state.day_start_equity is None
+
+    manager.startup_daily_reset(2_000.0, open_positions_count=0)
+    assert manager.state.day_start_equity == pytest.approx(2_000.0)
+    assert manager.state.peak_equity_today == pytest.approx(2_000.0)
+
+
 def test_rollover_window_blocks(state_dir):
     manager = RiskManager(
         {
