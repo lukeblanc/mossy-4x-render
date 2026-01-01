@@ -328,6 +328,20 @@ profit_guard = _profit_guard_for_mode(mode_env, broker)
 
 def _startup_checks() -> None:
     broker.connectivity_check()
+    try:
+        equity = broker.account_equity()
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[STARTUP-RESET][WARN] Unable to fetch equity for reset: {exc}", flush=True)
+        return
+
+    try:
+        open_trades = _open_trades_state()
+        open_count = len(open_trades or [])
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[STARTUP-RESET][WARN] Unable to inspect open trades: {exc}", flush=True)
+        open_count = 0
+
+    risk.startup_daily_reset(equity, open_positions_count=open_count)
 
 
 def _open_trades_state() -> List[Dict]:
