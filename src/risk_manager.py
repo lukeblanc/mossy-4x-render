@@ -132,6 +132,7 @@ class RiskManager:
     state: RiskState = field(default_factory=RiskState)
     state_dir: Optional[Path] = None
     demo_mode: bool = False
+    _last_equity_seen: Optional[float] = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.mode = (self.mode or "paper").lower()
@@ -193,6 +194,14 @@ class RiskManager:
         self.rollover_end = _parse_time(self.rollover_quiet.get("end"))
         self.timeframe = (self.config.get("timeframe") or "M5").upper()
         self.max_drawdown_cap_pct = float(self.config.get("max_drawdown_cap_pct", 0.10))
+        equity_adjustment_pct_cfg = self.config.get(
+            "equity_adjustment_pct", self.config.get("EQUITY_ADJUSTMENT_PCT", 0.05)
+        )
+        equity_adjustment_abs_cfg = self.config.get(
+            "equity_adjustment_abs", self.config.get("EQUITY_ADJUSTMENT_ABS", 20.0)
+        )
+        self.equity_adjustment_pct = max(0.0, float(equity_adjustment_pct_cfg))
+        self.equity_adjustment_abs = max(0.0, float(equity_adjustment_abs_cfg))
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -226,6 +235,7 @@ class RiskManager:
     ) -> None:
         self._rollover(now_utc, equity)
         self._update_peak_equity(equity)
+        self._remember_equity(equity)
         if self._breached_max_drawdown(equity):
             self.state.max_drawdown_halt = True
             self._save_state()
@@ -261,6 +271,8 @@ class RiskManager:
         spread_pips: Optional[float],
     ) -> Tuple[bool, str]:
         self._rollover(now_utc, equity)
+        open_positions_count = len(open_positions) if open_positions is not None else None
+        self._maybe_shift_baselines_for_adjustment(equity, open_positions_count)
         self._update_peak_equity(equity)
 
         if self.mode == "live":
@@ -358,6 +370,59 @@ class RiskManager:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _remember_equity(self, equity: Optional[float]) -> None:
+        """Track the latest sanitized equity value for adjustment detection."""
+        self._last_equity_seen = _sanitize_equity(equity)
+
+    def _maybe_shift_baselines_for_adjustment(
+        self, equity: float, open_positions_count: Optional[int]
+    ) -> None:
+        """
+        Detect large balance adjustments (deposits/withdrawals/demo top-ups) when
+        there are no open trades, and shift day/week baselines to keep caps honest.
+        """
+
+        valid_equity = _sanitize_equity(equity)
+        if valid_equity is None:
+            self._last_equity_seen = None
+            return
+
+        if self._last_equity_seen is None:
+            self._last_equity_seen = valid_equity
+            return
+
+        if open_positions_count is None:
+            self._last_equity_seen = valid_equity
+            return
+
+        delta = valid_equity - self._last_equity_seen
+        ref = max(abs(self._last_equity_seen), 1e-9)
+        looks_like_adjustment = (
+            abs(delta) >= self.equity_adjustment_abs
+            and (abs(delta) / ref) >= self.equity_adjustment_pct
+        )
+
+        if looks_like_adjustment and open_positions_count == 0:
+            if self.state.day_start_equity is not None:
+                self.state.day_start_equity += delta
+            if self.state.day_start_equity_utc is not None:
+                self.state.day_start_equity_utc += delta
+            if self.state.week_start_equity is not None:
+                self.state.week_start_equity += delta
+            if self.state.peak_equity is not None:
+                self.state.peak_equity = max(self.state.peak_equity + delta, valid_equity)
+            else:
+                self.state.peak_equity = valid_equity
+            print(
+                f"[EQUITY-ADJUST][WARN] Detected balance adjustment delta={delta:.2f}; shifted baselines.",
+                flush=True,
+            )
+            self._last_equity_seen = valid_equity
+            self._save_state()
+            return
+
+        self._last_equity_seen = valid_equity
+
     def _rollover(self, now_utc: datetime, equity: float) -> None:
         awst_now = now_utc.astimezone(AWST)
         day_id = awst_now.strftime("%Y-%m-%d")
@@ -488,7 +553,7 @@ class RiskManager:
             return False
         if self.state.peak_equity is None:
             return False
-        drawdown = self.state.peak_equity - equity
+        drawdown = max(self.state.peak_equity - equity, 0.0)
         return drawdown >= self.state.peak_equity * self.max_drawdown_cap_pct
 
     def _in_rollover_window(self, now_utc: datetime) -> bool:
