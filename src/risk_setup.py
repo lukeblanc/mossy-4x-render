@@ -62,6 +62,7 @@ def build_profit_protection(
     *,
     trailing: Optional[Dict] = None,
     time_stop: Optional[Dict] = None,
+    journal=None,
 ) -> ProfitProtection:
     """Create ProfitProtection consistent with deployment mode."""
 
@@ -95,4 +96,5 @@ def build_profit_protection(
         time_stop_min_pips=ts_min_pips,
         time_stop_xau_atr_mult=ts_xau_mult,
         soft_scalp_mode=bool(trailing_cfg.get("soft_scalp_mode", False)),
+        journal=journal,
     )
