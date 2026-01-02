@@ -142,6 +142,7 @@ class ProfitProtection:
                     )
                     self._unmark_locally_closed(trade_id, instrument)
 
+            spread_pips = self._current_spread(instrument)
             instrument_open = None if broker_snapshot is None else self._instrument_open_in_snapshot(broker_snapshot, instrument, trade_id)
             if instrument_open is False:
                 print(
@@ -167,7 +168,6 @@ class ProfitProtection:
             state = self._state.get(trade_id, TrailingState())
             state.open_time = state.open_time or self._open_time_from_trade(trade)
 
-            spread_pips = self._current_spread(instrument)
             profit = self._profit_from_trade(trade, instrument)
             pips = self._pips_from_trade(trade, instrument, profit, units)
             atr_val = self._atr_for_trade(trade)
