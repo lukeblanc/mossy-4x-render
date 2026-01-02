@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 import os
 from typing import Dict, Iterable, List, Optional, Protocol
 
+try:  # Avoid circular import at module load time for typing only.
+    from src.trade_journal import TradeJournal
+except Exception:  # pragma: no cover - defensive
+    TradeJournal = None  # type: ignore
 
 ARM_AT_CCY = 1.00
 GIVEBACK_CCY = 0.50
@@ -71,6 +75,7 @@ class ProfitProtection:
         time_stop_min_pips: float = 2.0,
         time_stop_xau_atr_mult: float = 0.35,
         soft_scalp_mode: bool = False,
+        journal: Optional["TradeJournal"] = None,
     ) -> None:
         self.broker = broker
         self.arm_pips = float(arm_pips)
@@ -102,6 +107,7 @@ class ProfitProtection:
         self._state: Dict[str, TrailingState] = {}
         self._locally_closed: set[str] = set()
         self._summaries_emitted: set[str] = set()
+        self._journal = journal
 
     def snapshot(self) -> Dict[str, TrailingState]:
         """Return a shallow copy of the current per-trade trailing state (test helper)."""
@@ -151,6 +157,7 @@ class ProfitProtection:
                     closed_by="broker_missing_position",
                     final_profit=None,
                     now_utc=now_utc,
+                    spread_pips=spread_pips,
                 )
                 if trade_id:
                     closed_trades.append(trade_id)
@@ -593,6 +600,7 @@ class ProfitProtection:
                 closed_by="broker_missing_position",
                 final_profit=final_profit_val,
                 now_utc=now_utc,
+                spread_pips=spread_pips,
             )
             return True
 
@@ -657,6 +665,7 @@ class ProfitProtection:
                 closed_by="broker_confirmed",
                 final_profit=final_profit_val,
                 now_utc=now_utc,
+                spread_pips=spread_pips,
             )
             return True
 
@@ -683,6 +692,7 @@ class ProfitProtection:
                     closed_by="broker_missing_position",
                     final_profit=final_profit_val,
                     now_utc=now_utc,
+                    spread_pips=spread_pips,
                 )
                 return True
             if not refreshed_ok:
@@ -702,6 +712,7 @@ class ProfitProtection:
                         closed_by="broker_missing_position",
                         final_profit=final_profit_val,
                         now_utc=now_utc,
+                        spread_pips=spread_pips,
                     )
                     return True
 
@@ -723,6 +734,7 @@ class ProfitProtection:
                         closed_by="broker_confirmed",
                         final_profit=final_profit_val,
                         now_utc=now_utc,
+                        spread_pips=spread_pips,
                     )
                     print(
                         f"{log_prefix}[INFO] retry_close_success ticket={trade_id} instrument={instrument}{spread_clause}",
@@ -748,6 +760,7 @@ class ProfitProtection:
                             closed_by="broker_missing_position",
                             final_profit=final_profit_val,
                             now_utc=now_utc,
+                            spread_pips=spread_pips,
                         )
                         return True
                 if state:
@@ -779,6 +792,7 @@ class ProfitProtection:
                 closed_by="broker_confirmed",
                 final_profit=final_profit_val,
                 now_utc=now_utc,
+                spread_pips=spread_pips,
             )
             print(
                 f"{log_prefix}[INFO] Broker confirmed close via snapshot ticket={trade_id} instrument={instrument}{spread_clause}",
@@ -1004,11 +1018,37 @@ class ProfitProtection:
         if not reason:
             return "UNKNOWN"
         mapping = {
-            "pnl_profit_protection": "GIVEBACK",
-            "TIME_STOP": "TIME_STOP",
-            "LOSS_FLOOR": "LOSS_FLOOR",
+            "pnl_profit_protection": "TRAIL",
+            "TIME_STOP": "TIME",
+            "LOSS_FLOOR": "RISK",
+            "MISSING_POSITION": "BROKER_MISSING_POSITION",
         }
         return mapping.get(reason, str(reason))
+
+    @staticmethod
+    def _summary_fields(
+        trade_id: Optional[str],
+        instrument: Optional[str],
+        *,
+        reason: Optional[str],
+        state: Optional[TrailingState],
+        final_profit: Optional[float],
+        now_utc: datetime,
+    ) -> Dict[str, object]:
+        max_profit = state.max_profit_ccy if state else None
+        final_val = final_profit if final_profit is not None else (state.last_profit_ccy if state else None)
+        duration_sec = 0
+        if state and state.open_time:
+            delta = now_utc - state.open_time
+            duration_sec = max(0, int(delta.total_seconds()))
+        return {
+            "trade_id": trade_id,
+            "instrument": instrument,
+            "reason": ProfitProtection._reason_label(reason),
+            "max_profit_ccy": max_profit,
+            "final_profit_ccy": final_val,
+            "duration_sec": duration_sec,
+        }
 
     def _emit_summary_once(
         self,
@@ -1024,19 +1064,21 @@ class ProfitProtection:
         key = self._closed_key(trade_id, instrument)
         if (key and key in self._summaries_emitted) or (state and state.summary_emitted):
             return
-        max_profit = state.max_profit_ccy if state else None
-        final_val = final_profit if final_profit is not None else (state.last_profit_ccy if state else None)
-        duration_sec = 0
-        if state and state.open_time:
-            delta = now_utc - state.open_time
-            duration_sec = max(0, int(delta.total_seconds()))
+        summary = self._summary_fields(
+            trade_id,
+            instrument,
+            reason=reason,
+            state=state,
+            final_profit=final_profit,
+            now_utc=now_utc,
+        )
         print(
             "[TRADE-SUMMARY] "
             f"ticket={trade_id or 'unknown'} instrument={instrument or 'unknown'} "
-            f"reason={self._reason_label(reason)} "
-            f"max_profit_ccy={self._format_ccy(max_profit)} "
-            f"final_profit_ccy={self._format_ccy(final_val)} "
-            f"duration_sec={duration_sec} closed_by={closed_by}",
+            f"reason={summary['reason']} "
+            f"max_profit_ccy={self._format_ccy(summary['max_profit_ccy'])} "
+            f"final_profit_ccy={self._format_ccy(summary['final_profit_ccy'])} "
+            f"duration_sec={summary['duration_sec']} closed_by={closed_by}",
             flush=True,
         )
         if key:
@@ -1055,8 +1097,10 @@ class ProfitProtection:
         closed_by: str,
         final_profit: Optional[float],
         now_utc: Optional[datetime] = None,
+        spread_pips: Optional[float] = None,
     ) -> None:
         state = state or self._state.get(trade_id or "")
+        now_val = now_utc or datetime.now(timezone.utc)
         self._emit_summary_once(
             trade_id,
             instrument,
@@ -1064,8 +1108,32 @@ class ProfitProtection:
             state=state,
             final_profit=final_profit,
             closed_by=closed_by,
-            now_utc=now_utc or datetime.now(timezone.utc),
+            now_utc=now_val,
         )
+        if self._journal:
+            summary = self._summary_fields(
+                trade_id,
+                instrument,
+                reason=reason,
+                state=state,
+                final_profit=final_profit,
+                now_utc=now_val,
+            )
+            try:
+                self._journal.record_exit(
+                    trade_id=str(trade_id or instrument or ""),
+                    exit_timestamp_utc=now_val,
+                    exit_price=None,
+                    spread_at_exit=spread_pips,
+                    max_profit_ccy=summary["max_profit_ccy"],  # type: ignore[arg-type]
+                    realized_pnl_ccy=summary["final_profit_ccy"],  # type: ignore[arg-type]
+                    exit_reason=summary["reason"],  # type: ignore[arg-type]
+                    duration_seconds=int(summary["duration_sec"] or 0),  # type: ignore[arg-type]
+                    broker_confirmed=closed_by == "broker_confirmed",
+                )
+            except Exception:
+                # Journal failures must never block trade lifecycle.
+                pass
         if state:
             state.armed = False
             state.max_profit_ccy = None
