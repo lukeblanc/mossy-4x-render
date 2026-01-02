@@ -81,6 +81,7 @@ class TradeJournal:
                     spread_at_entry REAL,
                     session_id TEXT,
                     session_mode TEXT,
+                    run_tag TEXT,
                     gating_flags TEXT,
                     indicators_snapshot TEXT,
                     exit_timestamp_utc TEXT,
@@ -97,6 +98,10 @@ class TradeJournal:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_instrument_ts ON trades (instrument, timestamp_utc);"
             )
+            # Migration-safe: add run_tag if missing.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(trades);").fetchall()}
+            if "run_tag" not in columns:
+                conn.execute("ALTER TABLE trades ADD COLUMN run_tag TEXT;")
 
     def record_entry(
         self,
@@ -112,6 +117,7 @@ class TradeJournal:
         spread_at_entry: Optional[float],
         session_id: str,
         session_mode: str,
+        run_tag: Optional[str] = None,
         gating_flags: Mapping[str, Any],
         indicators_snapshot: Mapping[str, Any],
     ) -> None:
@@ -130,6 +136,7 @@ class TradeJournal:
             "spread_at_entry": spread_at_entry,
             "session_id": session_id,
             "session_mode": session_mode,
+            "run_tag": run_tag,
             "gating_flags": _json_dumps(gating_flags),
             "indicators_snapshot": _json_dumps(indicators_snapshot),
         }
@@ -148,6 +155,7 @@ class TradeJournal:
                     spread_at_entry,
                     session_id,
                     session_mode,
+                    run_tag,
                     gating_flags,
                     indicators_snapshot
                 ) VALUES (
@@ -162,6 +170,7 @@ class TradeJournal:
                     :spread_at_entry,
                     :session_id,
                     :session_mode,
+                    :run_tag,
                     :gating_flags,
                     :indicators_snapshot
                 )
@@ -176,6 +185,7 @@ class TradeJournal:
                     spread_at_entry=excluded.spread_at_entry,
                     session_id=excluded.session_id,
                     session_mode=excluded.session_mode,
+                    run_tag=COALESCE(excluded.run_tag, trades.run_tag),
                     gating_flags=excluded.gating_flags,
                     indicators_snapshot=excluded.indicators_snapshot;
                 """,
@@ -194,6 +204,7 @@ class TradeJournal:
         exit_reason: Optional[str],
         duration_seconds: Optional[int],
         broker_confirmed: Optional[bool],
+        run_tag: Optional[str] = None,
     ) -> None:
         if not trade_id:
             return
@@ -208,6 +219,7 @@ class TradeJournal:
             "exit_reason": exit_reason,
             "duration_seconds": duration_seconds,
             "broker_confirmed": 1 if broker_confirmed else 0 if broker_confirmed is not None else None,
+            "run_tag": run_tag,
         }
 
         with self._connect() as conn:
@@ -222,7 +234,8 @@ class TradeJournal:
                     realized_pnl_ccy,
                     exit_reason,
                     duration_seconds,
-                    broker_confirmed
+                    broker_confirmed,
+                    run_tag
                 ) VALUES (
                     :trade_id,
                     :exit_timestamp_utc,
@@ -232,7 +245,8 @@ class TradeJournal:
                     :realized_pnl_ccy,
                     :exit_reason,
                     :duration_seconds,
-                    :broker_confirmed
+                    :broker_confirmed,
+                    :run_tag
                 )
                 ON CONFLICT(trade_id) DO UPDATE SET
                     exit_timestamp_utc=excluded.exit_timestamp_utc,
@@ -245,7 +259,8 @@ class TradeJournal:
                     broker_confirmed=CASE
                         WHEN excluded.broker_confirmed IS NOT NULL THEN excluded.broker_confirmed
                         ELSE trades.broker_confirmed
-                    END;
+                    END,
+                    run_tag=COALESCE(excluded.run_tag, trades.run_tag);
                 """,
                 payload,
             )

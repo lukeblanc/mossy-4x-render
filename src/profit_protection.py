@@ -1130,6 +1130,7 @@ class ProfitProtection:
                     exit_reason=summary["reason"],  # type: ignore[arg-type]
                     duration_seconds=int(summary["duration_sec"] or 0),  # type: ignore[arg-type]
                     broker_confirmed=closed_by == "broker_confirmed",
+                    run_tag=None,
                 )
             except Exception:
                 # Journal failures must never block trade lifecycle.

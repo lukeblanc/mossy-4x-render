@@ -34,6 +34,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
+MINI_RUN_TAG = "MINI_RUN"
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
@@ -209,7 +210,7 @@ config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
 config["use_macd_confirmation"] = _as_bool(
     os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
 )
-config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "STRICT").upper()
+config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "SOFT").upper()  # MINI-RUN: default to SOFT for boundary-friendly entries
 config["session_off_session_vol_ratio"] = float(
     os.getenv("SESSION_OFF_SESSION_VOL_RATIO", config.get("session_off_session_vol_ratio", 1.25))
 )
@@ -924,6 +925,7 @@ async def decision_cycle() -> None:
                         spread_at_entry=spread_pips,
                         session_id=session_id_label,
                         session_mode=session_decision.mode,
+                        run_tag=MINI_RUN_TAG,
                         gating_flags=gating_flags,
                         indicators_snapshot=indicators_snapshot,
                     )

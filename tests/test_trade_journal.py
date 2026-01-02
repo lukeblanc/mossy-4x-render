@@ -8,7 +8,7 @@ from src.trade_journal import TradeJournal
 def _row_for(conn: sqlite3.Connection, trade_id: str):
     return conn.execute(
         "SELECT timestamp_utc, instrument, spread_at_entry, gating_flags, indicators_snapshot, "
-        "exit_timestamp_utc, max_profit_ccy, realized_pnl_ccy, exit_reason, duration_seconds, broker_confirmed "
+        "exit_timestamp_utc, max_profit_ccy, realized_pnl_ccy, exit_reason, duration_seconds, broker_confirmed, run_tag "
         "FROM trades WHERE trade_id=?",
         (trade_id,),
     ).fetchone()
@@ -30,6 +30,7 @@ def test_trade_journal_entry_and_exit(tmp_path):
         spread_at_entry=0.12,
         session_id="LONDON",
         session_mode="STRICT",
+        run_tag="MINI_RUN",
         gating_flags={"session_ok": True, "risk_ok": True, "spread_ok": True},
         indicators_snapshot={"rsi": 55.5, "atr": 0.0007},
     )
@@ -43,6 +44,7 @@ def test_trade_journal_entry_and_exit(tmp_path):
         assert gating["session_ok"] is True
         indicators = json.loads(row[4])
         assert indicators["rsi"] == 55.5
+        assert row[11] == "MINI_RUN"
 
     exit_ts = entry_ts + timedelta(minutes=15)
     journal.record_exit(
@@ -55,6 +57,7 @@ def test_trade_journal_entry_and_exit(tmp_path):
         exit_reason="TRAIL",
         duration_seconds=900,
         broker_confirmed=True,
+        run_tag="MINI_RUN",
     )
 
     with sqlite3.connect(db_path) as conn:
