@@ -10,6 +10,7 @@ AWST = timezone(timedelta(hours=8))
 STRICT = "STRICT"
 EXTENDED = "EXTENDED"
 ALWAYS = "ALWAYS"
+SOFT = "SOFT"
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class SessionDecision:
 def _mode_from_env(mode: str | None) -> str:
     env_mode = os.getenv("SESSION_MODE")
     label = (env_mode or mode or STRICT).strip().upper()
-    if label in {STRICT, EXTENDED, ALWAYS}:
+    if label in {STRICT, EXTENDED, ALWAYS, SOFT}:
         return label
     return STRICT
 
@@ -104,6 +105,20 @@ def current_session(now_utc: datetime, *, mode: str | None = None) -> SessionSna
         if session:
             return session
     return None
+
+
+def _near_session_window(now_utc: datetime, *, buffer_minutes: float) -> bool:
+    """Return True when now_utc is within the buffer around any configured session start/end."""
+
+    awst_now = now_utc.astimezone(AWST)
+    buffer = timedelta(minutes=max(buffer_minutes, 0.0))
+    for name, start, end in _windows_from_env():
+        for day_offset in (0, -1, 1):
+            anchor_day = (awst_now.date() + timedelta(days=day_offset))
+            start_dt, end_dt = _window_bounds(anchor_day, start, end)
+            if abs(start_dt - awst_now) <= buffer or abs(end_dt - awst_now) <= buffer:
+                return True
+    return False
 
 
 _last_session: SessionSnapshot | None = None
@@ -166,14 +181,23 @@ def session_decision(
             reason=reason,
         )
 
-    if normalized_mode == EXTENDED:
+    if normalized_mode in {EXTENDED, SOFT}:
         if in_session:
             allowed = True
         else:
             low_vol = _low_volatility(atr, atr_baseline, max_ratio=max_off_session_vol_ratio)
             trend_ok = bool(trend_aligned)
             allowed = low_vol and trend_ok
+            near_window = True
+            if normalized_mode == SOFT:
+                near_window = _near_session_window(
+                    now_utc,
+                    buffer_minutes=float(os.getenv("SESSION_SOFT_BUFFER_MINUTES", 60.0)),
+                )
+                allowed = allowed and near_window
             reason = "off-session-conditional" if not allowed else None
+            if normalized_mode == SOFT and not near_window:
+                reason = "soft-boundary-only"
         return SessionDecision(
             allowed=allowed,
             in_session=in_session,
@@ -210,4 +234,5 @@ __all__ = [
     "STRICT",
     "EXTENDED",
     "ALWAYS",
+    "SOFT",
 ]

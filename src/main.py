@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import math
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
@@ -25,12 +26,15 @@ from src.risk_setup import (
     build_risk_manager,
     resolve_state_dir,
 )
+from src.trade_journal import TradeJournal, default_journal_path
 
 VERSION = "v1.6.1"
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
+journal = TradeJournal(default_journal_path(DATA_DIR))
+MINI_RUN_TAG = "MINI_RUN"
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
@@ -206,7 +210,7 @@ config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
 config["use_macd_confirmation"] = _as_bool(
     os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
 )
-config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "STRICT").upper()
+config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "SOFT").upper()  # MINI-RUN: default to SOFT for boundary-friendly entries
 config["session_off_session_vol_ratio"] = float(
     os.getenv("SESSION_OFF_SESSION_VOL_RATIO", config.get("session_off_session_vol_ratio", 1.25))
 )
@@ -320,6 +324,7 @@ def _profit_guard_for_mode(mode: str, broker_instance: Broker) -> ProfitProtecti
         aggressive=aggressive_mode,
         trailing=trailing_config,
         time_stop=config["time_stop"],
+        journal=journal,
     )
 
 
@@ -773,7 +778,7 @@ async def decision_cycle() -> None:
             except AttributeError:
                 spread_pips = None
 
-            ok_to_open, reason = risk.should_open(
+            ok_to_open, risk_reason = risk.should_open(
                 now_utc,
                 equity,
                 open_trades,
@@ -782,12 +787,12 @@ async def decision_cycle() -> None:
             )
             if not ok_to_open:
                 print(
-                    f"[TRADE] Skipping {evaluation.instrument} due to {reason}",
+                    f"[TRADE] Skipping {evaluation.instrument} due to {risk_reason}",
                     flush=True,
                 )
-                if reason == "max-positions":
+                if risk_reason == "max-positions":
                     suppression_counters["blocked_max_positions"] += 1
-                elif reason == "spread-too-wide":
+                elif risk_reason == "spread-too-wide":
                     suppression_counters["blocked_spread"] += 1
                 else:
                     suppression_counters["blocked_risk"] += 1
@@ -885,12 +890,52 @@ async def decision_cycle() -> None:
                 entry_price=entry_price,
             )
             if result.get("status") == "SENT":
+                sl_price, tp_price = _calc_exit_prices(evaluation.signal, entry_price, sl_distance, tp_distance)
+                ticket = _order_ticket(result) or f"local-{uuid.uuid4().hex}"
+                session_id_label = "OFF_SESSION"
+                if active_session:
+                    session_id_label = (active_session.name or "SESSION").upper()
+                elif session_decision.in_session:
+                    session_id_label = "SESSION"
+                indicators_snapshot = {
+                    "rsi": diagnostics.get("rsi"),
+                    "atr": diagnostics.get("atr"),
+                    "ema50": diagnostics.get("ema_trend_fast"),
+                    "ema200": diagnostics.get("ema_trend_slow"),
+                    "ema_fast": diagnostics.get("ema_fast"),
+                    "ema_slow": diagnostics.get("ema_slow"),
+                }
+                gating_flags = {
+                    "session_ok": session_decision.allowed,
+                    "spread_ok": risk_reason != "spread-too-wide",
+                    "risk_ok": ok_to_open,
+                    "trend_ok": trend_ok,
+                    "xau_guard_ok": not (xau_blocked or xau_guard_block),
+                }
+                try:
+                    journal.record_entry(
+                        trade_id=ticket,
+                        timestamp_utc=now_utc,
+                        instrument=evaluation.instrument,
+                        side=evaluation.signal,
+                        units=units,
+                        entry_price=entry_price,
+                        stop_loss_price=sl_price,
+                        take_profit_price=tp_price,
+                        spread_at_entry=spread_pips,
+                        session_id=session_id_label,
+                        session_mode=session_decision.mode,
+                        run_tag=MINI_RUN_TAG,
+                        gating_flags=gating_flags,
+                        indicators_snapshot=indicators_snapshot,
+                    )
+                except Exception:
+                    # Journal failures must not block live execution.
+                    pass
                 engine.mark_trade(evaluation.instrument)
-                open_trades.append({"instrument": evaluation.instrument})
+                open_trades.append({"instrument": evaluation.instrument, "id": ticket})
                 risk.register_entry(now_utc, evaluation.instrument)
                 suppression_counters["signals_executed"] += 1
-                sl_price, tp_price = _calc_exit_prices(evaluation.signal, entry_price, sl_distance, tp_distance)
-                ticket = _order_ticket(result)
                 print(
                     f"[ORDER] ticket={ticket or 'n/a'} instrument={evaluation.instrument} "
                     f"sl={ 'n/a' if sl_price is None else f'{sl_price:.5f}'} "
