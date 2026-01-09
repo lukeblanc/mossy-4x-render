@@ -13,6 +13,7 @@ from app.broker import Broker
 from app.config import settings
 from app.health import watchdog
 from app.strategy import decide
+from app.dashboard import send_bot_status
 from src.risk_setup import (
     build_profit_protection,
     build_risk_manager,
@@ -347,6 +348,8 @@ async def decision_tick():
 async def runner():
     """Main runner scheduling heartbeat and decision tasks and running watchdog."""
     _startup_checks()
+    send_bot_status("RUNNING")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(heartbeat, "interval", seconds=settings.HEARTBEAT_SECONDS)
     scheduler.add_job(decision_tick, "interval", seconds=settings.DECISION_SECONDS)
