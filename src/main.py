@@ -14,6 +14,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.broker import Broker
 from app.health import watchdog
+from app.dashboard import send_snapshot
+
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
 import src.profit_protection as profit_protection
@@ -954,6 +956,10 @@ async def decision_cycle() -> None:
 
 async def runner() -> None:
     _startup_checks()
+
+    equity = broker.account_equity()
+    send_snapshot("luke", equity)
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(heartbeat, "interval", minutes=1)
     scheduler.add_job(decision_cycle, "interval", minutes=1)
@@ -963,7 +969,6 @@ async def runner() -> None:
     await decision_cycle()
     while True:
         await asyncio.sleep(3600)
-
 
 if __name__ == "__main__":
     asyncio.run(runner())
