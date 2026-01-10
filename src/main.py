@@ -14,8 +14,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.broker import Broker
 from app.health import watchdog
-from app.dashboard import send_snapshot
-
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
 import src.profit_protection as profit_protection
