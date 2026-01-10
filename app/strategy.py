@@ -15,6 +15,16 @@ ASIA_ADX_THRESHOLD = 25.0
 ASIA_SIZE_MULTIPLIER = 0.5
 
 
+def _pip_size(instrument: str) -> float:
+    if instrument.endswith("JPY"):
+        return 0.01
+    if instrument.startswith("XAU"):
+        return 0.1
+    if instrument.startswith("XAG"):
+        return 0.01
+    return 0.0001
+
+
 def _current_session(now_utc: datetime) -> str:
     """Return the trading session label based on the UTC hour."""
 
@@ -234,6 +244,7 @@ def decide() -> Tuple[Signal, str, Dict]:
     rsi_val = _rsi(closes, rsi_len)
     atr_val = _atr(highs, lows, closes, atr_len)
     adx_val = _adx(highs, lows, closes, adx_len)
+    pip_size = _pip_size(settings.INSTRUMENT)
 
     now_utc = datetime.now(timezone.utc)
     allowed, size_mult, session = _session_gate(now_utc, adx_val)
@@ -245,6 +256,13 @@ def decide() -> Tuple[Signal, str, Dict]:
         "adx": adx_val,
         "session": session,
         "size_multiplier": size_mult,
+        "close": closes[-1],
+        "high": highs[-1],
+        "low": lows[-1],
+        "closes": closes[-5:],
+        "highs": highs[-5:],
+        "lows": lows[-5:],
+        "pip_size": pip_size,
     }
 
     if not allowed:

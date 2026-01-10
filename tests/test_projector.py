@@ -24,6 +24,10 @@ def sample_candles() -> List[Dict[str, float]]:
     ]
 
 
+def _allow_session_decision():
+    return main.session_filter.SessionDecision(True, True, None, "STRICT")
+
+
 def test_project_market_generates_bullish_projection(monkeypatch, sample_candles):
     monkeypatch.setenv("PROJECTOR_HORIZON", "4")
     monkeypatch.setenv("PROJECTOR_ATR_LENGTH", "3")
@@ -87,10 +91,10 @@ def test_projector_called_when_enabled(monkeypatch, capfd):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return atr * 1.5 if atr else 0.0
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return atr * 3.0 if atr else 0.0
 
         def register_entry(self, *args, **kwargs):
@@ -143,6 +147,9 @@ def test_projector_called_when_enabled(monkeypatch, capfd):
                         "rsi": 55.0,
                         "atr": 0.01,
                         "close": 1.1234,
+                        "atr_baseline_50": 0.01,
+                        "ema_trend_fast": 1.2,
+                        "ema_trend_slow": 1.1,
                     },
                     reason="bullish",
                     market_active=True,
@@ -179,7 +186,7 @@ def test_projector_called_when_enabled(monkeypatch, capfd):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main.position_sizer, "units_for_risk", lambda *args, **kwargs: 100)
     monkeypatch.setattr(main, "project_market", fake_project)
 
@@ -206,10 +213,10 @@ def test_projector_not_called_when_disabled(monkeypatch, capfd):
         def should_open(self, *args, **kwargs):
             return True, "ok"
 
-        def sl_distance_from_atr(self, atr):
+        def sl_distance_from_atr(self, atr, instrument=None):
             return atr * 1.5 if atr else 0.0
 
-        def tp_distance_from_atr(self, atr):
+        def tp_distance_from_atr(self, atr, instrument=None):
             return atr * 3.0 if atr else 0.0
 
         def register_entry(self, *args, **kwargs):
@@ -262,6 +269,9 @@ def test_projector_not_called_when_disabled(monkeypatch, capfd):
                         "rsi": 55.0,
                         "atr": 0.01,
                         "close": 1.1234,
+                        "atr_baseline_50": 0.01,
+                        "ema_trend_fast": 1.2,
+                        "ema_trend_slow": 1.1,
                     },
                     reason="bullish",
                     market_active=True,
@@ -294,7 +304,7 @@ def test_projector_not_called_when_disabled(monkeypatch, capfd):
     monkeypatch.setattr(main, "risk", dummy_risk)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
     monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
-    monkeypatch.setattr(main.session_filter, "is_entry_session", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
     monkeypatch.setattr(main.position_sizer, "units_for_risk", lambda *args, **kwargs: 100)
     monkeypatch.setattr(main, "project_market", fake_project)
 

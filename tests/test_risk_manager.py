@@ -146,6 +146,90 @@ def test_demo_profit_cap_blocks_and_resets_next_day(state_dir, capsys):
     assert manager.state.daily_profit_cap_hit is False
 
 
+def test_balance_adjustment_shifts_baselines(state_dir, capsys):
+    manager = RiskManager(
+        {
+            "equity_adjustment_pct": 0.05,
+            "equity_adjustment_abs": 20.0,
+            "daily_profit_target_usd": 5.0,
+        },
+        mode="paper",
+        demo_mode=True,
+    )
+    now = _utc(2024, 1, 1, 0, 0)
+
+    ok, reason = manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+    pre_adjust_daily_pl = 1_000.0 - manager.state.day_start_equity
+    capsys.readouterr()
+
+    adjusted_now = now + timedelta(hours=1)
+    ok, reason = manager.should_open(adjusted_now, 1_060.0, [], "EUR_USD", 0.2)
+    log = capsys.readouterr().out
+
+    assert ok is True
+    assert reason == "ok"
+    assert "[EQUITY-ADJUST][WARN]" in log
+    assert manager.state.day_start_equity == pytest.approx(1_060.0)
+    assert manager.state.day_start_equity_utc == pytest.approx(1_060.0)
+    assert manager.state.week_start_equity == pytest.approx(1_060.0)
+    assert manager.state.daily_profit_cap_hit is False
+    post_adjust_daily_pl = 1_060.0 - manager.state.day_start_equity
+    assert pre_adjust_daily_pl == pytest.approx(post_adjust_daily_pl)
+
+
+def test_balance_adjustment_skips_when_positions_open(state_dir):
+    manager = RiskManager(
+        {
+            "equity_adjustment_pct": 0.05,
+            "equity_adjustment_abs": 20.0,
+        },
+        mode="paper",
+    )
+    now = _utc(2024, 1, 1, 0, 0)
+
+    ok, reason = manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+
+    open_positions = [{"instrument": "EUR_USD"}]
+    later = now + timedelta(minutes=30)
+    ok, reason = manager.should_open(later, 1_100.0, open_positions, "EUR_USD", 0.2)
+
+    assert ok is True
+    assert reason == "ok"
+    assert manager.state.day_start_equity == pytest.approx(1_000.0)
+    assert manager.state.week_start_equity == pytest.approx(1_000.0)
+
+
+def test_startup_reset_applies_in_demo(state_dir, capsys):
+    manager = RiskManager({}, mode="paper", demo_mode=True)
+
+    manager.startup_daily_reset(1_234.0, open_positions_count=0)
+    log = capsys.readouterr().out
+
+    assert "[STARTUP-RESET][WARN]" in log
+    assert manager.state.day_start_equity == pytest.approx(1_234.0)
+    assert manager.state.day_start_equity_utc == pytest.approx(1_234.0)
+    assert manager.state.peak_equity_today == pytest.approx(1_234.0)
+    assert manager.state.daily_pl == pytest.approx(0.0)
+    assert manager.state.drawdown_pct == pytest.approx(0.0)
+    assert manager.state.daily_profit_cap_hit is False
+    assert manager.state.daily_loss_cap_hit is False
+
+
+def test_startup_reset_live_requires_no_open_positions(state_dir):
+    manager = RiskManager({}, mode="live")
+
+    manager.startup_daily_reset(2_000.0, open_positions_count=1)
+    assert manager.state.day_start_equity is None
+
+    manager.startup_daily_reset(2_000.0, open_positions_count=0)
+    assert manager.state.day_start_equity == pytest.approx(2_000.0)
+    assert manager.state.peak_equity_today == pytest.approx(2_000.0)
+
+
 def test_rollover_window_blocks(state_dir):
     manager = RiskManager(
         {
@@ -201,22 +285,61 @@ def test_rollover_preserves_realized_pl_when_equity_missing(state_dir):
     assert manager.state.daily_realized_pl == pytest.approx(0.0)
 
 
-def test_default_atr_stop_multiplier_is_1_8(state_dir):
+def test_default_atr_multipliers_are_applied(state_dir):
     manager = RiskManager({}, mode="paper")
 
-    assert manager.atr_stop_mult == pytest.approx(1.8)
-    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.018)
-
-
-def test_atr_stop_multiplier_clamps_high_values(state_dir):
-    manager = RiskManager({"atr_stop_mult": 2.75}, mode="paper")
-
-    assert manager.atr_stop_mult == pytest.approx(1.8)
-    assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.018)
-
-
-def test_atr_stop_multiplier_respects_lower_values(state_dir):
-    manager = RiskManager({"atr_stop_mult": 1.2}, mode="paper")
-
     assert manager.atr_stop_mult == pytest.approx(1.2)
+    assert manager.tp_atr_mult == pytest.approx(1.0)
     assert manager.sl_distance_from_atr(0.01) == pytest.approx(0.012)
+    assert manager.tp_distance_from_atr(0.01) == pytest.approx(0.01)
+
+
+def test_instrument_atr_overrides(state_dir):
+    manager = RiskManager(
+        {
+            "sl_atr_mult": 1.2,
+            "tp_atr_mult": 1.0,
+            "instrument_atr_multipliers": {
+                "XAU_USD": {"sl_atr_mult": 1.6, "tp_atr_mult": 0.8}
+            },
+        },
+        mode="paper",
+    )
+
+    assert manager.sl_distance_from_atr(0.5, instrument="EUR_USD") == pytest.approx(0.6)
+    assert manager.tp_distance_from_atr(0.5, instrument="EUR_USD") == pytest.approx(0.5)
+
+    assert manager.sl_distance_from_atr(0.5, instrument="XAU_USD") == pytest.approx(0.8)
+    assert manager.tp_distance_from_atr(0.5, instrument="XAU_USD") == pytest.approx(0.4)
+
+
+def test_max_concurrent_positions_default_and_env_override(monkeypatch, state_dir):
+    # Default is 3
+    default_manager = RiskManager({}, mode="paper")
+    now = _utc(2024, 1, 1, 0, 0)
+    open_trades = [{"instrument": "EUR_USD"}, {"instrument": "AUD_USD"}, {"instrument": "GBP_USD"}]
+    ok, reason = default_manager.should_open(now, 10_000.0, open_trades, "USD_JPY", 0.1)
+    assert ok is False
+    assert reason == "max-positions"
+
+    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "2")
+    env_manager = RiskManager({}, mode="paper")
+    ok, reason = env_manager.should_open(now, 10_000.0, open_trades[:2], "USD_JPY", 0.1)
+    assert ok is False
+    assert reason == "max-positions"
+
+
+def test_daily_trade_cap_blocks_and_resets(state_dir):
+    manager = RiskManager({"max_trades_per_day": 2}, mode="paper")
+    now = _utc(2024, 1, 1, 9, 0)
+
+    manager.register_entry(now, "EUR_USD")
+    manager.register_entry(now + timedelta(minutes=5), "GBP_USD")
+
+    ok, reason = manager.should_open(now + timedelta(minutes=10), 10_000.0, [], "AUD_USD", 0.1)
+    assert ok is False
+    assert reason == "daily-trade-cap"
+
+    next_day = now + timedelta(days=1)
+    ok, reason = manager.should_open(next_day, 10_000.0, [], "AUD_USD", 0.1)
+    assert ok is True

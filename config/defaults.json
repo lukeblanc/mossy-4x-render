@@ -2,6 +2,10 @@
   "heartbeat_seconds": 30,
   "decision_seconds": 60,
   "timeframe": "M5",
+  "session_mode": "SOFT",
+  "session_mode_note": "STRICT: trade only during configured sessions; EXTENDED|SOFT: allow low-volatility, trend-aligned off-session entries; ALWAYS: trade with reduced risk off-session",
+  "session_off_session_vol_ratio": 1.25,
+  "session_off_session_risk_scale": 0.5,
   "candles_to_fetch": 200,
   "order_size": 7500,
   "account_balance": 1500,
@@ -10,9 +14,15 @@
   "rsi_length": 14,
   "rsi_buy": 52,
   "rsi_sell": 48,
+  "rsi_deadband": 1.0,
   "adx_filter": 20,
   "atr_length": 14,
   "min_atr": 0.00005,
+  "xau_atr_guard_ratio": 1.8,
+  "xau_atr_guard_action": "skip",
+  "xau_atr_guard_size_scale": 0.5,
+  "xau_atr_guard_note": "Skip or scale position size when XAU_USD ATR exceeds baseline * guard ratio",
+  "use_macd_confirmation": false,
   "instruments": [
     "EUR_USD",
     "AUD_USD",
@@ -20,7 +30,7 @@
     "USD_JPY",
     "XAU_USD"
   ],
-  "max_open_trades": 1,
+  "max_open_trades": 3,
   "risk_per_trade": 0.08,
   "cooldown_minutes": 2,
   "risk": {
@@ -29,12 +39,19 @@
     "allow_trading_above_target": true,
     "equity_floor": 1000.0,
     "risk_per_trade_pct": 0.0025,
-    "max_concurrent_positions": 1,
+    "max_concurrent_positions": 3,
     "cooldown_minutes": 45,
     "daily_loss_cap_pct": 0.01,
     "weekly_loss_cap_pct": 0.03,
-    "atr_stop_mult": 1.8,
+    "sl_atr_mult": 1.2,
+    "tp_atr_mult": 1.0,
     "atr_period": 14,
+    "instrument_atr_multipliers": {
+      "XAU_USD": {
+        "sl_atr_mult": 1.6,
+        "tp_atr_mult": 0.8
+      }
+    },
     "spread_pips_limit": {
       "EUR_USD": 1.5,
       "AUD_USD": 1.8,
@@ -46,6 +63,27 @@
     "rollover_quiet_awst": {
       "start": "04:55",
       "end": "05:05"
-    }
+    },
+    "max_trades_per_day": 5,
+    "equity_adjustment_pct": 0.05,
+    "equity_adjustment_abs": 20.0,
+    "EQUITY_ADJUSTMENT_PCT": 0.05,
+    "EQUITY_ADJUSTMENT_ABS": 20.0
+  },
+  "trailing": {
+    "arm_pips": 0.0,
+    "giveback_pips": 0.0,
+    "arm_ccy": 1.0,
+    "giveback_ccy": 0.5,
+    "use_pips": false,
+    "be_arm_pips": 0.0,
+    "be_offset_pips": 0.0,
+    "min_check_interval_sec": 0.0,
+    "soft_scalp_mode": false
+  },
+  "time_stop": {
+    "minutes": 90,
+    "min_pips": 2.0,
+    "xau_atr_mult": 0.35
   }
 }

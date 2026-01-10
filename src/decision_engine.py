@@ -6,9 +6,10 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import httpx
+from src.indicators import calculate_macd
 
 PRACTICE_BASE_URL = "https://api-fxpractice.oanda.com/v3"
 
@@ -342,29 +343,63 @@ class DecisionEngine:
 
         ema_fast_len = int(self.config.get("ema_fast", 12))
         ema_slow_len = int(self.config.get("ema_slow", 26))
+        ema_trend_fast_len = int(self.config.get("ema_trend_fast", 50))
+        ema_trend_slow_len = int(self.config.get("ema_trend_slow", 200))
         rsi_len = int(self.config.get("rsi_length", 14))
         atr_len = int(self.config.get("atr_length", 14))
 
         ema_fast_series = self._ema(closes, ema_fast_len)
         ema_slow_series = self._ema(closes, ema_slow_len)
+        ema_trend_fast_series = self._ema(closes, ema_trend_fast_len)
+        ema_trend_slow_series = self._ema(closes, ema_trend_slow_len)
         ema_fast = ema_fast_series[-1] if ema_fast_series else math.nan
         ema_slow = ema_slow_series[-1] if ema_slow_series else math.nan
+        ema_trend_fast = ema_trend_fast_series[-1] if ema_trend_fast_series else math.nan
+        ema_trend_slow = ema_trend_slow_series[-1] if ema_trend_slow_series else math.nan
         rsi_val = self._rsi(closes, rsi_len)
-        atr_val = self._atr(highs, lows, closes, atr_len)
+        rsi_prev = self._rsi(closes[:-1], rsi_len)
+        rsi_slope = math.nan
+        if not math.isnan(rsi_val) and not math.isnan(rsi_prev):
+            rsi_slope = rsi_val - rsi_prev
+        atr_val, atr_baseline = self._atr_with_baseline(highs, lows, closes, atr_len, baseline_window=50)
+        macd_line, macd_signal, macd_histogram = calculate_macd(
+            closes,
+            fast_length=12,
+            slow_length=26,
+            signal_length=9,
+        )
+        macd_line_prev, macd_signal_prev, macd_histogram_prev = calculate_macd(
+            closes[:-1],
+            fast_length=12,
+            slow_length=26,
+            signal_length=9,
+        )
 
         last_close = closes[-1] if closes else math.nan
         return {
             "ema_fast": ema_fast,
             "ema_slow": ema_slow,
+            "ema_trend_fast": ema_trend_fast,
+            "ema_trend_slow": ema_trend_slow,
             "rsi": rsi_val,
+            "rsi_prev": rsi_prev,
+            "rsi_slope": rsi_slope,
             "atr": atr_val,
+            "atr_baseline_50": atr_baseline,
             "close": last_close,
+            "macd_line": macd_line,
+            "macd_signal": macd_signal,
+            "macd_histogram": macd_histogram,
+            "macd_histogram_prev": macd_histogram_prev,
         }
 
     def _generate_signal(self, diagnostics: Dict[str, float]) -> (str, str):
         ema_fast = diagnostics.get("ema_fast", math.nan)
         ema_slow = diagnostics.get("ema_slow", math.nan)
         rsi_val = diagnostics.get("rsi", math.nan)
+        rsi_slope = diagnostics.get("rsi_slope", math.nan)
+        close_price = diagnostics.get("close", math.nan)
+        ema_trend_fast = diagnostics.get("ema_trend_fast", math.nan)
         atr_val = diagnostics.get("atr", 0.0)
 
         min_atr = float(self.config.get("min_atr", 0.0))
@@ -375,11 +410,29 @@ class DecisionEngine:
 
         rsi_buy = float(self.config.get("rsi_buy", 52))
         rsi_sell = float(self.config.get("rsi_sell", 48))
+        rsi_deadband = float(self.config.get("rsi_deadband", 1.0))
+        if not math.isnan(rsi_val) and abs(rsi_val - 50.0) < rsi_deadband:
+            return "HOLD", "rsi-jitter"
+
+        slope_rising = not math.isnan(rsi_slope) and rsi_slope >= 0
+        slope_falling = not math.isnan(rsi_slope) and rsi_slope <= 0
+        close_above_ema = (
+            not math.isnan(close_price)
+            and not math.isnan(ema_trend_fast)
+            and close_price >= ema_trend_fast
+        )
+        close_below_ema = (
+            not math.isnan(close_price)
+            and not math.isnan(ema_trend_fast)
+            and close_price <= ema_trend_fast
+        )
 
         if ema_fast > ema_slow and rsi_val >= rsi_buy:
-            return "BUY", "bullish"
+            if slope_rising or close_above_ema:
+                return "BUY", "bullish"
         if ema_fast < ema_slow and rsi_val <= rsi_sell:
-            return "SELL", "bearish"
+            if slope_falling or close_below_ema:
+                return "SELL", "bearish"
         return "HOLD", "neutral"
 
     # ------------------------------------------------------------------
@@ -414,19 +467,46 @@ class DecisionEngine:
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
-    def _atr(
-        self, highs: List[float], lows: List[float], closes: List[float], length: int
-    ) -> float:
+    def _atr_with_baseline(
+        self,
+        highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        length: int,
+        *,
+        baseline_window: int = 50,
+    ) -> Tuple[float, float]:
         if length <= 0 or len(highs) < length + 1:
-            return math.nan
+            return math.nan, math.nan
+
         true_ranges: List[float] = []
-        for i in range(1, length + 1):
+        for i in range(1, len(highs)):
             high = highs[-i]
             low = lows[-i]
             prev_close = closes[-(i + 1)]
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            true_ranges.append(tr)
-        return sum(true_ranges) / length
+            true_ranges.insert(0, tr)
+
+        atr_values: List[float] = []
+        if true_ranges:
+            rolling_atr = true_ranges[0]
+            atr_values.append(rolling_atr)
+            k = 2 / (length + 1)
+            for tr in true_ranges[1:]:
+                rolling_atr = tr * k + rolling_atr * (1 - k)
+                atr_values.append(rolling_atr)
+
+        if len(atr_values) < 1:
+            return math.nan, math.nan
+
+        current_atr = atr_values[-1]
+        baseline_slice = atr_values[-baseline_window:] if baseline_window > 0 else atr_values
+        if baseline_slice:
+            baseline_atr = sum(baseline_slice) / len(baseline_slice)
+        else:
+            baseline_atr = math.nan
+
+        return current_atr, baseline_atr
 
 
 __all__ = ["DecisionEngine", "Evaluation", "DEFAULT_INSTRUMENTS"]
