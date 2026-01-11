@@ -687,7 +687,11 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
         flush=True,
     )
     
-    
+
+
+
+
+  async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
 
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
@@ -703,10 +707,7 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
     except Exception:
         trade_count = "unknown"
 
-    print(
-        f"[JOURNAL] total_trades={trade_count}",
-        flush=True,
-    )
+    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
 
     BOT_STATE.update({
         "status": "running",
@@ -719,6 +720,7 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
         f"[HEARTBEAT] {ts_local} equity={equity:.2f} open_trades={open_count}",
         flush=True,
     )
+  
 
 
 
@@ -1002,13 +1004,13 @@ async def runner() -> None:
     await heartbeat()
     await decision_cycle()
     while True:
-        await asyncio.sleep(3600)
+       await asyncio.sleep(3600)
 def start_status_server():
     app = Flask(__name__)
 
     @app.route("/status", methods=["GET"])
     def status():
-        return jsonify(BOT_STATE)
+    return jsonify(BOT_STATE)
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
