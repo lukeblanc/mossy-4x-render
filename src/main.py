@@ -14,6 +14,14 @@ def send_snapshot(user: str, equity: float) -> None:
     is not configured.
     """
     return
+    BOT_STATE = {
+    "status": "starting",
+    "equity": None,
+    "drawdown_pct": None,
+    "open_trades": 0,
+    "last_heartbeat": None,
+}
+
 
 
 from datetime import datetime, timedelta, timezone
