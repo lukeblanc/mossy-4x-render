@@ -690,18 +690,27 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
 
 async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
+
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
     equity = broker.account_equity()
     open_count = len(_open_trades_state())
-    drawdown = None
-        trade_count = getattr(journal, "count", lambda: "unknown")()
+
+    # journal count (safe)
+    try:
+        trade_count = journal.count()
+    except Exception:
+        trade_count = "unknown"
+
     print(f"[JOURNAL] total_trades={trade_count}", flush=True)
 
+    drawdown = None
     if risk.state.peak_equity:
         drawdown = risk.state.peak_equity - equity
+
     dd_pct = None
     if risk.state.peak_equity and risk.state.peak_equity > 0:
         dd_pct = drawdown / risk.state.peak_equity if drawdown is not None else None
+
     dd_pct_str = f"{(dd_pct * 100):.2f}" if dd_pct is not None else "n/a"
 
     BOT_STATE.update({
@@ -712,13 +721,13 @@ async def heartbeat() -> None:
         "last_heartbeat": datetime.now(timezone.utc).isoformat(),
     })
 
-
     print(
         f"[HEARTBEAT] {ts_local} instruments={len(config.get('instruments', []))} "
         f"equity={equity:.2f} daily_pl={risk.state.daily_realized_pl:.2f} "
         f"drawdown_pct={dd_pct_str} open_trades={open_count}",
         flush=True,
     )
+
     print(
         "[SUMMARY] signals_generated={signals_generated} signals_executed={signals_executed} "
         "blocked_off_session={blocked_off_session} blocked_risk={blocked_risk} "
@@ -727,6 +736,7 @@ async def heartbeat() -> None:
         ),
         flush=True,
     )
+
 
 
 async def decision_cycle() -> None:
