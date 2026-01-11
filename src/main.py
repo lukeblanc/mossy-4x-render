@@ -685,61 +685,39 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
         f"score={bias_score_fmt} conf={confidence_fmt} "
         f"vol={volatility} range={range_fmt}",
         flush=True,
-    )
-
-
-async def heartbeat() -> None:
+    )async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
 
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
     equity = broker.account_equity()
     open_count = len(_open_trades_state())
 
-    # journal count (from file)
     trade_count = "unknown"
     try:
         journal_path = default_journal_path(DATA_DIR)
         if journal_path.exists():
-            trade_count = sum(1 for _ in journal_path.open("r", encoding="utf-8"))
+            with journal_path.open("r", encoding="utf-8") as f:
+                trade_count = sum(1 for _ in f)
     except Exception:
         trade_count = "unknown"
 
-    print(f"[JOURNAL] total_trades={trade_count} [heartbeat]", flush=True)
-
-    drawdown = None
-    if risk.state.peak_equity:
-        drawdown = risk.state.peak_equity - equity
-
-
-    dd_pct = None
-    if risk.state.peak_equity and risk.state.peak_equity > 0:
-        dd_pct = drawdown / risk.state.peak_equity if drawdown is not None else None
-
-    dd_pct_str = f"{(dd_pct * 100):.2f}" if dd_pct is not None else "n/a"
+    print(
+        f"[JOURNAL] total_trades={trade_count}",
+        flush=True,
+    )
 
     BOT_STATE.update({
         "status": "running",
         "equity": float(equity),
-        "drawdown_pct": (float(dd_pct) * 100.0) if dd_pct is not None else None,
         "open_trades": int(open_count),
         "last_heartbeat": datetime.now(timezone.utc).isoformat(),
     })
 
     print(
-        f"[HEARTBEAT] {ts_local} instruments={len(config.get('instruments', []))} "
-        f"equity={equity:.2f} daily_pl={risk.state.daily_realized_pl:.2f} "
-        f"drawdown_pct={dd_pct_str} open_trades={open_count}",
+        f"[HEARTBEAT] {ts_local} equity={equity:.2f} open_trades={open_count}",
         flush=True,
     )
 
-    print(
-        "[SUMMARY] signals_generated={signals_generated} signals_executed={signals_executed} "
-        "blocked_off_session={blocked_off_session} blocked_risk={blocked_risk} "
-        "blocked_max_positions={blocked_max_positions} blocked_spread={blocked_spread}".format(
-            **suppression_counters
-        ),
-        flush=True,
-    )
 
 
 
