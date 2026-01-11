@@ -696,21 +696,20 @@ async def heartbeat() -> None:
     open_count = len(_open_trades_state())
 
     # journal count (from file)
-trade_count = "unknown"
-try:
-    journal_path = default_journal_path(DATA_DIR)
-    if journal_path.exists():
-        trade_count = sum(1 for _ in journal_path.open("r", encoding="utf-8"))
-except Exception:
     trade_count = "unknown"
+    try:
+        journal_path = default_journal_path(DATA_DIR)
+        if journal_path.exists():
+            trade_count = sum(1 for _ in journal_path.open("r", encoding="utf-8"))
+    except Exception:
+        trade_count = "unknown"
 
-print(f"[JOURNAL] total_trades={trade_count} [heartbeat]", flush=True)
-
-
+    print(f"[JOURNAL] total_trades={trade_count} [heartbeat]", flush=True)
 
     drawdown = None
     if risk.state.peak_equity:
         drawdown = risk.state.peak_equity - equity
+
 
     dd_pct = None
     if risk.state.peak_equity and risk.state.peak_equity > 0:
