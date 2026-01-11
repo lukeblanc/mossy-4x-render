@@ -14,7 +14,9 @@ def send_snapshot(user: str, equity: float) -> None:
     is not configured.
     """
     return
-    BOT_STATE = {
+
+
+BOT_STATE = {
     "status": "starting",
     "equity": None,
     "drawdown_pct": None,
