@@ -701,7 +701,8 @@ async def heartbeat() -> None:
     except Exception:
         trade_count = "unknown"
 
-    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
+    print(f"[JOURNAL] total_trades={trade_count} [heartbeat]", flush=True)
+
 
     drawdown = None
     if risk.state.peak_equity:
