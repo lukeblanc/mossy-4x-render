@@ -686,8 +686,9 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
         f"vol={volatility} range={range_fmt}",
         flush=True,
     )
-    
-    
+
+
+async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
 
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
@@ -703,10 +704,7 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
     except Exception:
         trade_count = "unknown"
 
-    print(
-        f"[JOURNAL] total_trades={trade_count}",
-        flush=True,
-    )
+    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
 
     BOT_STATE.update({
         "status": "running",
