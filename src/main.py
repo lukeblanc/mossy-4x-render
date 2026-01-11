@@ -697,6 +697,14 @@ async def heartbeat() -> None:
     if risk.state.peak_equity and risk.state.peak_equity > 0:
         dd_pct = drawdown / risk.state.peak_equity if drawdown is not None else None
     dd_pct_str = f"{(dd_pct * 100):.2f}" if dd_pct is not None else "n/a"
+        BOT_STATE.update({
+        "status": "running",
+        "equity": float(equity),
+        "drawdown_pct": (float(dd_pct) * 100.0) if dd_pct is not None else None,
+        "open_trades": int(open_count),
+        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+    })
+
     print(
         f"[HEARTBEAT] {ts_local} instruments={len(config.get('instruments', []))} "
         f"equity={equity:.2f} daily_pl={risk.state.daily_realized_pl:.2f} "
