@@ -685,7 +685,9 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
         f"score={bias_score_fmt} conf={confidence_fmt} "
         f"vol={volatility} range={range_fmt}",
         flush=True,
-    )async def heartbeat() -> None:
+    )
+    
+    async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
 
     ts_local = datetime.now(timezone.utc).astimezone().isoformat()
