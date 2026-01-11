@@ -694,6 +694,9 @@ async def heartbeat() -> None:
     equity = broker.account_equity()
     open_count = len(_open_trades_state())
     drawdown = None
+        trade_count = getattr(journal, "count", lambda: "unknown")()
+    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
+
     if risk.state.peak_equity:
         drawdown = risk.state.peak_equity - equity
     dd_pct = None
