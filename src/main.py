@@ -335,6 +335,35 @@ risk = build_risk_manager(
     demo_mode=(mode_env == "demo"),
     state_dir=DATA_DIR,
 )
+async def heartbeat() -> None:
+    watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
+
+    ts_local = datetime.now(timezone.utc).astimezone().isoformat()
+    equity = broker.account_equity()
+    open_count = len(_open_trades_state())
+
+    trade_count = "unknown"
+    try:
+        journal_path = default_journal_path(DATA_DIR)
+        if journal_path.exists():
+            with journal_path.open("r", encoding="utf-8") as f:
+                trade_count = sum(1 for _ in f)
+    except Exception:
+        trade_count = "unknown"
+
+    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
+
+    BOT_STATE.update({
+        "status": "running",
+        "equity": float(equity),
+        "open_trades": int(open_count),
+        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+    })
+
+    print(
+        f"[HEARTBEAT] {ts_local} equity={equity:.2f} open_trades={open_count}",
+        flush=True,
+    )
 
 suppression_counters = {
     "signals_generated": 0,
@@ -691,34 +720,7 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
 
 
 
-  async def heartbeat() -> None:
-    watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
 
-    ts_local = datetime.now(timezone.utc).astimezone().isoformat()
-    equity = broker.account_equity()
-    open_count = len(_open_trades_state())
-
-    trade_count = "unknown"
-    try:
-        journal_path = default_journal_path(DATA_DIR)
-        if journal_path.exists():
-            with journal_path.open("r", encoding="utf-8") as f:
-                trade_count = sum(1 for _ in f)
-    except Exception:
-        trade_count = "unknown"
-
-    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
-
-    BOT_STATE.update({
-        "status": "running",
-        "equity": float(equity),
-        "open_trades": int(open_count),
-        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
-    })
-
-    print(
-        f"[HEARTBEAT] {ts_local} equity={equity:.2f} open_trades={open_count}",
-        flush=True,
     )
   
 
