@@ -695,13 +695,17 @@ async def heartbeat() -> None:
     equity = broker.account_equity()
     open_count = len(_open_trades_state())
 
-    # journal count (safe)
-    try:
-        trade_count = journal.count()
-    except Exception:
-        trade_count = "unknown"
+    # journal count (from file)
+trade_count = "unknown"
+try:
+    journal_path = default_journal_path(DATA_DIR)
+    if journal_path.exists():
+        trade_count = sum(1 for _ in journal_path.open("r", encoding="utf-8"))
+except Exception:
+    trade_count = "unknown"
 
-    print(f"[JOURNAL] total_trades={trade_count} [heartbeat]", flush=True)
+print(f"[JOURNAL] total_trades={trade_count} [heartbeat]", flush=True)
+
 
 
     drawdown = None
