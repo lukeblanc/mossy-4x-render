@@ -1007,6 +1007,18 @@ async def runner() -> None:
     await decision_cycle()
     while True:
         await asyncio.sleep(3600)
+def start_status_server():
+    app = Flask(__name__)
+
+    @app.route("/status", methods=["GET"])
+    def status():
+        return jsonify(BOT_STATE)
+
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+threading.Thread(target=start_status_server, daemon=True).start()
 
 if __name__ == "__main__":
     asyncio.run(runner())
