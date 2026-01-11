@@ -6,9 +6,19 @@ import os
 import sys
 import math
 import uuid
+
+def send_snapshot(user: str, equity: float) -> None:
+    """
+    Safe no-op snapshot sender.
+    Prevents runtime crashes when external snapshot transport
+    is not configured.
+    """
+    return
+
+
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Dict, List
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -20,6 +30,10 @@ import src.profit_protection as profit_protection
 from src.profit_protection import ProfitProtection
 from src import orb, session_filter
 from src import position_sizer
+
+
+
+
 from src.projector import project_market
 from src.risk_setup import (
     build_profit_protection,
