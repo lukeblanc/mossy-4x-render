@@ -709,7 +709,6 @@ async def heartbeat() -> None:
         "last_heartbeat": datetime.now(timezone.utc).isoformat(),
     })
 
-    })
 
     print(
         f"[HEARTBEAT] {ts_local} instruments={len(config.get('instruments', []))} "
