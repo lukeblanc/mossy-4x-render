@@ -715,17 +715,6 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
         f"vol={volatility} range={range_fmt}",
         flush=True,
     )
-    
-
-
-
-
-
-    )
-  
-
-
-
 
 async def decision_cycle() -> None:
     now_utc = datetime.now(timezone.utc)
@@ -1006,13 +995,15 @@ async def runner() -> None:
     await heartbeat()
     await decision_cycle()
     while True:
-       await asyncio.sleep(3600)
+        await asyncio.sleep(3600)
+
+
 def start_status_server():
     app = Flask(__name__)
 
     @app.route("/status", methods=["GET"])
     def status():
-    return jsonify(BOT_STATE)
+        return jsonify(BOT_STATE)
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
