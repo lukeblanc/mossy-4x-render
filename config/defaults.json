@@ -43,6 +43,8 @@
     "cooldown_minutes": 45,
     "daily_loss_cap_pct": 0.01,
     "weekly_loss_cap_pct": 0.03,
+    "loss_streak_limit": 3,
+    "loss_streak_pause_minutes": 45,
     "sl_atr_mult": 1.2,
     "tp_atr_mult": 1.0,
     "atr_period": 14,
