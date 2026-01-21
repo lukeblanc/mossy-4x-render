@@ -62,6 +62,7 @@ class RiskState:
     last_entry_ts_utc: Optional[datetime] = None
     last_entry_per_instrument: Dict[str, datetime] = field(default_factory=dict)
     cooldown_until: Dict[str, datetime] = field(default_factory=dict)
+    loss_streak_pause_until: Optional[datetime] = None
     peak_equity: Optional[float] = None
     last_trades: list = field(default_factory=list)
     has_hit_weekly_target: bool = False
@@ -87,6 +88,7 @@ class RiskState:
             "last_entry_ts_utc": _iso(self.last_entry_ts_utc),
             "last_entry_per_instrument": {k: _iso(v) for k, v in self.last_entry_per_instrument.items()},
             "cooldown_until": {k: _iso(v) for k, v in self.cooldown_until.items()},
+            "loss_streak_pause_until": _iso(self.loss_streak_pause_until),
             "peak_equity": self.peak_equity,
             "last_trades": list(self.last_trades),
             "has_hit_weekly_target": self.has_hit_weekly_target,
@@ -114,6 +116,7 @@ class RiskState:
             last_entry_ts_utc=_from_iso(data.get("last_entry_ts_utc")),
             last_entry_per_instrument={k: _from_iso(v) for k, v in (data.get("last_entry_per_instrument") or {}).items()},
             cooldown_until={k: _from_iso(v) for k, v in (data.get("cooldown_until") or {}).items()},
+            loss_streak_pause_until=_from_iso(data.get("loss_streak_pause_until")),
             peak_equity=_sanitize_equity(data.get("peak_equity")),
             last_trades=list(data.get("last_trades") or []),
             has_hit_weekly_target=bool(data.get("has_hit_weekly_target", False)),
@@ -183,6 +186,8 @@ class RiskManager:
         self.daily_loss_cap_pct = float(
             self.config.get("daily_loss_cap_pct", 0.02)
         )
+        self.loss_streak_limit = int(self.config.get("loss_streak_limit", 0))
+        self.loss_streak_pause_minutes = float(self.config.get("loss_streak_pause_minutes", 0.0))
         self.daily_profit_target_usd = float(
             self.config.get("daily_profit_target_usd", 5.0)
         )
@@ -329,6 +334,13 @@ class RiskManager:
         if self.state.max_drawdown_halt:
             return False, "max-drawdown"
 
+        loss_pause_end = self.state.loss_streak_pause_until
+        if loss_pause_end is not None:
+            if now_utc < loss_pause_end:
+                return False, "loss-streak-pause"
+            self.state.loss_streak_pause_until = None
+            self._save_state()
+
         if self.max_trades_per_day > 0 and self.state.daily_entry_count >= self.max_trades_per_day:
             return False, "daily-trade-cap"
 
@@ -382,6 +394,7 @@ class RiskManager:
         )
         if len(self.state.last_trades) > 50:
             self.state.last_trades = self.state.last_trades[-50:]
+        self._apply_loss_streak_pause()
         self._save_state()
 
     # ------------------------------------------------------------------
@@ -390,6 +403,24 @@ class RiskManager:
     def _remember_equity(self, equity: Optional[float]) -> None:
         """Track the latest sanitized equity value for adjustment detection."""
         self._last_equity_seen = _sanitize_equity(equity)
+
+    def _apply_loss_streak_pause(self) -> None:
+        if self.loss_streak_limit <= 0 or self.loss_streak_pause_minutes <= 0:
+            return
+        recent = list(self.state.last_trades or [])
+        if len(recent) < self.loss_streak_limit:
+            return
+        last_n = recent[-self.loss_streak_limit :]
+        if any(float(trade.get("pl", 0.0)) >= 0 for trade in last_n):
+            return
+        pause_until = datetime.now(timezone.utc) + timedelta(
+            minutes=float(self.loss_streak_pause_minutes)
+        )
+        self.state.loss_streak_pause_until = pause_until
+        print(
+            f"[RISK] Loss streak pause active until {pause_until.isoformat()}",
+            flush=True,
+        )
 
     def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0) -> None:
         """
@@ -539,6 +570,7 @@ class RiskManager:
             self.state.day_id = day_id
             self.state.day_start_equity = valid_equity
             self.state.daily_realized_pl = 0.0
+            self.state.loss_streak_pause_until = None
             if prev_day_id is not None:
                 self.state.daily_entry_count = 0
             changed = True
