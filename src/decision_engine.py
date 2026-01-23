@@ -414,8 +414,11 @@ class DecisionEngine:
         if not math.isnan(rsi_val) and abs(rsi_val - 50.0) < rsi_deadband:
             return "HOLD", "rsi-jitter"
 
-        slope_rising = not math.isnan(rsi_slope) and rsi_slope >= 0
-        slope_falling = not math.isnan(rsi_slope) and rsi_slope <= 0
+        rsi_slope_min = float(self.config.get("rsi_slope_min", 0.0))
+        if rsi_slope_min < 0:
+            rsi_slope_min = 0.0
+        slope_rising = not math.isnan(rsi_slope) and rsi_slope >= rsi_slope_min
+        slope_falling = not math.isnan(rsi_slope) and rsi_slope <= -rsi_slope_min
         close_above_ema = (
             not math.isnan(close_price)
             and not math.isnan(ema_trend_fast)
