@@ -220,7 +220,7 @@ def decide() -> Tuple[Signal, str, Dict]:
     # Enforce cooldown period
     if _last_signal_bars_remaining > 0:
         _last_signal_bars_remaining -= 1
-        return "HOLD", "cooldown", {}
+        return "HOLD", "cooldown", {"warmup_complete": True}
 
     candles = _fetch_candles()
     fast = settings.STRAT_EMA_FAST
@@ -231,7 +231,11 @@ def decide() -> Tuple[Signal, str, Dict]:
     # Need enough candles for slow EMA and indicators
     min_bars = max(fast, slow, rsi_len, atr_len, adx_len) + 2
     if not candles or len(candles) < min_bars:
-        return "HOLD", "not-enough-data", {}
+        return "HOLD", "not-enough-data", {
+            "warmup_complete": False,
+            "candles_available": len(candles),
+            "min_bars_required": min_bars,
+        }
 
     closes = [c["c"] for c in candles]
     highs = [c["h"] for c in candles]
@@ -263,6 +267,8 @@ def decide() -> Tuple[Signal, str, Dict]:
         "highs": highs[-5:],
         "lows": lows[-5:],
         "pip_size": pip_size,
+        "warmup_complete": True,
+        "timeframe": settings.STRAT_TIMEFRAME,
     }
 
     if not allowed:

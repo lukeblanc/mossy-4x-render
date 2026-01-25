@@ -1,34 +1,49 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
+import math
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.broker import Broker
 from app.config import settings
 from app.health import watchdog
+from app.observability import EventLogger, get_event_logger, health_report_payload
 from app.strategy import decide
 from app.dashboard import send_bot_status
+from src import profit_protection
 from src.risk_setup import (
     build_profit_protection,
     build_risk_manager,
     resolve_state_dir,
 )
+from src.trade_journal import TradeJournal, default_journal_path
 
 broker = Broker()
 STATE_DIR = resolve_state_dir(Path(__file__).resolve().parent.parent / "data")
 METRICS_FILE = STATE_DIR / "render_decisions.jsonl"
 SUMMARY_INTERVAL = max(1, int(settings.METRIC_SUMMARY_INTERVAL))
+EVENT_LOGGER: EventLogger = get_event_logger(STATE_DIR)
+JOURNAL = TradeJournal(default_journal_path(STATE_DIR))
+START_TS = datetime.now(timezone.utc)
+MAX_DRAWDOWN_PCT: Optional[float] = None
+CAP_HIT_TODAY = False
+COOLDOWN_RELEASE_LOGGED: Set[str] = set()
+CAP_DAY = START_TS.date()
 
 trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", "0.0"))
 trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", "0.0"))
 trail_arm_ccy = float(os.getenv("TRAIL_ARM_CCY", os.getenv("TRAIL_ARM_USD", str(profit_protection.ARM_AT_CCY))))
-trail_giveback_ccy = float(os.getenv("TRAIL_GIVEBACK_CCY", os.getenv("TRAIL_GIVEBACK_USD", str(profit_protection.GIVEBACK_CCY))))
+trail_giveback_ccy = float(
+    os.getenv("TRAIL_GIVEBACK_CCY", os.getenv("TRAIL_GIVEBACK_USD", str(profit_protection.GIVEBACK_CCY)))
+)
 be_arm_pips = float(os.getenv("BE_ARM_PIPS", "6.0"))
 be_offset_pips = float(os.getenv("BE_OFFSET_PIPS", "1.0"))
 min_check_interval_sec = float(os.getenv("TRAIL_MIN_CHECK_INTERVAL", "0.0"))
@@ -68,6 +83,7 @@ profit_guard = build_profit_protection(
     aggressive=False,
     trailing=trailing_config,
     time_stop=time_stop_config,
+    journal=JOURNAL,
 )
 
 
@@ -142,6 +158,10 @@ metrics = DecisionMetrics(METRICS_FILE, SUMMARY_INTERVAL)
 # Startup connectivity checks
 def _startup_checks():
     """Connectivity checks to verify credentials if provided."""
+    EVENT_LOGGER.log(
+        "startup",
+        {"mode": settings.MODE, "instrument": settings.INSTRUMENT, "timeframe": settings.STRAT_TIMEFRAME},
+    )
     broker.connectivity_check()
 
 
@@ -159,6 +179,66 @@ def _entry_price_from_diag(diag: Dict[str, Any]) -> Optional[float]:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _indicator_integrity(diag: Dict[str, Any]) -> tuple[bool, list[str]]:
+    issues = []
+    warmup_complete = bool(diag.get("warmup_complete"))
+    if not warmup_complete:
+        issues.append("warmup_incomplete")
+    for key in ("ema_fast", "ema_slow", "rsi", "atr"):
+        value = diag.get(key)
+        if value is None:
+            issues.append(f"{key}_missing")
+            continue
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            issues.append(f"{key}_invalid")
+    return len(issues) == 0, issues
+
+
+def _log_indicator_snapshot(diag: Dict[str, Any]) -> None:
+    EVENT_LOGGER.log(
+        "indicator_snapshot",
+        {
+            "symbol": settings.INSTRUMENT,
+            "timeframe": settings.STRAT_TIMEFRAME,
+            "ema12": diag.get("ema_fast"),
+            "ema26": diag.get("ema_slow"),
+            "rsi14": diag.get("rsi"),
+            "atr14": diag.get("atr"),
+            "candle_close": diag.get("close"),
+            "warmup_complete": bool(diag.get("warmup_complete")),
+        },
+    )
+
+
+def _log_account_snapshot(stage: str, *, equity_override: Optional[float] = None) -> Dict[str, Any]:
+    global MAX_DRAWDOWN_PCT
+    snapshot = broker.account_snapshot()
+    equity = equity_override if equity_override is not None else snapshot.get("equity")
+    peak = risk.state.peak_equity or equity
+    drawdown = None
+    drawdown_pct = None
+    if peak and equity is not None:
+        drawdown = max(float(peak) - float(equity), 0.0)
+        drawdown_pct = (drawdown / float(peak)) * 100.0 if peak else 0.0
+        if MAX_DRAWDOWN_PCT is None or drawdown_pct > MAX_DRAWDOWN_PCT:
+            MAX_DRAWDOWN_PCT = drawdown_pct
+    EVENT_LOGGER.log(
+        "account_snapshot",
+        {
+            "stage": stage,
+            "balance": snapshot.get("balance"),
+            "equity": equity,
+            "used_margin": snapshot.get("used_margin"),
+            "free_margin": snapshot.get("free_margin"),
+            "margin_level": snapshot.get("margin_level"),
+            "open_positions": snapshot.get("open_positions"),
+            "drawdown": drawdown,
+            "drawdown_pct": drawdown_pct,
+        },
+    )
+    return snapshot
 
 
 def _order_pl(result: Dict[str, Any]) -> Optional[float]:
@@ -180,6 +260,26 @@ def _order_pl(result: Dict[str, Any]) -> Optional[float]:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _order_ticket(result: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(result, dict):
+        return None
+    response = result.get("response") or {}
+    transactions = [
+        response.get("orderCreateTransaction", {}),
+        response.get("orderFillTransaction", {}),
+        response.get("orderCancelTransaction", {}),
+    ]
+    for tx in transactions:
+        if not isinstance(tx, dict):
+            continue
+        for id_key in ("id", "orderID", "orderFillTransactionID", "tradeOpenedID"):
+            value = tx.get(id_key)
+            if value:
+                return str(value)
+    last_id = response.get("lastTransactionID") or result.get("order_id")
+    return str(last_id) if last_id else None
 
 
 def _filter_closed_trades(open_trades: list[Dict[str, Any]], closed_ids: list[str]) -> list[Dict[str, Any]]:
@@ -205,7 +305,12 @@ async def heartbeat():
 
 async def decision_tick():
     """Run the strategy decision, log diagnostics, and place demo orders."""
+    global CAP_HIT_TODAY, CAP_DAY
     now_utc = datetime.now(timezone.utc)
+    if now_utc.date() != CAP_DAY:
+        CAP_DAY = now_utc.date()
+        CAP_HIT_TODAY = False
+        COOLDOWN_RELEASE_LOGGED.clear()
     equity = broker.account_equity()
     try:
         risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
@@ -225,6 +330,7 @@ async def decision_tick():
     except Exception as e:
         watchdog.record_error()
         err_ts = datetime.now(timezone.utc).astimezone().isoformat()
+        EVENT_LOGGER.log("runtime_error", {"error": str(e)})
         print(f"[ERROR] {err_ts} error={e}", flush=True)
         metrics.record(
             {
@@ -239,6 +345,7 @@ async def decision_tick():
 
     watchdog.last_decision_ts = datetime.now(timezone.utc)
     diag = diag or {}
+    _log_indicator_snapshot(diag)
     size_multiplier = float(diag.get("size_multiplier", 1.0))
     size_multiplier = max(size_multiplier, 0.0)
     computed_size = 0
@@ -248,9 +355,16 @@ async def decision_tick():
     atr_val = diag.get("atr")
     sl_distance = risk.sl_distance_from_atr(atr_val, instrument=settings.INSTRUMENT)
     tp_distance = 0.0  # Disable standard TP to avoid interfering with USD-based profit protection
-    expected_r = tp_distance / sl_distance if sl_distance > 0 else None
+    tp_distance_audit = risk.tp_distance_from_atr(atr_val, instrument=settings.INSTRUMENT)
+    expected_r = tp_distance_audit / sl_distance if sl_distance > 0 else None
     entry_price = _entry_price_from_diag(diag)
     pip_size = diag.get("pip_size") or broker._pip_size(settings.INSTRUMENT)  # type: ignore[attr-defined]
+    sl_price = None
+    tp_price = None
+    if entry_price is not None and sl_distance > 0:
+        sl_price = entry_price - sl_distance if signal == "BUY" else entry_price + sl_distance
+    if entry_price is not None and tp_distance_audit > 0:
+        tp_price = entry_price + tp_distance_audit if signal == "BUY" else entry_price - tp_distance_audit
 
     log = {
         "ts": ts_local.isoformat(),
@@ -268,6 +382,7 @@ async def decision_tick():
         "size": computed_size,
         "sl_distance": sl_distance,
         "tp_distance": tp_distance,
+        "tp_distance_audit": tp_distance_audit,
     }
     print(f"[DECISION] {log}", flush=True)
     print(
@@ -277,8 +392,37 @@ async def decision_tick():
 
     order_status = "SKIPPED"
     broker_response: Dict[str, Any] | None = None
+    indicator_ok, indicator_issues = _indicator_integrity(diag)
     if signal in ("BUY", "SELL"):
-        if computed_size <= 0:
+        trade_count_today = int(risk.state.daily_entry_count or 0)
+        EVENT_LOGGER.log(
+            "trade_cap_check",
+            {
+                "trade_count_today": trade_count_today,
+                "max_trades_per_day": risk.max_trades_per_day,
+            },
+        )
+        if risk.max_trades_per_day > 0 and trade_count_today >= risk.max_trades_per_day:
+            EVENT_LOGGER.log(
+                "trade_cap_reached",
+                {
+                    "trade_count_today": trade_count_today,
+                    "max_trades_per_day": risk.max_trades_per_day,
+                },
+            )
+            EVENT_LOGGER.log(
+                "trading_halted",
+                {"reason": "daily-trade-cap", "trade_count_today": trade_count_today},
+            )
+            global CAP_HIT_TODAY
+            CAP_HIT_TODAY = True
+        if not indicator_ok:
+            EVENT_LOGGER.log(
+                "indicator_block",
+                {"issues": indicator_issues, "symbol": settings.INSTRUMENT},
+            )
+            order_status = "BLOCKED"
+        elif computed_size <= 0:
             print(
                 f"[BROKER] Skipping order {signal} for {settings.INSTRUMENT} due to zero size",
                 flush=True,
@@ -293,12 +437,35 @@ async def decision_tick():
                 spread_pips,
             )
             if not ok_to_open:
+                EVENT_LOGGER.log(
+                    "risk_block",
+                    {
+                        "reason": risk_reason,
+                        "symbol": settings.INSTRUMENT,
+                    },
+                )
+                if risk_reason == "daily-trade-cap":
+                    EVENT_LOGGER.log(
+                        "trading_halted",
+                        {"reason": "daily-trade-cap", "trade_count_today": trade_count_today},
+                    )
+                    CAP_HIT_TODAY = True
+                if risk_reason == "cooldown":
+                    cooldown_until = risk.state.cooldown_until.get(settings.INSTRUMENT)
+                    EVENT_LOGGER.log(
+                        "cooldown_block",
+                        {
+                            "symbol": settings.INSTRUMENT,
+                            "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+                        },
+                    )
                 print(
                     f"[TRADE] Skipping {settings.INSTRUMENT} due to {risk_reason}",
                     flush=True,
                 )
                 order_status = "BLOCKED"
             else:
+                _log_account_snapshot("pre_trade", equity_override=equity)
                 broker_response = broker.place_order(
                     settings.INSTRUMENT,
                     signal,
@@ -309,7 +476,35 @@ async def decision_tick():
                 )
                 order_status = broker_response.get("status", "UNKNOWN")
                 if order_status == "SENT":
+                    order_id = _order_ticket(broker_response) or broker_response.get("order_id")
+                    JOURNAL.record_entry(
+                        trade_id=str(order_id or f"{settings.INSTRUMENT}-{int(time.time())}"),
+                        timestamp_utc=now_utc,
+                        instrument=settings.INSTRUMENT,
+                        side=signal,
+                        units=computed_size,
+                        entry_price=entry_price,
+                        stop_loss_price=sl_price,
+                        take_profit_price=tp_price,
+                        spread_at_entry=spread_pips,
+                        session_id=str(diag.get("session") or "UNKNOWN"),
+                        session_mode=str(diag.get("session") or "UNKNOWN"),
+                        run_tag=settings.STRATEGY_TAG,
+                        strategy_tag=settings.STRATEGY_TAG,
+                        gating_flags={"indicator_ok": indicator_ok, "risk_ok": True},
+                        indicators_snapshot=diag,
+                    )
                     risk.register_entry(now_utc, settings.INSTRUMENT)
+                    cooldown_until = risk.state.cooldown_until.get(settings.INSTRUMENT)
+                    if cooldown_until:
+                        EVENT_LOGGER.log(
+                            "cooldown_start",
+                            {
+                                "symbol": settings.INSTRUMENT,
+                                "cooldown_until": cooldown_until.isoformat(),
+                            },
+                        )
+                _log_account_snapshot("post_trade")
     adverse_pips = spread_pips if spread_pips is not None else None
     pl = _order_pl(broker_response or {})
     metrics_payload = {
@@ -344,6 +539,29 @@ async def decision_tick():
             flush=True,
         )
 
+    cooldown_until = risk.state.cooldown_until.get(settings.INSTRUMENT)
+    if cooldown_until and now_utc >= cooldown_until and settings.INSTRUMENT not in COOLDOWN_RELEASE_LOGGED:
+        EVENT_LOGGER.log(
+            "cooldown_release",
+            {"symbol": settings.INSTRUMENT, "cooldown_until": cooldown_until.isoformat()},
+        )
+        COOLDOWN_RELEASE_LOGGED.add(settings.INSTRUMENT)
+
+
+async def periodic_snapshot():
+    _log_account_snapshot("periodic")
+
+
+async def daily_health_report():
+    payload = health_report_payload(
+        logger=EVENT_LOGGER,
+        uptime_seconds=(datetime.now(timezone.utc) - START_TS).total_seconds(),
+        errors_count=watchdog.total_errors,
+        max_trade_cap_hit=CAP_HIT_TODAY,
+        max_drawdown_pct=MAX_DRAWDOWN_PCT,
+    )
+    EVENT_LOGGER.log("daily_health_report", payload)
+
 
 async def runner():
     """Main runner scheduling heartbeat and decision tasks and running watchdog."""
@@ -353,6 +571,8 @@ async def runner():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(heartbeat, "interval", seconds=settings.HEARTBEAT_SECONDS)
     scheduler.add_job(decision_tick, "interval", seconds=settings.DECISION_SECONDS)
+    scheduler.add_job(periodic_snapshot, "interval", minutes=settings.OBS_SNAPSHOT_MINUTES)
+    scheduler.add_job(daily_health_report, "interval", minutes=settings.HEALTH_REPORT_MINUTES)
     scheduler.start()
     asyncio.create_task(watchdog.run())
     await heartbeat()
@@ -362,4 +582,17 @@ async def runner():
 
 
 if __name__ == "__main__":
-    asyncio.run(runner())
+    def _shutdown_log() -> None:
+        EVENT_LOGGER.log(
+            "shutdown",
+            {
+                "uptime_seconds": (datetime.now(timezone.utc) - START_TS).total_seconds(),
+            },
+        )
+
+    atexit.register(_shutdown_log)
+    try:
+        asyncio.run(runner())
+    except Exception as exc:
+        EVENT_LOGGER.log("crash", {"error": str(exc)})
+        raise

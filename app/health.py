@@ -13,6 +13,7 @@ class Watchdog:
         self.last_heartbeat_ts = now
         self.last_decision_ts = now
         self.error_times: List[datetime] = []
+        self.total_errors = 0
 
     async def run(self):
         """Periodically check for silence or error bursts and issue alerts."""
@@ -66,6 +67,7 @@ class Watchdog:
     def record_error(self) -> None:
         """Record the timestamp of an error occurrence for burst detection."""
         self.error_times.append(datetime.now(timezone.utc))
+        self.total_errors += 1
 
 # Global instance of Watchdog
 watchdog = Watchdog()

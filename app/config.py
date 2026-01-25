@@ -129,6 +129,18 @@ class Settings(BaseSettings):
         10,
         description="Decision count between summary metric log lines.",
     )
+    OBS_SNAPSHOT_MINUTES: int = Field(
+        5,
+        description="Minutes between account/risk snapshot logs.",
+    )
+    HEALTH_REPORT_MINUTES: int = Field(
+        1440,
+        description="Minutes between daily health reports.",
+    )
+    STRATEGY_TAG: str = Field(
+        "ema_rsi_atr",
+        description="Strategy tag stored in trade journal entries.",
+    )
 
     # ------------------------------------------------------------------
     # Alerting
