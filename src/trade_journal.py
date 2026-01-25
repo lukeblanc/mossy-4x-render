@@ -96,12 +96,37 @@ class TradeJournal:
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_trades (
+                    order_id TEXT PRIMARY KEY,
+                    timestamp_open TEXT,
+                    timestamp_close TEXT,
+                    symbol TEXT,
+                    side TEXT,
+                    size REAL,
+                    entry_price REAL,
+                    exit_price REAL,
+                    stop_loss REAL,
+                    take_profit REAL,
+                    close_reason TEXT,
+                    realized_pnl REAL,
+                    strategy_tag TEXT
+                );
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_instrument_ts ON trades (instrument, timestamp_utc);"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_trades_ts ON audit_trades (timestamp_open);"
             )
             # Migration-safe: add run_tag if missing.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(trades);").fetchall()}
             if "run_tag" not in columns:
                 conn.execute("ALTER TABLE trades ADD COLUMN run_tag TEXT;")
+            audit_columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_trades);").fetchall()}
+            if "strategy_tag" not in audit_columns:
+                conn.execute("ALTER TABLE audit_trades ADD COLUMN strategy_tag TEXT;")
 
     def record_entry(
         self,
@@ -118,6 +143,7 @@ class TradeJournal:
         session_id: str,
         session_mode: str,
         run_tag: Optional[str] = None,
+        strategy_tag: Optional[str] = None,
         gating_flags: Mapping[str, Any],
         indicators_snapshot: Mapping[str, Any],
     ) -> None:
@@ -191,6 +217,51 @@ class TradeJournal:
                 """,
                 payload,
             )
+            conn.execute(
+                """
+                INSERT INTO audit_trades (
+                    order_id,
+                    timestamp_open,
+                    symbol,
+                    side,
+                    size,
+                    entry_price,
+                    stop_loss,
+                    take_profit,
+                    strategy_tag
+                ) VALUES (
+                    :order_id,
+                    :timestamp_open,
+                    :symbol,
+                    :side,
+                    :size,
+                    :entry_price,
+                    :stop_loss,
+                    :take_profit,
+                    :strategy_tag
+                )
+                ON CONFLICT(order_id) DO UPDATE SET
+                    timestamp_open=excluded.timestamp_open,
+                    symbol=excluded.symbol,
+                    side=excluded.side,
+                    size=excluded.size,
+                    entry_price=excluded.entry_price,
+                    stop_loss=excluded.stop_loss,
+                    take_profit=excluded.take_profit,
+                    strategy_tag=COALESCE(excluded.strategy_tag, audit_trades.strategy_tag);
+                """,
+                {
+                    "order_id": str(trade_id),
+                    "timestamp_open": payload["timestamp_utc"],
+                    "symbol": instrument,
+                    "side": side,
+                    "size": units,
+                    "entry_price": entry_price,
+                    "stop_loss": stop_loss_price,
+                    "take_profit": take_profit_price,
+                    "strategy_tag": strategy_tag or run_tag,
+                },
+            )
 
     def record_exit(
         self,
@@ -205,6 +276,7 @@ class TradeJournal:
         duration_seconds: Optional[int],
         broker_confirmed: Optional[bool],
         run_tag: Optional[str] = None,
+        strategy_tag: Optional[str] = None,
     ) -> None:
         if not trade_id:
             return
@@ -263,6 +335,39 @@ class TradeJournal:
                     run_tag=COALESCE(excluded.run_tag, trades.run_tag);
                 """,
                 payload,
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_trades (
+                    order_id,
+                    timestamp_close,
+                    exit_price,
+                    close_reason,
+                    realized_pnl,
+                    strategy_tag
+                ) VALUES (
+                    :order_id,
+                    :timestamp_close,
+                    :exit_price,
+                    :close_reason,
+                    :realized_pnl,
+                    :strategy_tag
+                )
+                ON CONFLICT(order_id) DO UPDATE SET
+                    timestamp_close=excluded.timestamp_close,
+                    exit_price=COALESCE(excluded.exit_price, audit_trades.exit_price),
+                    close_reason=COALESCE(excluded.close_reason, audit_trades.close_reason),
+                    realized_pnl=COALESCE(excluded.realized_pnl, audit_trades.realized_pnl),
+                    strategy_tag=COALESCE(excluded.strategy_tag, audit_trades.strategy_tag);
+                """,
+                {
+                    "order_id": str(trade_id),
+                    "timestamp_close": payload["exit_timestamp_utc"],
+                    "exit_price": exit_price,
+                    "close_reason": exit_reason,
+                    "realized_pnl": realized_pnl_ccy,
+                    "strategy_tag": strategy_tag or run_tag,
+                },
             )
 
 

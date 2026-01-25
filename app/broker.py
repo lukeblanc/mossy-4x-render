@@ -6,6 +6,7 @@ from typing import Dict, Optional
 import httpx
 
 from app.config import settings
+from app.observability import get_event_logger
 
 PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
@@ -59,18 +60,47 @@ class Broker:
         else:
             self.base_url = PRACTICE
         self._headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        self._connected_ok: Optional[bool] = None
+        self._logger = get_event_logger()
+        if self.key:
+            self._log_event("token_refresh", {"status": "initialized", "mode": self.mode})
+
+    def _log_event(self, event: str, payload: Dict) -> None:
+        self._logger.log(event, payload)
+
+    def _log_connectivity(self, status_code: Optional[int], *, action: str, error: Optional[str] = None) -> None:
+        if status_code == 429:
+            self._log_event("rate_limit", {"action": action, "status_code": status_code})
+        if status_code in (401, 403):
+            self._log_event("api_auth_failure", {"action": action, "status_code": status_code})
+        if status_code and status_code < 500:
+            if self._connected_ok is False:
+                self._log_event("broker_reconnect", {"action": action, "status_code": status_code})
+            self._connected_ok = True
+        if status_code is None and error:
+            if self._connected_ok is True:
+                self._log_event("broker_disconnect", {"action": action, "error": error})
+            self._connected_ok = False
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=15.0)
+
+    def refresh_token(self, token: str) -> None:
+        """Update auth token and emit a refresh event."""
+        self.key = token
+        self._headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        self._log_event("token_refresh", {"status": "updated", "mode": self.mode})
 
     def connectivity_check(self) -> dict:
         """Log a quick read-only call to prove creds (demo or live)."""
         if not (self.key and self.account):
             print("[OANDA] No credentials set; skipping connectivity check.")
+            self._log_event("api_auth_failure", {"action": "connectivity_check", "reason": "missing_creds"})
             return {"ok": False, "reason": "no-creds"}
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/summary")
+                self._log_connectivity(resp.status_code, action="connectivity_check")
                 if resp.status_code == 200:
                     data = resp.json().get("account", {})
                     balance = data.get("balance")
@@ -79,14 +109,28 @@ class Broker:
                         f"[OANDA] Connected ok. Balance={balance} {currency} (mode={self.mode})",
                         flush=True,
                     )
+                    self._log_event(
+                        "api_auth_success",
+                        {
+                            "action": "connectivity_check",
+                            "balance": balance,
+                            "currency": currency,
+                            "mode": self.mode,
+                        },
+                    )
                     return {"ok": True, "balance": balance, "currency": currency}
                 print(
                     f"[OANDA] Connectivity error {resp.status_code}: {resp.text}",
                     flush=True,
                 )
+                self._log_event(
+                    "api_auth_failure",
+                    {"action": "connectivity_check", "status_code": resp.status_code, "text": resp.text},
+                )
                 return {"ok": False, "status": resp.status_code, "text": resp.text}
         except Exception as exc:
             print(f"[OANDA] Connectivity exception: {exc}", flush=True)
+            self._log_connectivity(None, action="connectivity_check", error=str(exc))
             return {"ok": False, "error": str(exc)}
 
     def place_order(
@@ -166,6 +210,7 @@ class Broker:
         try:
             with self._client() as client:
                 resp = client.post(f"/v3/accounts/{self.account}/orders", json=payload)
+                self._log_connectivity(resp.status_code, action="place_order")
                 if resp.status_code in (200, 201):
                     data = resp.json()
                     if self.mode == "demo":
@@ -188,12 +233,15 @@ class Broker:
                         f"[BROKER] LIVE order error {resp.status_code}: {resp.text}",
                         flush=True,
                     )
+                if resp.status_code == 429:
+                    self._log_event("rate_limit", {"action": "place_order", "status_code": resp.status_code})
                 return {"status": "ERROR", "code": resp.status_code, "text": resp.text}
         except Exception as exc:
             if self.mode == "demo":
                 print(f"[OANDA] DEMO ORDER FAILED {exc}", flush=True)
             else:
                 print(f"[BROKER] LIVE order exception: {exc}", flush=True)
+            self._log_connectivity(None, action="place_order", error=str(exc))
             return {"status": "ERROR", "error": str(exc)}
 
     def list_open_trades(self) -> list:
@@ -203,6 +251,7 @@ class Broker:
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/openTrades")
+                self._log_connectivity(resp.status_code, action="list_open_trades")
                 if resp.status_code == 200:
                     data = resp.json()
                     return data.get("trades", [])
@@ -210,8 +259,11 @@ class Broker:
                     f"[OANDA] Failed to read open trades status={resp.status_code} body={resp.text}",
                     flush=True,
                 )
+                if resp.status_code == 429:
+                    self._log_event("rate_limit", {"action": "list_open_trades", "status_code": resp.status_code})
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
+            self._log_connectivity(None, action="list_open_trades", error=str(exc))
         return []
 
     def get_unrealized_profit(self, instrument: str) -> Optional[float]:
@@ -225,6 +277,7 @@ class Broker:
                 resp = client.get(
                     f"/v3/accounts/{self.account}/positions/{instrument}"
                 )
+                self._log_connectivity(resp.status_code, action="position_snapshot")
                 if resp.status_code != 200:
                     return 0.0
                 position = resp.json().get("position", {}) or {}
@@ -249,6 +302,7 @@ class Broker:
                 f"[OANDA] Exception fetching unrealized P/L for {instrument}: {exc}",
                 flush=True,
             )
+            self._log_connectivity(None, action="get_unrealized_profit", error=str(exc))
             return 0.0
 
     def position_snapshot(self, instrument: str) -> Optional[Dict]:
@@ -267,10 +321,12 @@ class Broker:
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/positions/{instrument}")
+                self._log_connectivity(resp.status_code, action="position_snapshot")
                 if resp.status_code != 200:
                     return None
                 return resp.json().get("position", {}) or {}
         except Exception:
+            self._log_connectivity(None, action="position_snapshot", error="exception")
             return None
 
     def close_position_side(self, instrument: str, long_units: float, short_units: float) -> Dict:
@@ -304,6 +360,7 @@ class Broker:
                     f"/v3/accounts/{self.account}/positions/{instrument}/close",
                     json=payload,
                 )
+                self._log_connectivity(resp.status_code, action="close_position")
                 if resp.status_code in (200, 201):
                     print(f"[OANDA] Closed position {instrument} payload={payload}", flush=True)
                     return {"status": "CLOSED", "response": resp.json()}
@@ -320,6 +377,7 @@ class Broker:
             print(
                 f"[OANDA] Exception closing position {instrument}: {exc}", flush=True
             )
+            self._log_connectivity(None, action="close_position", error=str(exc))
             return {"status": "ERROR", "error": str(exc)}
 
     # Backwards-compatible wrapper.
@@ -347,6 +405,7 @@ class Broker:
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/summary")
+                self._log_connectivity(resp.status_code, action="account_equity")
                 if resp.status_code == 200:
                     data = resp.json().get("account", {})
                     nav = data.get("NAV") or data.get("balance")
@@ -356,6 +415,7 @@ class Broker:
                         return 0.0
         except Exception as exc:
             print(f"[OANDA] Exception fetching equity: {exc}", flush=True)
+            self._log_connectivity(None, action="account_equity", error=str(exc))
         return 0.0
 
     def current_spread(self, instrument: str) -> float:
@@ -367,6 +427,7 @@ class Broker:
                     f"/v3/accounts/{self.account}/pricing",
                     params={"instruments": instrument},
                 )
+                self._log_connectivity(resp.status_code, action="current_spread")
                 if resp.status_code != 200:
                     return 0.0
                 data = resp.json().get("prices", [])
@@ -389,6 +450,7 @@ class Broker:
                 return spread / pip_size
         except Exception as exc:
             print(f"[OANDA] Exception fetching spread for {instrument}: {exc}", flush=True)
+            self._log_connectivity(None, action="current_spread", error=str(exc))
             return 0.0
 
     def close_all_positions(self) -> None:
@@ -397,6 +459,7 @@ class Broker:
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/openPositions")
+                self._log_connectivity(resp.status_code, action="close_all_positions")
                 if resp.status_code != 200:
                     return
                 for position in resp.json().get("positions", []):
@@ -418,6 +481,73 @@ class Broker:
                     )
         except Exception as exc:
             print(f"[OANDA] Exception closing positions: {exc}", flush=True)
+            self._log_connectivity(None, action="close_all_positions", error=str(exc))
+
+    def account_snapshot(self) -> Dict:
+        if not (self.key and self.account):
+            return {
+                "balance": 0.0,
+                "equity": 0.0,
+                "used_margin": 0.0,
+                "free_margin": 0.0,
+                "margin_level": None,
+                "open_positions": [],
+            }
+        try:
+            with self._client() as client:
+                resp = client.get(f"/v3/accounts/{self.account}/summary")
+                self._log_connectivity(resp.status_code, action="account_snapshot")
+                if resp.status_code != 200:
+                    return {
+                        "balance": 0.0,
+                        "equity": 0.0,
+                        "used_margin": 0.0,
+                        "free_margin": 0.0,
+                        "margin_level": None,
+                        "open_positions": [],
+                    }
+                account = resp.json().get("account", {}) or {}
+                balance = float(account.get("balance") or 0.0)
+                equity = float(account.get("NAV") or balance or 0.0)
+                used_margin = float(account.get("marginUsed") or 0.0)
+                free_margin = float(account.get("marginAvailable") or 0.0)
+                margin_level = None
+                if used_margin > 0:
+                    margin_level = (equity / used_margin) * 100.0
+                open_positions = []
+                for trade in self.list_open_trades():
+                    instrument = trade.get("instrument")
+                    units = trade.get("currentUnits") or trade.get("units")
+                    try:
+                        units_val = float(units or 0)
+                    except (TypeError, ValueError):
+                        units_val = 0.0
+                    side = "BUY" if units_val > 0 else "SELL"
+                    open_positions.append(
+                        {
+                            "symbol": instrument,
+                            "size": units_val,
+                            "side": side,
+                        }
+                    )
+                return {
+                    "balance": balance,
+                    "equity": equity,
+                    "used_margin": used_margin,
+                    "free_margin": free_margin,
+                    "margin_level": margin_level,
+                    "open_positions": open_positions,
+                }
+        except Exception as exc:
+            self._log_connectivity(None, action="account_snapshot", error=str(exc))
+            return {
+                "balance": 0.0,
+                "equity": 0.0,
+                "used_margin": 0.0,
+                "free_margin": 0.0,
+                "margin_level": None,
+                "open_positions": [],
+            }
 
     @staticmethod
     def _pip_size(instrument: str) -> float:
