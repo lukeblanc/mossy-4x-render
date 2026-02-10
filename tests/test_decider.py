@@ -179,6 +179,10 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                         "close": 1.2345,
                         "ema_trend_fast": 1.25,
                         "ema_trend_slow": 1.2,
+                        "macd_line": 0.10,
+                        "macd_signal": 0.05,
+                        "macd_histogram": 0.05,
+                        "macd_histogram_prev": 0.04,
                     },
                     reason="trend",
                     market_active=True,
@@ -230,6 +234,9 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
 
         def close_all_positions(self) -> None:
             pass
+
+        def list_open_trades(self):
+            return []
 
     class Monday(datetime):
         @classmethod
@@ -368,6 +375,10 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
                         "close": 1.2345,
                         "ema_trend_fast": 1.25,
                         "ema_trend_slow": 1.2,
+                        "macd_line": 0.10,
+                        "macd_signal": 0.05,
+                        "macd_histogram": 0.05,
+                        "macd_histogram_prev": 0.04,
                     },
                     reason="trend",
                     market_active=True,
@@ -405,6 +416,9 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
 
         def close_all_positions(self) -> None:
             pass
+
+        def list_open_trades(self):
+            return []
 
     class Monday(datetime):
         @classmethod
@@ -515,6 +529,10 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
                         "close": 1.2345,
                         "ema_trend_fast": 1.25,
                         "ema_trend_slow": 1.2,
+                        "macd_line": 0.10,
+                        "macd_signal": 0.05,
+                        "macd_histogram": 0.05,
+                        "macd_histogram_prev": 0.04,
                     },
                     reason="trend",
                     market_active=True,
@@ -552,6 +570,9 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
 
         def close_all_positions(self) -> None:
             pass
+
+        def list_open_trades(self):
+            return []
 
     class Saturday(datetime):
         @classmethod
@@ -644,6 +665,10 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
                         "close": 1.2345,
                         "ema_trend_fast": 1.25,
                         "ema_trend_slow": 1.2,
+                        "macd_line": 0.10,
+                        "macd_signal": 0.05,
+                        "macd_histogram": 0.05,
+                        "macd_histogram_prev": 0.04,
                     },
                     reason="trend",
                     market_active=True,
@@ -681,6 +706,9 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
 
         def close_all_positions(self) -> None:
             pass
+
+        def list_open_trades(self):
+            return []
 
     class Monday(datetime):
         @classmethod
@@ -766,6 +794,10 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
                         "close": 1.2345,
                         "ema_trend_fast": 1.25,
                         "ema_trend_slow": 1.2,
+                        "macd_line": 0.10,
+                        "macd_signal": 0.05,
+                        "macd_histogram": 0.05,
+                        "macd_histogram_prev": 0.04,
                     },
                     reason="trend",
                     market_active=True,
@@ -803,6 +835,9 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
 
         def close_all_positions(self) -> None:
             pass
+
+        def list_open_trades(self):
+            return []
 
     class Sunday(datetime):
         @classmethod
