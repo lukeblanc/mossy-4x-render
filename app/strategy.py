@@ -269,6 +269,9 @@ def decide() -> Tuple[Signal, str, Dict]:
         "pip_size": pip_size,
         "warmup_complete": True,
         "timeframe": settings.STRAT_TIMEFRAME,
+        "ema_spread": abs(ema_fast_curr - ema_slow_curr),
+        "ema_spread_atr_mult": settings.EMA_SPREAD_ATR_MULT,
+        "adx_filter": settings.ADX_FILTER,
     }
 
     if not allowed:
@@ -277,12 +280,16 @@ def decide() -> Tuple[Signal, str, Dict]:
     # Crossover detection
     cross_up = ema_fast_prev <= ema_slow_prev and ema_fast_curr > ema_slow_curr
     cross_down = ema_fast_prev >= ema_slow_prev and ema_fast_curr < ema_slow_curr
+    ema_spread_ok = abs(ema_fast_curr - ema_slow_curr) >= (atr_val * float(settings.EMA_SPREAD_ATR_MULT))
+    adx_ok = adx_val >= float(settings.ADX_FILTER)
 
     # Evaluate buy/sell conditions
     if (
         cross_up
         and rsi_val > settings.STRAT_RSI_BUY
         and atr_val >= settings.MIN_ATR
+        and adx_ok
+        and ema_spread_ok
     ):
         _last_signal_bars_remaining = settings.STRAT_COOLDOWN_BARS
         return "BUY", "ema_up & rsi_high", diagnostics
@@ -290,6 +297,8 @@ def decide() -> Tuple[Signal, str, Dict]:
         cross_down
         and rsi_val < settings.STRAT_RSI_SELL
         and atr_val >= settings.MIN_ATR
+        and adx_ok
+        and ema_spread_ok
     ):
         _last_signal_bars_remaining = settings.STRAT_COOLDOWN_BARS
         return "SELL", "ema_down & rsi_low", diagnostics

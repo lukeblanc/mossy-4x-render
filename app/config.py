@@ -129,6 +129,10 @@ class Settings(BaseSettings):
         10,
         description="Decision count between summary metric log lines.",
     )
+    EMA_SPREAD_ATR_MULT: float = Field(
+        0.05,
+        description="Minimum EMA fast/slow spread as ATR multiple required for entries.",
+    )
     OBS_SNAPSHOT_MINUTES: int = Field(
         5,
         description="Minutes between account/risk snapshot logs.",
