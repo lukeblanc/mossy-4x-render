@@ -370,5 +370,84 @@ class TradeJournal:
                 },
             )
 
+    def record_reject(
+        self,
+        *,
+        order_id: str,
+        timestamp_utc: datetime,
+        instrument: str,
+        side: str,
+        units: float,
+        entry_price: Optional[float],
+        stop_loss_price: Optional[float],
+        take_profit_price: Optional[float],
+        close_reason: str,
+        strategy_tag: Optional[str] = None,
+    ) -> None:
+        if not order_id:
+            return
+        ts_val = _iso(timestamp_utc) or _iso(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_trades (
+                    order_id,
+                    timestamp_open,
+                    timestamp_close,
+                    symbol,
+                    side,
+                    size,
+                    entry_price,
+                    exit_price,
+                    stop_loss,
+                    take_profit,
+                    close_reason,
+                    realized_pnl,
+                    strategy_tag
+                ) VALUES (
+                    :order_id,
+                    :timestamp_open,
+                    :timestamp_close,
+                    :symbol,
+                    :side,
+                    :size,
+                    :entry_price,
+                    :exit_price,
+                    :stop_loss,
+                    :take_profit,
+                    :close_reason,
+                    :realized_pnl,
+                    :strategy_tag
+                )
+                ON CONFLICT(order_id) DO UPDATE SET
+                    timestamp_open=excluded.timestamp_open,
+                    timestamp_close=excluded.timestamp_close,
+                    symbol=excluded.symbol,
+                    side=excluded.side,
+                    size=excluded.size,
+                    entry_price=excluded.entry_price,
+                    stop_loss=excluded.stop_loss,
+                    take_profit=excluded.take_profit,
+                    close_reason=excluded.close_reason,
+                    realized_pnl=excluded.realized_pnl,
+                    strategy_tag=COALESCE(excluded.strategy_tag, audit_trades.strategy_tag);
+                """,
+                {
+                    "order_id": str(order_id),
+                    "timestamp_open": ts_val,
+                    "timestamp_close": ts_val,
+                    "symbol": instrument,
+                    "side": side,
+                    "size": units,
+                    "entry_price": entry_price,
+                    "exit_price": entry_price,
+                    "stop_loss": stop_loss_price,
+                    "take_profit": take_profit_price,
+                    "close_reason": close_reason,
+                    "realized_pnl": 0.0,
+                    "strategy_tag": strategy_tag,
+                },
+            )
+
 
 __all__ = ["TradeJournal", "default_journal_path"]

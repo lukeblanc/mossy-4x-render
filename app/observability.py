@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -115,3 +116,64 @@ def health_report_payload(
         "journal_path": str(journal_path),
         "report_ts": _iso(now_utc),
     }
+
+
+def export_trade_csv(
+    *,
+    output_path: Path,
+    journal_path: Optional[Path] = None,
+    lookback_hours: int = 24,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path = journal_path or default_journal_path()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    rows = []
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    timestamp_open,
+                    timestamp_close,
+                    symbol,
+                    side,
+                    size,
+                    entry_price,
+                    exit_price,
+                    stop_loss,
+                    take_profit,
+                    close_reason,
+                    realized_pnl,
+                    order_id,
+                    strategy_tag
+                FROM audit_trades
+                WHERE timestamp_open >= ?
+                ORDER BY timestamp_open ASC
+                """,
+                (_iso(cutoff),),
+            ).fetchall()
+    except Exception:
+        rows = []
+
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "timestamp_open",
+                "timestamp_close",
+                "symbol",
+                "side",
+                "size",
+                "entry_price",
+                "exit_price",
+                "SL",
+                "TP",
+                "close_reason",
+                "realized_pnl",
+                "order_id",
+                "strategy_tag",
+            ]
+        )
+        for row in rows:
+            writer.writerow(row)
+    return output_path

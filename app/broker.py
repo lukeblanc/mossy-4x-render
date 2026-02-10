@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Optional
 
@@ -62,6 +63,7 @@ class Broker:
         self._headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         self._connected_ok: Optional[bool] = None
         self._logger = get_event_logger()
+        self._last_reconnect_ts: Optional[datetime] = None
         if self.key:
             self._log_event("token_refresh", {"status": "initialized", "mode": self.mode})
 
@@ -76,6 +78,7 @@ class Broker:
         if status_code and status_code < 500:
             if self._connected_ok is False:
                 self._log_event("broker_reconnect", {"action": action, "status_code": status_code})
+                self._last_reconnect_ts = datetime.now(timezone.utc)
             self._connected_ok = True
         if status_code is None and error:
             if self._connected_ok is True:
@@ -84,6 +87,12 @@ class Broker:
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=15.0)
+
+    def recently_reconnected(self, window_seconds: int = 60) -> bool:
+        if not self._last_reconnect_ts:
+            return False
+        delta = datetime.now(timezone.utc) - self._last_reconnect_ts
+        return delta.total_seconds() <= window_seconds
 
     def refresh_token(self, token: str) -> None:
         """Update auth token and emit a refresh event."""

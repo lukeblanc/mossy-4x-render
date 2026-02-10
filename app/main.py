@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
@@ -15,7 +16,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.broker import Broker
 from app.config import settings
 from app.health import watchdog
-from app.observability import EventLogger, get_event_logger, health_report_payload
+from app.observability import EventLogger, export_trade_csv, get_event_logger, health_report_payload
 from app.strategy import decide
 from app.dashboard import send_bot_status
 from src import profit_protection
@@ -37,6 +38,8 @@ MAX_DRAWDOWN_PCT: Optional[float] = None
 CAP_HIT_TODAY = False
 COOLDOWN_RELEASE_LOGGED: Set[str] = set()
 CAP_DAY = START_TS.date()
+KNOWN_OPEN_TRADES: Set[str] = set()
+LAST_ORDER_FINGERPRINT: Optional[str] = None
 
 trail_arm_pips = float(os.getenv("TRAIL_ARM_PIPS", "0.0"))
 trail_giveback_pips = float(os.getenv("TRAIL_GIVEBACK_PIPS", "0.0"))
@@ -282,6 +285,38 @@ def _order_ticket(result: Dict[str, Any]) -> Optional[str]:
     return str(last_id) if last_id else None
 
 
+def _trade_id_from_open(trade: Dict[str, Any]) -> Optional[str]:
+    for key in ("id", "tradeID", "tradeOpenedID", "orderID"):
+        value = trade.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _filled_units_from_response(result: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(result, dict):
+        return None
+    response = result.get("response") or {}
+    fill_tx = response.get("orderFillTransaction") or {}
+    units = fill_tx.get("units")
+    try:
+        return abs(float(units))
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_fingerprint(
+    *,
+    instrument: str,
+    side: str,
+    units: int,
+    entry_price: Optional[float],
+    sl_price: Optional[float],
+    tp_price: Optional[float],
+) -> str:
+    return f"{instrument}:{side}:{units}:{entry_price}:{sl_price}:{tp_price}"
+
+
 def _filter_closed_trades(open_trades: list[Dict[str, Any]], closed_ids: list[str]) -> list[Dict[str, Any]]:
     if not closed_ids:
         return open_trades
@@ -318,6 +353,29 @@ async def decision_tick():
         pass
 
     open_trades = broker.list_open_trades()
+    current_ids = {tid for trade in open_trades for tid in [_trade_id_from_open(trade)] if tid}
+    global KNOWN_OPEN_TRADES
+    if KNOWN_OPEN_TRADES:
+        closed_ids = KNOWN_OPEN_TRADES - current_ids
+        for trade_id in closed_ids:
+            EVENT_LOGGER.log(
+                "trade_closed_missing",
+                {"trade_id": trade_id, "symbol": settings.INSTRUMENT, "reason": "broker_closed"},
+            )
+            JOURNAL.record_exit(
+                trade_id=trade_id,
+                exit_timestamp_utc=now_utc,
+                exit_price=None,
+                spread_at_exit=None,
+                max_profit_ccy=None,
+                realized_pnl_ccy=0.0,
+                exit_reason="BROKER_CLOSED",
+                duration_seconds=None,
+                broker_confirmed=True,
+                run_tag=settings.STRATEGY_TAG,
+                strategy_tag=settings.STRATEGY_TAG,
+            )
+    KNOWN_OPEN_TRADES = current_ids
     closed_by_trail = profit_guard.process_open_trades(open_trades)
     if closed_by_trail:
         open_trades = _filter_closed_trades(open_trades, closed_by_trail)
@@ -465,24 +523,53 @@ async def decision_tick():
                 )
                 order_status = "BLOCKED"
             else:
-                _log_account_snapshot("pre_trade", equity_override=equity)
-                broker_response = broker.place_order(
-                    settings.INSTRUMENT,
-                    signal,
-                    computed_size,
-                    sl_distance=sl_distance,
-                    tp_distance=tp_distance,
+                fingerprint = _order_fingerprint(
+                    instrument=settings.INSTRUMENT,
+                    side=signal,
+                    units=computed_size,
                     entry_price=entry_price,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
                 )
-                order_status = broker_response.get("status", "UNKNOWN")
+                now_ts = datetime.now(timezone.utc)
+                duplicate_blocked = False
+                if broker.recently_reconnected(60) and LAST_ORDER_FINGERPRINT == fingerprint:
+                    EVENT_LOGGER.log(
+                        "duplicate_order_guard",
+                        {"fingerprint": fingerprint, "symbol": settings.INSTRUMENT},
+                    )
+                    order_status = "BLOCKED"
+                    duplicate_blocked = True
+                if not duplicate_blocked:
+                    _log_account_snapshot("pre_trade", equity_override=equity)
+                    broker_response = broker.place_order(
+                        settings.INSTRUMENT,
+                        signal,
+                        computed_size,
+                        sl_distance=sl_distance,
+                        tp_distance=tp_distance,
+                        entry_price=entry_price,
+                    )
+                    order_status = broker_response.get("status", "UNKNOWN")
                 if order_status == "SENT":
                     order_id = _order_ticket(broker_response) or broker_response.get("order_id")
+                    filled_units = _filled_units_from_response(broker_response)
+                    if filled_units is not None and filled_units < computed_size:
+                        EVENT_LOGGER.log(
+                            "partial_fill",
+                            {
+                                "order_id": order_id,
+                                "requested_units": computed_size,
+                                "filled_units": filled_units,
+                            },
+                        )
+                    actual_units = int(filled_units) if filled_units is not None else computed_size
                     JOURNAL.record_entry(
                         trade_id=str(order_id or f"{settings.INSTRUMENT}-{int(time.time())}"),
                         timestamp_utc=now_utc,
                         instrument=settings.INSTRUMENT,
                         side=signal,
-                        units=computed_size,
+                        units=actual_units,
                         entry_price=entry_price,
                         stop_loss_price=sl_price,
                         take_profit_price=tp_price,
@@ -495,6 +582,8 @@ async def decision_tick():
                         indicators_snapshot=diag,
                     )
                     risk.register_entry(now_utc, settings.INSTRUMENT)
+                    global LAST_ORDER_FINGERPRINT
+                    LAST_ORDER_FINGERPRINT = fingerprint
                     cooldown_until = risk.state.cooldown_until.get(settings.INSTRUMENT)
                     if cooldown_until:
                         EVENT_LOGGER.log(
@@ -504,6 +593,28 @@ async def decision_tick():
                                 "cooldown_until": cooldown_until.isoformat(),
                             },
                         )
+                elif order_status in ("ERROR", "REJECTED"):
+                    reject_id = _order_ticket(broker_response) or f"reject-{uuid.uuid4().hex}"
+                    EVENT_LOGGER.log(
+                        "order_rejected",
+                        {
+                            "order_id": reject_id,
+                            "status": order_status,
+                            "symbol": settings.INSTRUMENT,
+                        },
+                    )
+                    JOURNAL.record_reject(
+                        order_id=str(reject_id),
+                        timestamp_utc=now_utc,
+                        instrument=settings.INSTRUMENT,
+                        side=signal,
+                        units=computed_size,
+                        entry_price=entry_price,
+                        stop_loss_price=sl_price,
+                        take_profit_price=tp_price,
+                        close_reason="BROKER_REJECTED",
+                        strategy_tag=settings.STRATEGY_TAG,
+                    )
                 _log_account_snapshot("post_trade")
     adverse_pips = spread_pips if spread_pips is not None else None
     pl = _order_pl(broker_response or {})
@@ -553,6 +664,11 @@ async def periodic_snapshot():
 
 
 async def daily_health_report():
+    csv_path = export_trade_csv(
+        output_path=STATE_DIR / "trade_history_last24h.csv",
+        journal_path=JOURNAL.path,
+        lookback_hours=24,
+    )
     payload = health_report_payload(
         logger=EVENT_LOGGER,
         uptime_seconds=(datetime.now(timezone.utc) - START_TS).total_seconds(),
@@ -560,6 +676,7 @@ async def daily_health_report():
         max_trade_cap_hit=CAP_HIT_TODAY,
         max_drawdown_pct=MAX_DRAWDOWN_PCT,
     )
+    payload["trade_history_csv"] = str(csv_path)
     EVENT_LOGGER.log("daily_health_report", payload)
 
 
