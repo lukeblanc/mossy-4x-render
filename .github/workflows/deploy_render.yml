@@ -1,0 +1,202 @@
+name: Deploy to Render
+
+on:
+  # Run CI/CD automatically for production branch updates.
+  push:
+    branches: ["main"]
+  # Allow manual deployments from Actions tab.
+  workflow_dispatch:
+
+# Least-privilege token for this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  # Prevent overlapping deploy pipelines on the same branch.
+  group: render-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "==> Installing Python dependencies"
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            python -m pip install -r requirements.txt
+          else
+            echo "No requirements.txt found; skipping dependency install."
+          fi
+
+      - name: Lint / format checks (auto-skip when no config)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "==> Lint/format stage"
+
+          # Ruff (runs only if Ruff config exists)
+          if [[ -f .ruff.toml || -f ruff.toml ]] || ([[ -f pyproject.toml ]] && grep -q "\[tool\.ruff\]" pyproject.toml); then
+            echo "Ruff config detected. Running ruff check ."
+            python -m pip install ruff
+            ruff check .
+          else
+            echo "Ruff config not found; skipping ruff."
+          fi
+
+          # Flake8 (runs only if Flake8 config exists)
+          if [[ -f .flake8 || -f setup.cfg || -f tox.ini ]] || ([[ -f pyproject.toml ]] && grep -q "\[tool\.flake8\]" pyproject.toml); then
+            echo "Flake8 config detected. Running flake8 ."
+            python -m pip install flake8
+            flake8 .
+          else
+            echo "Flake8 config not found; skipping flake8."
+          fi
+
+          # Black (runs only if Black config exists)
+          if ([[ -f pyproject.toml ]] && grep -q "\[tool\.black\]" pyproject.toml) || [[ -f .black.toml ]]; then
+            echo "Black config detected. Running black --check ."
+            python -m pip install black
+            black --check .
+          else
+            echo "Black config not found; skipping black."
+          fi
+
+      - name: Run tests (auto-skip when no tests directory)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "==> Test stage"
+          if [[ -d tests ]]; then
+            echo "tests/ directory found. Running pytest."
+            pytest -q
+          else
+            echo "tests/ directory not found; skipping pytest."
+          fi
+
+      - name: Smoke import check
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "==> Smoke check stage"
+          python -c "import app; print('ok')"
+
+      - name: Validate Render secrets
+        shell: bash
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          set -euo pipefail
+          echo "==> Secrets validation stage"
+          if [[ -z "${RENDER_API_KEY:-}" ]]; then
+            echo "Missing required secret: RENDER_API_KEY" >&2
+            exit 1
+          fi
+          if [[ -z "${RENDER_SERVICE_ID:-}" ]]; then
+            echo "Missing required secret: RENDER_SERVICE_ID" >&2
+            exit 1
+          fi
+          echo "Required Render secrets are present."
+
+      - name: Trigger Render deploy
+        id: trigger_deploy
+        shell: bash
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          set -euo pipefail
+          echo "==> Deploy trigger stage"
+
+          response_file="$(mktemp)"
+          curl -sS -X POST \
+            "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}' > "${response_file}"
+
+          deploy_id=$(python - <<'PY' "${response_file}"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
+print(data.get('id', ''))
+PY
+)
+
+          if [[ -z "${deploy_id}" ]]; then
+            echo "Failed to parse deploy id from Render response." >&2
+            cat "${response_file}" >&2
+            exit 1
+          fi
+
+          echo "Render deploy triggered. deploy_id=${deploy_id}"
+          echo "deploy_id=${deploy_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Poll Render deploy status
+        shell: bash
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          DEPLOY_ID: ${{ steps.trigger_deploy.outputs.deploy_id }}
+        run: |
+          set -euo pipefail
+          echo "==> Deploy verification stage"
+
+          start_ts=$(date +%s)
+          timeout_seconds=$((20 * 60))
+
+          while true; do
+            now_ts=$(date +%s)
+            elapsed=$((now_ts - start_ts))
+
+            if (( elapsed > timeout_seconds )); then
+              echo "Render deploy timed out after ${timeout_seconds}s." >&2
+              exit 1
+            fi
+
+            response_file="$(mktemp)"
+            curl -sS \
+              "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${DEPLOY_ID}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" > "${response_file}"
+
+            status=$(python - <<'PY' "${response_file}"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
+print((data.get('status') or '').strip())
+PY
+)
+
+            echo "Render deploy status: ${status:-<empty>} (elapsed=${elapsed}s)"
+
+            lower_status=$(echo "${status}" | tr '[:upper:]' '[:lower:]')
+            case "${lower_status}" in
+              live|active|deployed|deploy_live|build_succeeded|succeeded|success|finished)
+                echo "Render deployment completed successfully."
+                exit 0
+                ;;
+              failed|error|canceled|cancelled|timed_out|build_failed)
+                echo "Render deployment failed with status='${status}'." >&2
+                cat "${response_file}" >&2
+                exit 1
+                ;;
+              *)
+                sleep 10
+                ;;
+            esac
+          done
