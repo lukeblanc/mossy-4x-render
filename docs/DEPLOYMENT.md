@@ -1,5 +1,27 @@
 # Deployment Notes
 
+## Standard release flow (recommended)
+
+Use this sequence for normal changes:
+
+1. Create a branch and commit your changes.
+2. Open a pull request into `main`.
+3. Merge the pull request.
+4. Let Render auto-deploy from `main`.
+
+Why this is the default here:
+
+- `render.yaml` enables `autoDeploy: true` for services, so new commits on the tracked branch deploy automatically.
+- Service setup in `finish_render_setup.py` points Render services to repository branch `main`.
+
+## When manual deploy steps are needed
+
+You may need manual intervention only when:
+
+- auto-deploy is disabled in the Render dashboard,
+- a deployment is stuck/failed and needs retry,
+- you are performing rollback/hotfix operations.
+
 ## Instrument Configuration
 
 - Omit the `instruments` key or set it to `null`/`None` to use the default instrument basket.
