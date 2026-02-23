@@ -241,8 +241,7 @@ config["use_macd_confirmation"] = _as_bool(
     os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
 )
 config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "SOFT").upper()  # MINI-RUN: default to SOFT for boundary-friendly entries
-AGGRESSIVE_TEST_MODE = os.getenv("AGGRESSIVE_TEST_MODE", "false").lower() == "true"
-aggressive_test_mode = AGGRESSIVE_TEST_MODE
+aggressive_test_mode = _as_bool(os.getenv("AGGRESSIVE_TEST_MODE", config.get("aggressive_test_mode", False)))
 # Demo/testing-only beast mode: this can increase turnover and risk and should be reviewed before live usage.
 config["aggressive_test_mode"] = aggressive_test_mode
 if aggressive_test_mode:
@@ -326,8 +325,6 @@ if aggressive_test_mode:
     risk_config["daily_profit_target_usd"] = 0.0
     print("[CONFIG] Daily profit cap DISABLED (aggressive demo mode)", flush=True)
     print(f"[CONFIG] Risk per trade set to {risk_per_trade_pct}%", flush=True)
-else:
-    print("[CONFIG] Aggressive test mode OFF", flush=True)
 
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)

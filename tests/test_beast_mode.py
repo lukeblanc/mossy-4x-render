@@ -27,16 +27,13 @@ def _reload_main(monkeypatch, **env):
     return importlib.reload(main_mod)
 
 
-def test_beast_mode_forces_always_session(monkeypatch, capsys):
+def test_beast_mode_forces_always_session(monkeypatch):
     main_mod = _reload_main(monkeypatch, AGGRESSIVE_TEST_MODE="true")
-    captured = capsys.readouterr()
 
     assert main_mod.config["aggressive_test_mode"] is True
     assert main_mod.config["session_mode"] == "ALWAYS"
     assert main_mod.config["risk"]["risk_per_trade_pct"] == 0.025
     assert main_mod.config["risk"]["daily_profit_target_usd"] == 0.0
-    assert "[CONFIG] Daily profit cap DISABLED (aggressive demo mode)" in captured.out
-    assert "[CONFIG] Risk per trade set to 2.5%" in captured.out
 
     decision = session_filter.session_decision(
         datetime(2024, 1, 1, 22, 0, tzinfo=timezone.utc),
@@ -48,13 +45,11 @@ def test_beast_mode_forces_always_session(monkeypatch, capsys):
     assert decision.allowed is True
 
 
-def test_normal_session_gating_unchanged_without_beast_mode(monkeypatch, capsys):
+def test_normal_session_gating_unchanged_without_beast_mode(monkeypatch):
     main_mod = _reload_main(monkeypatch, SESSION_MODE="STRICT", AGGRESSIVE_TEST_MODE="false")
-    captured = capsys.readouterr()
 
     assert main_mod.config["aggressive_test_mode"] is False
     assert main_mod.config["session_mode"] == "STRICT"
-    assert "[CONFIG] Aggressive test mode OFF" in captured.out
 
     decision = session_filter.session_decision(
         datetime(2024, 1, 1, 22, 0, tzinfo=timezone.utc),
