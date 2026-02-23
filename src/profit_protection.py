@@ -1119,6 +1119,11 @@ class ProfitProtection:
                 final_profit=final_profit,
                 now_utc=now_val,
             )
+            equity_after = None
+            try:
+                equity_after = float(self.broker.account_equity())
+            except Exception:
+                equity_after = None
             try:
                 self._journal.record_exit(
                     trade_id=str(trade_id or instrument or ""),
@@ -1131,6 +1136,10 @@ class ProfitProtection:
                     duration_seconds=int(summary["duration_sec"] or 0),  # type: ignore[arg-type]
                     broker_confirmed=closed_by == "broker_confirmed",
                     run_tag=None,
+                    instrument=instrument,
+                    direction=state.side if state else None,
+                    entry_price=state.entry_price if state else None,
+                    equity_after=equity_after,
                 )
             except Exception:
                 # Journal failures must never block trade lifecycle.

@@ -61,6 +61,7 @@ class TradeJournal:
             isolation_level=None,  # autocommit
             check_same_thread=False,
         )
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
@@ -98,6 +99,21 @@ class TradeJournal:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_instrument_ts ON trades (instrument, timestamp_utc);"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    instrument TEXT,
+                    direction TEXT,
+                    entry_price REAL,
+                    exit_price REAL,
+                    profit REAL,
+                    reason TEXT,
+                    equity_after REAL
+                );
+                """
+            )
             # Migration-safe: add run_tag if missing.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(trades);").fetchall()}
             if "run_tag" not in columns:
@@ -120,6 +136,7 @@ class TradeJournal:
         run_tag: Optional[str] = None,
         gating_flags: Mapping[str, Any],
         indicators_snapshot: Mapping[str, Any],
+        equity_after: Optional[float] = None,
     ) -> None:
         if not trade_id:
             return
@@ -191,6 +208,30 @@ class TradeJournal:
                 """,
                 payload,
             )
+            conn.execute(
+                """
+                INSERT INTO trade_events (
+                    timestamp,
+                    instrument,
+                    direction,
+                    entry_price,
+                    exit_price,
+                    profit,
+                    reason,
+                    equity_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["timestamp_utc"],
+                    instrument,
+                    side,
+                    entry_price,
+                    None,
+                    None,
+                    "OPEN",
+                    equity_after,
+                ),
+            )
 
     def record_exit(
         self,
@@ -205,6 +246,10 @@ class TradeJournal:
         duration_seconds: Optional[int],
         broker_confirmed: Optional[bool],
         run_tag: Optional[str] = None,
+        instrument: Optional[str] = None,
+        direction: Optional[str] = None,
+        entry_price: Optional[float] = None,
+        equity_after: Optional[float] = None,
     ) -> None:
         if not trade_id:
             return
@@ -264,6 +309,42 @@ class TradeJournal:
                 """,
                 payload,
             )
+            existing_trade = conn.execute(
+                "SELECT instrument, side, entry_price FROM trades WHERE trade_id=?",
+                (str(trade_id),),
+            ).fetchone()
+            resolved_instrument = instrument if instrument is not None else (existing_trade[0] if existing_trade else None)
+            resolved_direction = direction if direction is not None else (existing_trade[1] if existing_trade else None)
+            resolved_entry = entry_price if entry_price is not None else (existing_trade[2] if existing_trade else None)
+            conn.execute(
+                """
+                INSERT INTO trade_events (
+                    timestamp,
+                    instrument,
+                    direction,
+                    entry_price,
+                    exit_price,
+                    profit,
+                    reason,
+                    equity_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["exit_timestamp_utc"],
+                    resolved_instrument,
+                    resolved_direction,
+                    resolved_entry,
+                    exit_price,
+                    realized_pnl_ccy,
+                    exit_reason,
+                    equity_after,
+                ),
+            )
+
+    def count_trade_events(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()
+            return int(row[0] if row else 0)
 
 
 __all__ = ["TradeJournal", "default_journal_path"]
