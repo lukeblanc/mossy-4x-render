@@ -228,6 +228,103 @@ def test_macd_confirmation_allows_trade(monkeypatch):
     _reset_clock(original_datetime)
 
 
+def test_macd_missing_values_do_not_block_trade(monkeypatch):
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr, instrument=None):
+            return 0.5
+
+        def tp_distance_from_atr(self, atr, instrument=None):
+            return 1.0
+
+        def register_entry(self, now_utc, instrument: str):
+            pass
+
+    class DummyEngine:
+        def __init__(self) -> None:
+            self.marked: List[str] = []
+
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "rsi": 60.0,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                        # MACD fields intentionally omitted to simulate
+                        # temporary indicator warm-up/unavailable feed values.
+                    },
+                    reason="bullish",
+                    market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
+                )
+            ]
+
+        def mark_trade(self, instrument: str) -> None:
+            self.marked.append(instrument)
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, object]] = []
+
+        def place_order(
+            self,
+            instrument: str,
+            signal: str,
+            units: int,
+            *args,
+            **kwargs,
+        ) -> Dict[str, str]:
+            self.calls.append({"instrument": instrument, "signal": signal, "units": units})
+            return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+        def close_all_positions(self) -> None:
+            pass
+
+    dummy_engine = DummyEngine()
+    dummy_broker = DummyBroker()
+    dummy_risk = DummyRisk()
+    monkeypatch.setitem(main.config, "use_macd_confirmation", True)
+    monkeypatch.setattr(main, "engine", dummy_engine)
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "risk", dummy_risk)
+    monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
+    monkeypatch.setattr(
+        main.position_sizer,
+        "units_for_risk",
+        lambda equity, entry_price, stop_distance, risk_pct: 100,
+    )
+    original_datetime, original_ts, before, watchdog = _set_heartbeat(monkeypatch)
+
+    asyncio.run(main.decision_cycle())
+
+    assert dummy_engine.marked == ["EUR_USD"]
+    assert dummy_broker.calls == [{"instrument": "EUR_USD", "signal": "BUY", "units": 100}]
+    watchdog.last_decision_ts = original_ts
+    _reset_clock(original_datetime)
+
+
 def test_trailing_flow_unchanged_with_macd(monkeypatch):
     class DummyRisk:
         risk_per_trade_pct = 0.001

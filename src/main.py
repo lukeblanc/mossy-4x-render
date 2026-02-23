@@ -552,8 +552,12 @@ def _macd_confirms(signal: str, diagnostics: Dict[str, float] | None) -> tuple[b
     macd_histogram = _coerce(diagnostics.get("macd_histogram"))
     macd_histogram_prev = _coerce(diagnostics.get("macd_histogram_prev"))
 
+    # Fail-open when MACD inputs are unavailable.
+    # In live feeds, startup windows or partial diagnostics can temporarily
+    # produce NaN values; blocking all entries in that state makes the bot
+    # appear "stuck" and not trading.
     if any(math.isnan(val) for val in (macd_line, macd_signal, macd_histogram)):
-        return False, macd_line, macd_signal, macd_histogram
+        return True, macd_line, macd_signal, macd_histogram
 
     hist_rising = False
     hist_falling = False
