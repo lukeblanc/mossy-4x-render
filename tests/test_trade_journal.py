@@ -33,6 +33,7 @@ def test_trade_journal_entry_and_exit(tmp_path):
         run_tag="MINI_RUN",
         gating_flags={"session_ok": True, "risk_ok": True, "spread_ok": True},
         indicators_snapshot={"rsi": 55.5, "atr": 0.0007},
+        equity_after=1500.0,
     )
 
     with sqlite3.connect(db_path) as conn:
@@ -58,6 +59,7 @@ def test_trade_journal_entry_and_exit(tmp_path):
         duration_seconds=900,
         broker_confirmed=True,
         run_tag="MINI_RUN",
+        equity_after=1501.1,
     )
 
     with sqlite3.connect(db_path) as conn:
@@ -68,3 +70,8 @@ def test_trade_journal_entry_and_exit(tmp_path):
         assert row[8] == "TRAIL"
         assert row[9] == 900
         assert row[10] == 1
+
+        event_count = conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0]
+        assert event_count == 2
+
+    assert journal.count_trade_events() == 2
