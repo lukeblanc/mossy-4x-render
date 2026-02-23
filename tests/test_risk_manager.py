@@ -343,3 +343,15 @@ def test_daily_trade_cap_blocks_and_resets(state_dir):
     next_day = now + timedelta(days=1)
     ok, reason = manager.should_open(next_day, 10_000.0, [], "AUD_USD", 0.1)
     assert ok is True
+
+
+def test_aggressive_test_mode_bypasses_mini_run_trade_soft_cap(monkeypatch, state_dir):
+    monkeypatch.delenv("MAX_TRADES_PER_DAY", raising=False)
+    monkeypatch.delenv("MINI_RUN_MAX_TRADES_PER_DAY", raising=False)
+
+    manager = RiskManager(
+        {"max_trades_per_day": 100, "aggressive_test_mode": True},
+        mode="paper",
+    )
+
+    assert manager.max_trades_per_day == 100

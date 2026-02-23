@@ -180,7 +180,8 @@ class RiskManager:
         configured_max_trades = self.config.get("max_trades_per_day", 0)
         soft_cap = int(os.getenv("MINI_RUN_MAX_TRADES_PER_DAY", 5))  # MINI-RUN safety: keep daily trades tight
         base_daily_trades = int(env_max_trades or configured_max_trades or soft_cap or 0)
-        if env_max_trades is None:
+        aggressive_test_mode = bool(self.config.get("aggressive_test_mode", False))
+        if env_max_trades is None and not aggressive_test_mode:
             base_daily_trades = min(base_daily_trades, soft_cap)
         self.max_trades_per_day = int(base_daily_trades)
         self.daily_loss_cap_pct = float(

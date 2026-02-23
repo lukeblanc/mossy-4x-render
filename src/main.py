@@ -8,6 +8,7 @@ import math
 import uuid
 from flask import Flask, jsonify
 import threading
+from waitress import serve
 
 
 def send_snapshot(user: str, equity: float) -> None:
@@ -240,6 +241,12 @@ config["use_macd_confirmation"] = _as_bool(
     os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
 )
 config["session_mode"] = (os.getenv("SESSION_MODE") or config.get("session_mode") or "SOFT").upper()  # MINI-RUN: default to SOFT for boundary-friendly entries
+# Default to ON for aggressive demo deployments unless explicitly disabled.
+AGGRESSIVE_TEST_MODE = os.getenv("AGGRESSIVE_TEST_MODE", "true").lower() == "true"
+aggressive_test_mode = AGGRESSIVE_TEST_MODE
+print(f"[CONFIG] AGGRESSIVE_TEST_MODE={AGGRESSIVE_TEST_MODE}", flush=True)
+# Demo/testing-only beast mode: this can increase turnover and risk and should be reviewed before live usage.
+config["aggressive_test_mode"] = aggressive_test_mode
 config["session_off_session_vol_ratio"] = float(
     os.getenv("SESSION_OFF_SESSION_VOL_RATIO", config.get("session_off_session_vol_ratio", 1.25))
 )
@@ -295,6 +302,7 @@ risk_config["max_concurrent_positions"] = int(env_max_positions or max_positions
 risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02))))
 risk_config.setdefault("weekly_loss_cap_pct", float(os.getenv("WEEKLY_LOSS_CAP_PCT", risk_config.get("weekly_loss_cap_pct", 0.03))))
 risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
+risk_config.setdefault("max_total_open_risk_pct", float(os.getenv("MAX_TOTAL_OPEN_RISK", risk_config.get("max_total_open_risk_pct", 0.02))))
 risk_config.setdefault("daily_profit_target_usd", float(os.getenv("DAILY_PROFIT_TARGET_USD", risk_config.get("daily_profit_target_usd", 5.0))))
 risk_config["max_trades_per_day"] = int(os.getenv("MAX_TRADES_PER_DAY", risk_config.get("max_trades_per_day", 0) or 0))
 
@@ -310,6 +318,19 @@ if aggressive_mode:
     # Remove profit cap in aggressive/demo and widen take-profit allowance
     risk_config["daily_profit_target_usd"] = float(os.getenv("AGGRESSIVE_DAILY_PROFIT_CAP", 0.0))
     risk_cooldown_candles = risk_config["cooldown_candles"]
+
+if aggressive_test_mode:
+    # Aggressive demo mode: disable daily profit cap gating and use larger per-trade risk.
+    risk_per_trade_pct = 2.5
+    risk_config["risk_per_trade_pct"] = risk_per_trade_pct / 100.0
+    risk_config["daily_profit_target_usd"] = 0.0
+    risk_config["max_trades_per_day"] = 100
+    print("[CONFIG] Daily profit cap DISABLED (aggressive demo mode)", flush=True)
+    print("[CONFIG] Risk per trade set to 2.5%.", flush=True)
+    print("[CONFIG] Max trades per day set to 100 (aggressive demo mode)", flush=True)
+
+# Pass through so RiskManager can avoid MINI_RUN soft-cap when aggressive testing is active.
+risk_config["aggressive_test_mode"] = aggressive_test_mode
 
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
@@ -342,16 +363,19 @@ async def heartbeat() -> None:
     equity = broker.account_equity()
     open_count = len(_open_trades_state())
 
-    trade_count = "unknown"
+    journal_path = journal.path
+    journal_exists = journal_path.exists()
     try:
-        journal_path = default_journal_path(DATA_DIR)
-        if journal_path.exists():
-            with journal_path.open("r", encoding="utf-8") as f:
-                trade_count = sum(1 for _ in f)
-    except Exception:
-        trade_count = "unknown"
-
-    print(f"[JOURNAL] total_trades={trade_count}", flush=True)
+        trade_count = journal.count_trade_events()
+        print(
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} total_trades={trade_count}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
+            flush=True,
+        )
 
     BOT_STATE.update({
         "status": "running",
@@ -961,6 +985,7 @@ async def decision_cycle() -> None:
                         run_tag=MINI_RUN_TAG,
                         gating_flags=gating_flags,
                         indicators_snapshot=indicators_snapshot,
+                        equity_after=equity,
                     )
                 except Exception:
                     # Journal failures must not block live execution.
@@ -1010,10 +1035,14 @@ def start_status_server():
         return jsonify(BOT_STATE)
 
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    serve(app, host="0.0.0.0", port=port)
 
 
-threading.Thread(target=start_status_server, daemon=True).start()
+def launch_status_server_thread() -> threading.Thread:
+    thread = threading.Thread(target=start_status_server, daemon=True)
+    thread.start()
+    return thread
 
 if __name__ == "__main__":
+    launch_status_server_thread()
     asyncio.run(runner())
