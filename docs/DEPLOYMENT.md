@@ -22,6 +22,21 @@ You may need manual intervention only when:
 - a deployment is stuck/failed and needs retry,
 - you are performing rollback/hotfix operations.
 
+## Aggressive test profile (higher activity, bounded risk)
+
+For short test windows where you want more entries than `SOFT` mode but still avoid reckless sizing:
+
+- `SESSION_MODE=ALWAYS`
+- `AGGRESSIVE_MODE=true`
+- `AGGRESSIVE_RISK_PCT=0.004` (0.4% risk per trade)
+- `AGGRESSIVE_MAX_POSITIONS=3`
+- `AGGRESSIVE_COOLDOWN_CANDLES=2`
+- `AGGRESSIVE_DAILY_LOSS_CAP_PCT=0.02`
+- `AGGRESSIVE_WEEKLY_LOSS_CAP_PCT=0.05`
+- `AGGRESSIVE_MAX_DRAWDOWN_CAP_PCT=0.15`
+
+This is intentionally higher-tempo than default, but still constrained by loss caps/drawdown limits.
+
 ## Instrument Configuration
 
 - Omit the `instruments` key or set it to `null`/`None` to use the default instrument basket.

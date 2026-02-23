@@ -17,6 +17,22 @@ services:
         value: "30"
       - key: DECISION_SECONDS
         value: "60"
+      - key: SESSION_MODE
+        value: "ALWAYS"
+      - key: AGGRESSIVE_MODE
+        value: "true"
+      - key: AGGRESSIVE_RISK_PCT
+        value: "0.004"
+      - key: AGGRESSIVE_MAX_POSITIONS
+        value: "3"
+      - key: AGGRESSIVE_COOLDOWN_CANDLES
+        value: "2"
+      - key: AGGRESSIVE_DAILY_LOSS_CAP_PCT
+        value: "0.02"
+      - key: AGGRESSIVE_WEEKLY_LOSS_CAP_PCT
+        value: "0.05"
+      - key: AGGRESSIVE_MAX_DRAWDOWN_CAP_PCT
+        value: "0.15"
       - key: OANDA_API_KEY
         sync: false
       - key: INSTRUMENTS
