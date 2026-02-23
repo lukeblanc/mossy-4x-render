@@ -319,13 +319,12 @@ if aggressive_mode:
     risk_cooldown_candles = risk_config["cooldown_candles"]
 
 if aggressive_test_mode:
-    # Beast mode is intentionally opt-in for demo testing only.
-    risk_config["risk_per_trade_pct"] = float(os.getenv("AGGRESSIVE_RISK_PCT", config.get("aggressive_risk_pct", 0.004)))
-    risk_config["max_total_open_risk_pct"] = float(
-        os.getenv("AGG_MAX_TOTAL_OPEN_RISK", config.get("agg_max_total_open_risk", 0.02))
-    )
-    risk_config["daily_loss_cap_pct"] = float(os.getenv("DAILY_MAX_DRAWDOWN", config.get("daily_max_drawdown", 0.03)))
-    risk_config["weekly_loss_cap_pct"] = float(os.getenv("WEEKLY_MAX_DRAWDOWN", config.get("weekly_max_drawdown", 0.05)))
+    # Aggressive demo mode: disable daily profit cap gating and use larger per-trade risk.
+    risk_per_trade_pct = 2.5
+    risk_config["risk_per_trade_pct"] = risk_per_trade_pct / 100.0
+    risk_config["daily_profit_target_usd"] = 0.0
+    print("[CONFIG] Daily profit cap DISABLED (aggressive demo mode)", flush=True)
+    print(f"[CONFIG] Risk per trade set to {risk_per_trade_pct}%", flush=True)
 
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)

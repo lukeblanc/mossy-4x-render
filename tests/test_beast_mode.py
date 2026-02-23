@@ -12,10 +12,6 @@ def _reload_main(monkeypatch, **env):
     for key in [
         "AGGRESSIVE_TEST_MODE",
         "SESSION_MODE",
-        "AGGRESSIVE_RISK_PCT",
-        "AGG_MAX_TOTAL_OPEN_RISK",
-        "DAILY_MAX_DRAWDOWN",
-        "WEEKLY_MAX_DRAWDOWN",
     ]:
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -32,18 +28,12 @@ def _reload_main(monkeypatch, **env):
 
 
 def test_beast_mode_forces_always_session(monkeypatch):
-    main_mod = _reload_main(
-        monkeypatch,
-        AGGRESSIVE_TEST_MODE="true",
-        AGGRESSIVE_RISK_PCT="0.004",
-        AGG_MAX_TOTAL_OPEN_RISK="0.02",
-        DAILY_MAX_DRAWDOWN="0.03",
-        WEEKLY_MAX_DRAWDOWN="0.05",
-    )
+    main_mod = _reload_main(monkeypatch, AGGRESSIVE_TEST_MODE="true")
 
     assert main_mod.config["aggressive_test_mode"] is True
     assert main_mod.config["session_mode"] == "ALWAYS"
-    assert main_mod.config["risk"]["risk_per_trade_pct"] == 0.004
+    assert main_mod.config["risk"]["risk_per_trade_pct"] == 0.025
+    assert main_mod.config["risk"]["daily_profit_target_usd"] == 0.0
 
     decision = session_filter.session_decision(
         datetime(2024, 1, 1, 22, 0, tzinfo=timezone.utc),
