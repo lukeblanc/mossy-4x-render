@@ -18,7 +18,7 @@
   "rsi_slope_min": 0.1,
   "adx_filter": 20,
   "atr_length": 14,
-  "min_atr": 0.00005,
+  "min_atr": 5e-05,
   "xau_atr_guard_ratio": 1.8,
   "xau_atr_guard_action": "skip",
   "xau_atr_guard_size_scale": 0.5,
@@ -88,5 +88,11 @@
     "minutes": 90,
     "min_pips": 2.0,
     "xau_atr_mult": 0.35
-  }
+  },
+  "aggressive_test_mode": false,
+  "aggressive_test_mode_note": "Demo/testing only: enables SESSION_MODE=ALWAYS while keeping spread/news filters active; review before any live use.",
+  "aggressive_risk_pct": 0.004,
+  "agg_max_total_open_risk": 0.02,
+  "daily_max_drawdown": 0.03,
+  "weekly_max_drawdown": 0.05
 }
