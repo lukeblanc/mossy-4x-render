@@ -916,15 +916,46 @@ async def decision_cycle() -> None:
                 )
                 continue
 
-            units = position_sizer.units_for_risk(
-                equity,
-                entry_price or 0.0,
-                sl_distance,
-                risk.risk_per_trade_pct,
+            try:
+                size_result = position_sizer.units_for_risk(
+                    equity,
+                    evaluation.instrument,
+                    sl_distance,
+                    risk.risk_per_trade_pct,
+                    broker=broker,
+                    account_currency="AUD",
+                    min_trade_units=1,
+                )
+            except TypeError:
+                # Backwards compatibility for tests/older call sites monkeypatching legacy signature.
+                size_result = position_sizer.units_for_risk(
+                    equity,
+                    entry_price or 0.0,
+                    sl_distance,
+                    risk.risk_per_trade_pct,
+                )
+            if isinstance(size_result, tuple):
+                units, size_diag = size_result
+            else:
+                units = int(size_result)
+                size_diag = {
+                    "equity": equity,
+                    "risk_pct": risk.risk_per_trade_pct,
+                    "risk_amount": equity * risk.risk_per_trade_pct,
+                    "stop_pips": 0.0,
+                    "pip_value_per_unit": 0.0,
+                    "final_units": units,
+                }
+            print(
+                "[POSITION-SIZE]\n"
+                f"equity={size_diag.get('equity', 0.0):.2f}\n"
+                f"risk_pct={size_diag.get('risk_pct', 0.0):.6f}\n"
+                f"risk_amount={size_diag.get('risk_amount', 0.0):.2f}\n"
+                f"stop_pips={size_diag.get('stop_pips', 0.0):.5f}\n"
+                f"pip_value_per_unit={size_diag.get('pip_value_per_unit', 0.0):.8f}\n"
+                f"final_units={size_diag.get('final_units', 0)}",
+                flush=True,
             )
-            risk_scale = session_decision.risk_scale * xau_risk_scale
-            if risk_scale < 1.0:
-                units = int(units * max(risk_scale, 0.1))
             if units <= 0:
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to zero position size",
