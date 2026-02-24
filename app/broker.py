@@ -391,6 +391,51 @@ class Broker:
             print(f"[OANDA] Exception fetching spread for {instrument}: {exc}", flush=True)
             return 0.0
 
+    def mid_price(self, instrument: str) -> float | None:
+        if not (self.key and self.account):
+            return None
+        try:
+            with self._client() as client:
+                resp = client.get(
+                    f"/v3/accounts/{self.account}/pricing",
+                    params={"instruments": instrument},
+                )
+                if resp.status_code != 200:
+                    return None
+                data = resp.json().get("prices", [])
+                if not data:
+                    return None
+                price = data[0]
+                bids = price.get("bids") or []
+                asks = price.get("asks") or []
+                if not bids or not asks:
+                    return None
+                bid = float(bids[0]["price"])
+                ask = float(asks[0]["price"])
+                return (bid + ask) / 2.0
+        except Exception:
+            return None
+
+    def conversion_rate(self, from_ccy: str, to_ccy: str) -> float | None:
+        source = (from_ccy or "").upper()
+        target = (to_ccy or "").upper()
+        if not source or not target:
+            return None
+        if source == target:
+            return 1.0
+
+        direct = f"{source}_{target}"
+        direct_mid = self.mid_price(direct)
+        if direct_mid and direct_mid > 0:
+            return direct_mid
+
+        inverse = f"{target}_{source}"
+        inverse_mid = self.mid_price(inverse)
+        if inverse_mid and inverse_mid > 0:
+            return 1.0 / inverse_mid
+
+        return None
+
     def close_all_positions(self) -> None:
         if not (self.key and self.account):
             return
