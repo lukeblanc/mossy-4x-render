@@ -181,7 +181,8 @@ class RiskManager:
         mini_run_soft_cap_env = os.getenv("MINI_RUN_MAX_TRADES_PER_DAY")
         soft_cap = int(mini_run_soft_cap_env) if mini_run_soft_cap_env is not None else 0
         base_daily_trades = int(env_max_trades or configured_max_trades or soft_cap or 0)
-        if env_max_trades is None and mini_run_soft_cap_env is not None:
+        aggressive_test_mode = bool(self.config.get("aggressive_test_mode", False))
+        if env_max_trades is None and not aggressive_test_mode:
             base_daily_trades = min(base_daily_trades, soft_cap)
         self.max_trades_per_day = int(base_daily_trades)
         self.daily_loss_cap_pct = float(
