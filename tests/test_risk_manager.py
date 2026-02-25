@@ -329,7 +329,10 @@ def test_max_concurrent_positions_default_and_env_override(monkeypatch, state_di
     assert reason == "max-positions"
 
 
-def test_daily_trade_cap_blocks_and_resets(state_dir):
+def test_daily_trade_cap_blocks_and_resets(monkeypatch, state_dir):
+    monkeypatch.delenv("MAX_TRADES_PER_DAY", raising=False)
+    monkeypatch.setenv("MINI_RUN_MAX_TRADES_PER_DAY", "100")
+
     manager = RiskManager({"max_trades_per_day": 2}, mode="paper")
     now = _utc(2024, 1, 1, 9, 0)
 
