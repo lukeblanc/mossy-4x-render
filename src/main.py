@@ -56,7 +56,7 @@ from src.risk_setup import (
     build_risk_manager,
     resolve_state_dir,
 )
-from src.trade_journal import TradeJournal, default_journal_path
+from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
 
 VERSION = "v1.6.1"
 
@@ -1069,5 +1069,9 @@ def launch_status_server_thread() -> threading.Thread:
     return thread
 
 if __name__ == "__main__":
+    if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS", False)):
+        run_performance_analysis(journal.path)
+        sys.exit(0)
+
     launch_status_server_thread()
     asyncio.run(runner())
