@@ -56,7 +56,7 @@ from src.risk_setup import (
     build_risk_manager,
     resolve_state_dir,
 )
-from src.trade_journal import TradeJournal, default_journal_path
+from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
 
 VERSION = "v1.6.1"
 
@@ -1069,5 +1069,25 @@ def launch_status_server_thread() -> threading.Thread:
     return thread
 
 if __name__ == "__main__":
+    journal_path = journal.path
+    journal_exists = journal_path.exists()
+    try:
+        trade_count = journal.count_trade_events()
+        print(
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} total_trades={trade_count}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
+            flush=True,
+        )
+
+    if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS", False)):
+        print("[MANUAL_ANALYSIS_TRIGGERED]", flush=True)
+        run_performance_analysis(journal.path)
+        print("[MANUAL_ANALYSIS_COMPLETE]", flush=True)
+        sys.exit(0)
+
     launch_status_server_thread()
     asyncio.run(runner())
