@@ -347,4 +347,143 @@ class TradeJournal:
             return int(row[0] if row else 0)
 
 
-__all__ = ["TradeJournal", "default_journal_path"]
+def _safe_div(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def _compute_segment_metrics(trades: list[dict[str, Any]]) -> dict[str, float | int]:
+    total_trades = len(trades)
+    wins = [trade["pnl"] for trade in trades if trade["pnl"] > 0]
+    losses = [trade["pnl"] for trade in trades if trade["pnl"] < 0]
+
+    win_count = len(wins)
+    loss_count = len(losses)
+    win_rate_ratio = _safe_div(win_count, total_trades)
+    win_rate_pct = win_rate_ratio * 100.0
+
+    avg_win = _safe_div(sum(wins), win_count)
+    avg_loss = _safe_div(sum(losses), loss_count)
+
+    gross_profit = sum(wins)
+    gross_loss = sum(losses)
+    profit_factor = _safe_div(gross_profit, abs(gross_loss))
+    expectancy = (win_rate_ratio * avg_win) - ((1.0 - win_rate_ratio) * abs(avg_loss))
+
+    avg_trade_duration = _safe_div(
+        sum(float(trade.get("duration_seconds") or 0.0) for trade in trades),
+        total_trades,
+    )
+
+    return {
+        "total_trades": total_trades,
+        "wins": win_count,
+        "losses": loss_count,
+        "win_rate_pct": win_rate_pct,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "profit_factor": profit_factor,
+        "expectancy": expectancy,
+        "avg_trade_duration": avg_trade_duration,
+    }
+
+
+def _max_drawdown_and_losing_streak(trades: list[dict[str, Any]]) -> tuple[float, int]:
+    max_drawdown = 0.0
+    longest_losing_streak = 0
+    current_losing_streak = 0
+
+    peak_equity = 0.0
+    equity = 0.0
+
+    for trade in trades:
+        pnl = float(trade["pnl"])
+        equity += pnl
+        peak_equity = max(peak_equity, equity)
+        max_drawdown = max(max_drawdown, peak_equity - equity)
+
+        if pnl < 0:
+            current_losing_streak += 1
+            longest_losing_streak = max(longest_losing_streak, current_losing_streak)
+        else:
+            current_losing_streak = 0
+
+    return max_drawdown, longest_losing_streak
+
+
+def run_performance_analysis(db_path: Path | str | None = None) -> None:
+    """Compute and print performance analytics from all closed trades in trade_journal.db."""
+
+    db_file = Path(db_path) if db_path is not None else default_journal_path()
+    if not db_file.exists():
+        print(f"[PERFORMANCE_SUMMARY]\nerror=database_not_found\npath={db_file}", flush=True)
+        return
+
+    conn = sqlite3.connect(db_file)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                trade_id,
+                instrument,
+                COALESCE(realized_pnl_ccy, 0.0) AS pnl,
+                COALESCE(duration_seconds, 0) AS duration_seconds,
+                exit_timestamp_utc
+            FROM trades
+            WHERE exit_timestamp_utc IS NOT NULL
+            ORDER BY exit_timestamp_utc ASC, trade_id ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    trades = [
+        {
+            "trade_id": row["trade_id"],
+            "instrument": (row["instrument"] or "UNKNOWN").upper(),
+            "pnl": float(row["pnl"] or 0.0),
+            "duration_seconds": int(row["duration_seconds"] or 0),
+        }
+        for row in rows
+    ]
+
+    metrics = _compute_segment_metrics(trades)
+    max_drawdown, longest_losing_streak = _max_drawdown_and_losing_streak(trades)
+
+    print("[PERFORMANCE_SUMMARY]", flush=True)
+    print(f"total_trades={metrics['total_trades']}", flush=True)
+    print(f"win_rate={metrics['win_rate_pct']:.2f}", flush=True)
+    print(f"wins={metrics['wins']}", flush=True)
+    print(f"losses={metrics['losses']}", flush=True)
+    print(f"avg_win={metrics['avg_win']:.2f}", flush=True)
+    print(f"avg_loss={metrics['avg_loss']:.2f}", flush=True)
+    print(f"gross_profit={metrics['gross_profit']:.2f}", flush=True)
+    print(f"gross_loss={metrics['gross_loss']:.2f}", flush=True)
+    print(f"profit_factor={metrics['profit_factor']:.4f}", flush=True)
+    print(f"expectancy={metrics['expectancy']:.4f}", flush=True)
+    print(f"max_drawdown={max_drawdown:.2f}", flush=True)
+    print(f"longest_losing_streak={longest_losing_streak}", flush=True)
+    print(f"avg_trade_duration={metrics['avg_trade_duration']:.2f}", flush=True)
+
+    by_instrument: dict[str, list[dict[str, Any]]] = {}
+    for trade in trades:
+        by_instrument.setdefault(trade["instrument"], []).append(trade)
+
+    print("\n[PERFORMANCE_BY_INSTRUMENT]", flush=True)
+    for instrument in sorted(by_instrument.keys()):
+        segment_metrics = _compute_segment_metrics(by_instrument[instrument])
+        print(f"instrument={instrument}", flush=True)
+        print(f"trades={segment_metrics['total_trades']}", flush=True)
+        print(f"win_rate={segment_metrics['win_rate_pct']:.2f}", flush=True)
+        print(f"avg_win={segment_metrics['avg_win']:.2f}", flush=True)
+        print(f"avg_loss={segment_metrics['avg_loss']:.2f}", flush=True)
+        print(f"expectancy={segment_metrics['expectancy']:.4f}", flush=True)
+        print(f"profit_factor={segment_metrics['profit_factor']:.4f}", flush=True)
+        print("", flush=True)
+
+
+__all__ = ["TradeJournal", "default_journal_path", "run_performance_analysis"]
