@@ -414,106 +414,6 @@ def _max_drawdown_and_losing_streak(trades: list[dict[str, Any]]) -> tuple[float
     return max_drawdown, longest_losing_streak
 
 
-def _format_performance_report(
-    *,
-    analysis_ts: datetime,
-    metrics: Mapping[str, float | int],
-    max_drawdown: float,
-    longest_losing_streak: int,
-    instrument_metrics: Mapping[str, Mapping[str, float | int]],
-) -> str:
-    lines = [
-        "Mossy 4X Performance Report",
-        f"Analysis UTC: {analysis_ts.isoformat()}",
-        "",
-        "[PERFORMANCE_SUMMARY]",
-        f"total_trades={metrics['total_trades']}",
-        f"win_rate={metrics['win_rate_pct']:.2f}",
-        f"wins={metrics['wins']}",
-        f"losses={metrics['losses']}",
-        f"avg_win={metrics['avg_win']:.2f}",
-        f"avg_loss={metrics['avg_loss']:.2f}",
-        f"gross_profit={metrics['gross_profit']:.2f}",
-        f"gross_loss={metrics['gross_loss']:.2f}",
-        f"profit_factor={metrics['profit_factor']:.4f}",
-        f"expectancy={metrics['expectancy']:.4f}",
-        f"max_drawdown={max_drawdown:.2f}",
-        f"longest_losing_streak={longest_losing_streak}",
-        f"avg_trade_duration={metrics['avg_trade_duration']:.2f}",
-        "",
-        "[PERFORMANCE_BY_INSTRUMENT]",
-    ]
-
-    for instrument in sorted(instrument_metrics.keys()):
-        segment = instrument_metrics[instrument]
-        lines.extend(
-            [
-                f"instrument={instrument}",
-                f"trades={segment['total_trades']}",
-                f"win_rate={segment['win_rate_pct']:.2f}",
-                f"avg_win={segment['avg_win']:.2f}",
-                f"avg_loss={segment['avg_loss']:.2f}",
-                f"expectancy={segment['expectancy']:.4f}",
-                f"profit_factor={segment['profit_factor']:.4f}",
-                "",
-            ]
-        )
-    return "\n".join(lines).strip()
-
-
-def _save_performance_pdf(report_text: str, analysis_ts: datetime, total_trades: int, report_dir: Path) -> Path:
-    timestamp_file = analysis_ts.strftime("%Y-%m-%dT%H-%M-%S")
-    filename = f"performance_{timestamp_file}_{int(total_trades)}trades.pdf"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / filename
-
-    try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.pdfgen import canvas
-
-        pdf = canvas.Canvas(str(report_path), pagesize=letter)
-        _, height = letter
-        y = height - 60
-
-        pdf.setFont("Helvetica-Bold", 16)
-        pdf.drawString(40, y, "Mossy 4X Performance Report")
-        y -= 24
-        pdf.setFont("Helvetica", 11)
-        pdf.drawString(40, y, f"UTC timestamp: {analysis_ts.isoformat()}")
-        y -= 26
-
-        pdf.setFont("Courier", 9)
-        for line in report_text.splitlines():
-            if y < 50:
-                pdf.showPage()
-                y = height - 50
-                pdf.setFont("Courier", 9)
-            pdf.drawString(40, y, line)
-            y -= 12
-
-        pdf.setFont("Helvetica-Oblique", 8)
-        footer = f"Generated UTC: {datetime.now(timezone.utc).isoformat()}"
-        pdf.drawString(40, 28, footer)
-        pdf.save()
-        return report_path
-    except ModuleNotFoundError:
-        fallback_content = (
-            "%PDF-1.1\n"
-            "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-            "2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
-            "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>> >endobj\n"
-            f"4 0 obj<</Length {len(report_text) + 90}>>stream\n"
-            "BT /F1 10 Tf 40 760 Td (Mossy 4X Performance Report) Tj ET\n"
-            "endstream endobj\n"
-            "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Courier>>endobj\n"
-            "xref\n0 6\n0000000000 65535 f \n"
-            "trailer<</Size 6/Root 1 0 R>>\nstartxref\n0\n%%EOF\n"
-        )
-        report_path.write_bytes(fallback_content.encode("utf-8", errors="ignore"))
-        return report_path
-
-
-
 def run_performance_analysis(db_path: Path | str | None = None) -> None:
     """Compute and print performance analytics from all closed trades in trade_journal.db."""
 
@@ -573,11 +473,9 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
     for trade in trades:
         by_instrument.setdefault(trade["instrument"], []).append(trade)
 
-    instrument_metrics: dict[str, dict[str, float | int]] = {}
     print("\n[PERFORMANCE_BY_INSTRUMENT]", flush=True)
     for instrument in sorted(by_instrument.keys()):
         segment_metrics = _compute_segment_metrics(by_instrument[instrument])
-        instrument_metrics[instrument] = segment_metrics
         print(f"instrument={instrument}", flush=True)
         print(f"trades={segment_metrics['total_trades']}", flush=True)
         print(f"win_rate={segment_metrics['win_rate_pct']:.2f}", flush=True)
@@ -586,24 +484,6 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
         print(f"expectancy={segment_metrics['expectancy']:.4f}", flush=True)
         print(f"profit_factor={segment_metrics['profit_factor']:.4f}", flush=True)
         print("", flush=True)
-
-    analysis_ts = datetime.now(timezone.utc)
-    report_text = _format_performance_report(
-        analysis_ts=analysis_ts,
-        metrics=metrics,
-        max_drawdown=max_drawdown,
-        longest_losing_streak=longest_losing_streak,
-        instrument_metrics=instrument_metrics,
-    )
-
-    report_dir = Path(os.getenv("PERFORMANCE_REPORT_DIR", "/var/data/performance_reports/"))
-    report_path = _save_performance_pdf(
-        report_text=report_text,
-        analysis_ts=analysis_ts,
-        total_trades=int(metrics["total_trades"]),
-        report_dir=report_dir,
-    )
-    print(f"[PERFORMANCE_PDF_SAVED] path={report_path.resolve()}", flush=True)
 
 
 __all__ = ["TradeJournal", "default_journal_path", "run_performance_analysis"]
