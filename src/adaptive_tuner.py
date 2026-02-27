@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +12,7 @@ class AdaptiveSnapshot:
     losses: int
     loss_streak: int
     risk_multiplier: float
-    source: str = "none"
+    source: str
 
 
 class AdaptiveTuner:
@@ -78,29 +77,6 @@ class AdaptiveTuner:
                 break
         return streak
 
-
-    @staticmethod
-    def _build_snapshot(*, closed_trades: int, wins: int, losses: int, loss_streak: int, risk_multiplier: float, source: str) -> AdaptiveSnapshot:
-        """Build snapshot compatibly across mixed deployments.
-
-        Some environments may still have an older AdaptiveSnapshot signature
-        without the ``source`` field when stale bytecode is loaded.
-        """
-        payload = {
-            "closed_trades": closed_trades,
-            "wins": wins,
-            "losses": losses,
-            "loss_streak": loss_streak,
-            "risk_multiplier": risk_multiplier,
-            "source": source,
-        }
-        try:
-            return AdaptiveSnapshot(**payload)
-        except TypeError:
-            params = inspect.signature(AdaptiveSnapshot).parameters
-            compatible_payload = {key: value for key, value in payload.items() if key in params}
-            return AdaptiveSnapshot(**compatible_payload)
-
     def snapshot(self) -> AdaptiveSnapshot:
         recent, source = self._load_recent_pnl()
         closed = len(recent)
@@ -124,11 +100,10 @@ class AdaptiveTuner:
             else:
                 multiplier = 0.9
 
-        return self._build_snapshot(
+        return AdaptiveSnapshot(
             closed_trades=closed,
             wins=wins,
             losses=losses,
             loss_streak=loss_streak,
             risk_multiplier=max(0.5, min(1.0, multiplier)),
-            source=source,
         )

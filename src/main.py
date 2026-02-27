@@ -66,22 +66,13 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
-adaptive_tuner = AdaptiveTuner(
-    journal.path,
-    lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)),
-    min_sample=int(os.getenv("ADAPTIVE_MIN_SAMPLE", 8)),
-)
+adaptive_tuner = AdaptiveTuner(journal.path, lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)))
 MINI_RUN_TAG = "MINI_RUN"
 
 
 def _adaptive_snapshot_signature() -> str:
     try:
-        from src import adaptive_tuner as adaptive_module
-
-        snapshot_cls = getattr(adaptive_module, "AdaptiveSnapshot", None)
-        if snapshot_cls is None:
-            return "missing"
-        params = list(inspect.signature(snapshot_cls).parameters.keys())
+        params = list(inspect.signature(AdaptiveSnapshot).parameters.keys())
         return ",".join(params)
     except Exception:
         return "unavailable"
@@ -410,7 +401,7 @@ async def heartbeat() -> None:
         )
 
     print(
-        f"[ADAPTIVE] module={adaptive_tuner.__class__.__module__} signature={_adaptive_snapshot_signature()}",
+        f"[ADAPTIVE] module={AdaptiveSnapshot.__module__} signature={_adaptive_snapshot_signature()}",
         flush=True,
     )
 
@@ -429,7 +420,7 @@ async def heartbeat() -> None:
     if ADAPTIVE_TUNING_ENABLED:
         snap = adaptive_tuner.snapshot()
         print(
-            f"[TRADING_SUMMARY] source={snap.source} closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
+            f"[TRADING_SUMMARY] closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
             flush=True,
         )
 
@@ -1133,63 +1124,9 @@ def launch_status_server_thread() -> threading.Thread:
     return thread
 
 if __name__ == "__main__":
-    journal_path = journal.path
-    journal_exists = journal_path.exists()
-    try:
-        trade_count = journal.count_trade_events()
-        print(
-            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} total_trades={trade_count}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(
-            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
-            flush=True,
-        )
-
-    print(
-        f"[ADAPTIVE] module={adaptive_tuner.__class__.__module__} signature={_adaptive_snapshot_signature()}",
-        flush=True,
-    )
-
     if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS", False)):
-        analysis_ready = False
-        for attempt in range(1, 6):
-            db_exists = journal.path.exists()
-            db_size = journal.path.stat().st_size if db_exists else 0
-            if db_exists and db_size > 0:
-                try:
-                    total_trades = journal.count_trade_events()
-                except Exception as exc:
-                    print(
-                        f"[MANUAL_ANALYSIS_WAIT] attempt={attempt} path={journal.path} error={exc}",
-                        flush=True,
-                    )
-                else:
-                    if total_trades > 0:
-                        analysis_ready = True
-                        break
-                    print(
-                        f"[MANUAL_ANALYSIS_WAIT] attempt={attempt} path={journal.path} total_trades={total_trades}",
-                        flush=True,
-                    )
-            else:
-                print(
-                    f"[MANUAL_ANALYSIS_WAIT] attempt={attempt} path={journal.path} exists={str(db_exists).lower()} size={db_size}",
-                    flush=True,
-                )
-            if attempt < 5:
-                time.sleep(1)
-
-        if not analysis_ready:
-            print("[MANUAL_ANALYSIS_ABORTED_NO_DB]", flush=True)
-        else:
-            print("[MANUAL_ANALYSIS_TRIGGERED]", flush=True)
-            run_performance_analysis(journal.path)
-            print("[MANUAL_ANALYSIS_COMPLETE]", flush=True)
-
-        if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS_ONLY", False)):
-            sys.exit(0)
+        run_performance_analysis(journal.path)
+        sys.exit(0)
 
     launch_status_server_thread()
     asyncio.run(runner())
