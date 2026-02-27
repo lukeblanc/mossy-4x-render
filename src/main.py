@@ -47,7 +47,7 @@ import src.profit_protection as profit_protection
 from src.profit_protection import ProfitProtection
 from src import orb, session_filter
 from src import position_sizer
-
+from src.adaptive_tuner import AdaptiveTuner
 
 
 
@@ -65,6 +65,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
+adaptive_tuner = AdaptiveTuner(journal.path, lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)))
 MINI_RUN_TAG = "MINI_RUN"
 
 
@@ -127,11 +128,18 @@ def _as_bool(value: object) -> bool:
     return bool(value)
 
 
+ADAPTIVE_TUNING_ENABLED = _as_bool(os.getenv("ADAPTIVE_TUNING_ENABLED", True))
+
+
 def _coerce_float(value: object, fallback: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _clamp_risk_pct(value: float, *, cap: float) -> float:
+    return max(0.001, min(float(value), float(cap)))
 
 
 def _build_trailing_config(config: Dict) -> Dict:
@@ -320,12 +328,23 @@ if aggressive_mode:
     risk_cooldown_candles = risk_config["cooldown_candles"]
 
 if aggressive_test_mode:
-    # Aggressive demo mode: disable daily profit cap gating and use larger per-trade risk.
-    risk_per_trade_pct = 2.5
+    # Aggressive demo mode: disable daily profit cap gating and use configurable per-trade risk.
+    risk_per_trade_pct = float(os.getenv("AGGRESSIVE_TEST_RISK_PCT", 2.5))
     risk_config["risk_per_trade_pct"] = risk_per_trade_pct / 100.0
     risk_config["daily_profit_target_usd"] = 0.0
     print("[CONFIG] Daily profit cap DISABLED (aggressive demo mode)", flush=True)
     print(f"[CONFIG] Risk per trade set to {risk_per_trade_pct}%", flush=True)
+
+risk_cap_pct = float(os.getenv("MAX_RISK_PER_TRADE_CAP_PCT", 1.0)) / 100.0
+if _as_bool(os.getenv("ENABLE_RISK_CAP", False)) and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
+    original_risk_pct = float(risk_config.get("risk_per_trade_pct", 0.005))
+    capped_risk_pct = _clamp_risk_pct(original_risk_pct, cap=risk_cap_pct)
+    if capped_risk_pct != original_risk_pct:
+        print(
+            f"[CONFIG] risk_per_trade_pct capped from {original_risk_pct:.4f} to {capped_risk_pct:.4f}",
+            flush=True,
+        )
+    risk_config["risk_per_trade_pct"] = capped_risk_pct
 
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
@@ -384,6 +403,13 @@ async def heartbeat() -> None:
         flush=True,
     )
 
+    if ADAPTIVE_TUNING_ENABLED:
+        snap = adaptive_tuner.snapshot()
+        print(
+            f"[TRADING_SUMMARY] closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
+            flush=True,
+        )
+
 suppression_counters = {
     "signals_generated": 0,
     "signals_executed": 0,
@@ -424,6 +450,15 @@ def _startup_checks() -> None:
         open_count = 0
 
     risk.startup_daily_reset(equity, open_positions_count=open_count)
+
+    if _as_bool(os.getenv("RESET_MAX_DRAWDOWN_HALT", False)):
+        if risk.clear_max_drawdown_halt(equity):
+            print(
+                f"[RISK] RESET_MAX_DRAWDOWN_HALT applied at equity={float(equity):.2f}",
+                flush=True,
+            )
+        else:
+            print("[RISK] RESET_MAX_DRAWDOWN_HALT requested but no active halt found", flush=True)
 
 
 def _open_trades_state() -> List[Dict]:
@@ -917,12 +952,17 @@ async def decision_cycle() -> None:
                 )
                 continue
 
+            adaptive_snap = adaptive_tuner.snapshot() if ADAPTIVE_TUNING_ENABLED else None
+            effective_risk_pct = risk.risk_per_trade_pct
+            if adaptive_snap is not None:
+                effective_risk_pct = max(0.001, min(0.025, risk.risk_per_trade_pct * adaptive_snap.risk_multiplier))
+
             try:
                 size_result = position_sizer.units_for_risk(
                     equity,
                     evaluation.instrument,
                     sl_distance,
-                    risk.risk_per_trade_pct,
+                    effective_risk_pct,
                     broker=broker,
                     account_currency="AUD",
                     min_trade_units=1,
@@ -933,7 +973,7 @@ async def decision_cycle() -> None:
                     equity,
                     entry_price or 0.0,
                     sl_distance,
-                    risk.risk_per_trade_pct,
+                    effective_risk_pct,
                 )
             if isinstance(size_result, tuple):
                 units, size_diag = size_result
@@ -941,8 +981,8 @@ async def decision_cycle() -> None:
                 units = int(size_result)
                 size_diag = {
                     "equity": equity,
-                    "risk_pct": risk.risk_per_trade_pct,
-                    "risk_amount": equity * risk.risk_per_trade_pct,
+                    "risk_pct": effective_risk_pct,
+                    "risk_amount": equity * effective_risk_pct,
                     "stop_pips": 0.0,
                     "pip_value_per_unit": 0.0,
                     "final_units": units,

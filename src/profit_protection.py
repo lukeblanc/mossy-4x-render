@@ -1141,9 +1141,19 @@ class ProfitProtection:
                     entry_price=state.entry_price if state else None,
                     equity_after=equity_after,
                 )
-            except Exception:
+                print(
+                    f"[TRADE_CLOSED] ticket={trade_id or 'n/a'} instrument={instrument} "
+                    f"pnl={float(summary.get('final_profit_ccy') or 0.0):.2f} "
+                    f"reason={summary.get('reason') or 'n/a'} duration_sec={int(summary.get('duration_sec') or 0)}",
+                    flush=True,
+                )
+            except Exception as exc:
                 # Journal failures must never block trade lifecycle.
-                pass
+                print(
+                    f"[JOURNAL][WARN] record_exit failed ticket={trade_id or 'n/a'} instrument={instrument} "
+                    f"reason={summary.get('reason') or 'n/a'} error={exc}",
+                    flush=True,
+                )
         if state:
             state.armed = False
             state.max_profit_ccy = None
