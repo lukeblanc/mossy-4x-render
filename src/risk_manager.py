@@ -424,6 +424,19 @@ class RiskManager:
             flush=True,
         )
 
+    def clear_max_drawdown_halt(self, equity: Optional[float] = None) -> bool:
+        """Clear max-drawdown halt and optionally re-anchor peak equity."""
+
+        valid_equity = _sanitize_equity(equity)
+        changed = bool(self.state.max_drawdown_halt)
+        self.state.max_drawdown_halt = False
+        if valid_equity is not None:
+            self.state.peak_equity = valid_equity
+            changed = True
+        if changed:
+            self._save_state()
+        return changed
+
     def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0) -> None:
         """
         Reset daily baselines after startup equity retrieval.
