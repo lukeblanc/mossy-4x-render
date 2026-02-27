@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import inspect
 import sys
 import math
 import uuid
@@ -67,6 +68,14 @@ DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
 adaptive_tuner = AdaptiveTuner(journal.path, lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)))
 MINI_RUN_TAG = "MINI_RUN"
+
+
+def _adaptive_snapshot_signature() -> str:
+    try:
+        params = list(inspect.signature(AdaptiveSnapshot).parameters.keys())
+        return ",".join(params)
+    except Exception:
+        return "unavailable"
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
@@ -390,6 +399,11 @@ async def heartbeat() -> None:
             f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
             flush=True,
         )
+
+    print(
+        f"[ADAPTIVE] module={AdaptiveSnapshot.__module__} signature={_adaptive_snapshot_signature()}",
+        flush=True,
+    )
 
     BOT_STATE.update({
         "status": "running",
