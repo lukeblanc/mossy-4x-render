@@ -12,7 +12,7 @@ class AdaptiveSnapshot:
     losses: int
     loss_streak: int
     risk_multiplier: float
-    source: str = "none"
+    source: str
 
 
 class AdaptiveTuner:
@@ -106,5 +106,4 @@ class AdaptiveTuner:
             losses=losses,
             loss_streak=loss_streak,
             risk_multiplier=max(0.5, min(1.0, multiplier)),
-            source=source,
         )
