@@ -106,5 +106,4 @@ class AdaptiveTuner:
             losses=losses,
             loss_streak=loss_streak,
             risk_multiplier=max(0.5, min(1.0, multiplier)),
-            source=source,
         )
