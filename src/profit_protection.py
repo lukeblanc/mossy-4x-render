@@ -1125,6 +1125,11 @@ class ProfitProtection:
             except Exception:
                 equity_after = None
             try:
+                print(
+                    f"[TRADE_CLOSE_ATTEMPT] ticket={trade_id or 'n/a'} instrument={instrument} "
+                    f"pnl={float(summary.get('final_profit_ccy') or 0.0):.2f} reason={summary.get('reason') or 'n/a'}",
+                    flush=True,
+                )
                 self._journal.record_exit(
                     trade_id=str(trade_id or instrument or ""),
                     exit_timestamp_utc=now_val,
