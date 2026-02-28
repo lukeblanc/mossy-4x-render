@@ -51,6 +51,15 @@ from src import orb, session_filter
 from src import position_sizer
 from src.adaptive_tuner import AdaptiveTuner
 
+try:
+    # Compatibility symbol for older diagnostic format:
+    # f"[ADAPTIVE] module={AdaptiveSnapshot.__module__} ..."
+    from src.adaptive_tuner import AdaptiveSnapshot as AdaptiveSnapshot
+except Exception:  # pragma: no cover - defensive fallback
+    class AdaptiveSnapshot:  # type: ignore[no-redef]
+        __module__ = "unavailable"
+
+
 
 
 from src.projector import project_market
@@ -67,13 +76,33 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
-adaptive_tuner = AdaptiveTuner(journal.path, lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)))
+adaptive_tuner = AdaptiveTuner(
+    journal.path,
+    lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)),
+    min_sample=int(os.getenv("ADAPTIVE_MIN_SAMPLE", 8)),
+)
 MINI_RUN_TAG = "MINI_RUN"
 
 
+
+
+def _runtime_revision() -> str:
+    sha = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT")
+    if sha:
+        return sha
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        return "unknown"
+
 def _adaptive_snapshot_signature() -> str:
     try:
-        params = list(inspect.signature(AdaptiveSnapshot).parameters.keys())
+        from src import adaptive_tuner as adaptive_module
+
+        snapshot_cls = getattr(adaptive_module, "AdaptiveSnapshot", None)
+        if snapshot_cls is None:
+            return "missing"
+        params = list(inspect.signature(snapshot_cls).parameters.keys())
         return ",".join(params)
     except Exception:
         return "unavailable"
@@ -402,7 +431,11 @@ async def heartbeat() -> None:
         )
 
     print(
-        f"[ADAPTIVE] module={AdaptiveSnapshot.__module__} signature={_adaptive_snapshot_signature()}",
+        f"[RUNTIME] revision={_runtime_revision()} main={Path(__file__).resolve()}",
+        flush=True,
+    )
+    print(
+        f"[ADAPTIVE] module={adaptive_tuner.__class__.__module__} signature={_adaptive_snapshot_signature()}",
         flush=True,
     )
 
@@ -418,10 +451,10 @@ async def heartbeat() -> None:
         flush=True,
     )
 
-    if ADAPTIVE_TUNING_ENABLED:
-        snap = adaptive_tuner.snapshot()
+    snap = _safe_adaptive_snapshot("heartbeat")
+    if snap is not None:
         print(
-            f"[TRADING_SUMMARY] closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
+            f"[TRADING_SUMMARY] source={snap.source} closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
             flush=True,
         )
 
@@ -434,6 +467,17 @@ suppression_counters = {
     "blocked_spread": 0,
 }
 
+
+
+
+def _safe_adaptive_snapshot(context: str):
+    if not ADAPTIVE_TUNING_ENABLED:
+        return None
+    try:
+        return adaptive_tuner.snapshot()
+    except Exception as exc:
+        print(f"[ADAPTIVE][WARN] context={context} snapshot_failed error={exc}", flush=True)
+        return None
 
 def _profit_guard_for_mode(mode: str, broker_instance: Broker) -> ProfitProtection:
     return build_profit_protection(
@@ -967,7 +1011,7 @@ async def decision_cycle() -> None:
                 )
                 continue
 
-            adaptive_snap = adaptive_tuner.snapshot() if ADAPTIVE_TUNING_ENABLED else None
+            adaptive_snap = _safe_adaptive_snapshot("decision_cycle")
             effective_risk_pct = risk.risk_per_trade_pct
             if adaptive_snap is not None:
                 effective_risk_pct = max(0.001, min(0.025, risk.risk_per_trade_pct * adaptive_snap.risk_multiplier))
@@ -1125,9 +1169,67 @@ def launch_status_server_thread() -> threading.Thread:
     return thread
 
 if __name__ == "__main__":
+    journal_path = journal.path
+    journal_exists = journal_path.exists()
+    try:
+        trade_count = journal.count_trade_events()
+        print(
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} total_trades={trade_count}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
+            flush=True,
+        )
+
+    print(
+        f"[RUNTIME] revision={_runtime_revision()} main={Path(__file__).resolve()}",
+        flush=True,
+    )
+    print(
+        f"[ADAPTIVE] module={adaptive_tuner.__class__.__module__} signature={_adaptive_snapshot_signature()}",
+        flush=True,
+    )
+
     if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS", False)):
-        run_performance_analysis(journal.path)
-        sys.exit(0)
+        analysis_ready = False
+        for attempt in range(1, 6):
+            db_exists = journal.path.exists()
+            db_size = journal.path.stat().st_size if db_exists else 0
+            if db_exists and db_size > 0:
+                try:
+                    total_trades = journal.count_trade_events()
+                except Exception as exc:
+                    print(
+                        f"[MANUAL_ANALYSIS_WAIT] attempt={attempt} path={journal.path} error={exc}",
+                        flush=True,
+                    )
+                else:
+                    if total_trades > 0:
+                        analysis_ready = True
+                        break
+                    print(
+                        f"[MANUAL_ANALYSIS_WAIT] attempt={attempt} path={journal.path} total_trades={total_trades}",
+                        flush=True,
+                    )
+            else:
+                print(
+                    f"[MANUAL_ANALYSIS_WAIT] attempt={attempt} path={journal.path} exists={str(db_exists).lower()} size={db_size}",
+                    flush=True,
+                )
+            if attempt < 5:
+                time.sleep(1)
+
+        if not analysis_ready:
+            print("[MANUAL_ANALYSIS_ABORTED_NO_DB]", flush=True)
+        else:
+            print("[MANUAL_ANALYSIS_TRIGGERED]", flush=True)
+            run_performance_analysis(journal.path)
+            print("[MANUAL_ANALYSIS_COMPLETE]", flush=True)
+
+        if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS_ONLY", False)):
+            sys.exit(0)
 
     launch_status_server_thread()
     asyncio.run(runner())
