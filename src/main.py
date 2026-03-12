@@ -519,6 +519,15 @@ def _startup_checks() -> None:
         else:
             print("[RISK] RESET_MAX_DRAWDOWN_HALT requested but no active halt found", flush=True)
 
+    if _as_bool(os.getenv("RESET_WEEKLY_LOSS_CAP", False)):
+        if risk.clear_weekly_loss_cap(equity):
+            print(
+                f"[RISK] RESET_WEEKLY_LOSS_CAP applied at equity={float(equity):.2f}",
+                flush=True,
+            )
+        else:
+            print("[RISK] RESET_WEEKLY_LOSS_CAP requested but no weekly baseline changes were needed", flush=True)
+
 
 def _open_trades_state() -> List[Dict]:
     try:
