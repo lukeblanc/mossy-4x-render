@@ -329,7 +329,10 @@ def test_max_concurrent_positions_default_and_env_override(monkeypatch, state_di
     assert reason == "max-positions"
 
 
-def test_daily_trade_cap_blocks_and_resets(state_dir):
+def test_daily_trade_cap_blocks_and_resets(monkeypatch, state_dir):
+    monkeypatch.delenv("MAX_TRADES_PER_DAY", raising=False)
+    monkeypatch.setenv("MINI_RUN_MAX_TRADES_PER_DAY", "100")
+
     manager = RiskManager({"max_trades_per_day": 2}, mode="paper")
     now = _utc(2024, 1, 1, 9, 0)
 
@@ -355,3 +358,49 @@ def test_aggressive_test_mode_bypasses_mini_run_trade_soft_cap(monkeypatch, stat
     )
 
     assert manager.max_trades_per_day == 100
+
+
+def test_clear_max_drawdown_halt_reanchors_peak_equity(state_dir):
+    manager = RiskManager({"max_drawdown_cap_pct": 0.1}, mode="paper")
+    now = _utc(2024, 1, 1, 0, 0)
+
+    manager.should_open(now, 1_000.0, [], "EUR_USD", 0.1)
+    manager.state.max_drawdown_halt = True
+    manager.state.peak_equity = 1_000.0
+
+    changed = manager.clear_max_drawdown_halt(850.0)
+    assert changed is True
+    assert manager.state.max_drawdown_halt is False
+    assert manager.state.peak_equity == pytest.approx(850.0)
+
+    ok, reason = manager.should_open(now + timedelta(minutes=2), 850.0, [], "EUR_USD", 0.1)
+    assert ok is True
+    assert reason == "ok"
+
+
+def test_clear_max_drawdown_halt_without_equity_noop_when_not_halted(state_dir):
+    manager = RiskManager({}, mode="paper")
+    changed = manager.clear_max_drawdown_halt()
+    assert changed is False
+    assert manager.state.max_drawdown_halt is False
+
+
+def test_clear_weekly_loss_cap_reanchors_and_allows_entries(state_dir):
+    manager = RiskManager({"weekly_loss_cap_pct": 0.03, "daily_loss_cap_pct": 1.0}, mode="paper")
+    now = _utc(2024, 1, 1, 0, 0)
+
+    manager.should_open(now, 1_000.0, [], "EUR_USD", 0.1)
+
+    blocked_now = now + timedelta(minutes=10)
+    ok, reason = manager.should_open(blocked_now, 960.0, [], "EUR_USD", 0.1)
+    assert ok is False
+    assert reason == "weekly-loss-cap"
+
+    changed = manager.clear_weekly_loss_cap(960.0)
+    assert changed is True
+    assert manager.state.week_start_equity == pytest.approx(960.0)
+    assert manager.state.weekly_realized_pl == pytest.approx(0.0)
+
+    ok, reason = manager.should_open(blocked_now + timedelta(minutes=1), 960.0, [], "EUR_USD", 0.1)
+    assert ok is True
+    assert reason == "ok"
