@@ -375,10 +375,7 @@ if aggressive_test_mode:
     print(f"[CONFIG] Risk per trade set to {risk_per_trade_pct}%", flush=True)
 
 risk_cap_pct = float(os.getenv("MAX_RISK_PER_TRADE_CAP_PCT", 1.0)) / 100.0
-risk_cap_enabled = _as_bool(os.getenv("ENABLE_RISK_CAP", aggressive_test_mode))
-if aggressive_test_mode and risk_cap_enabled and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
-    print(f"[CONFIG] risk cap enabled (aggressive test default) cap_pct={risk_cap_pct*100:.2f}%", flush=True)
-if risk_cap_enabled and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
+if _as_bool(os.getenv("ENABLE_RISK_CAP", False)) and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
     original_risk_pct = float(risk_config.get("risk_per_trade_pct", 0.005))
     capped_risk_pct = _clamp_risk_pct(original_risk_pct, cap=risk_cap_pct)
     if capped_risk_pct != original_risk_pct:
@@ -387,6 +384,7 @@ if risk_cap_enabled and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
             flush=True,
         )
     risk_config["risk_per_trade_pct"] = capped_risk_pct
+
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
 config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("max_concurrent_positions", config.get("max_open_trades", 3))))
