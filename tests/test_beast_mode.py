@@ -32,7 +32,8 @@ def test_beast_mode_forces_always_session(monkeypatch):
 
     assert main_mod.config["aggressive_test_mode"] is True
     assert main_mod.config["session_mode"] == "ALWAYS"
-    assert main_mod.config["risk"]["risk_per_trade_pct"] == 0.025
+    # In aggressive test mode, risk cap defaults to enabled unless explicitly overridden.
+    assert main_mod.config["risk"]["risk_per_trade_pct"] == 0.01
     assert main_mod.config["risk"]["daily_profit_target_usd"] == 0.0
 
     decision = session_filter.session_decision(
