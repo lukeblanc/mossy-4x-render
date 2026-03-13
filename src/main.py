@@ -144,6 +144,18 @@ def _resolve_instruments_config(config: Dict) -> List[str]:
     return parsed
 
 
+def _resolve_merge_default_instruments(config: Dict) -> bool:
+    has_env, _ = _instrument_env_override()
+    merge_env = os.getenv("MERGE_DEFAULT_INSTRUMENTS")
+    if merge_env is not None:
+        return _as_bool(merge_env)
+    if has_env:
+        # If instruments are explicitly set in env, keep that list authoritative
+        # unless merge-defaults is explicitly enabled via env.
+        return False
+    return _as_bool(config.get("merge_default_instruments", False))
+
+
 def _granularity_minutes(timeframe: str) -> int:
     tf = (timeframe or "").upper()
     if tf.startswith("M"):
@@ -280,9 +292,7 @@ def _order_ticket(result: Dict) -> str | None:
 
 
 config = load_config()
-config["merge_default_instruments"] = _as_bool(
-    os.getenv("MERGE_DEFAULT_INSTRUMENTS", config.get("merge_default_instruments", False))
-)
+config["merge_default_instruments"] = _resolve_merge_default_instruments(config)
 config["instruments"] = _resolve_instruments_config(config)
 print(f"[CONFIG] instruments resolved: {config['instruments']}", flush=True)
 config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
