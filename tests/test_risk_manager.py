@@ -285,6 +285,26 @@ def test_rollover_preserves_realized_pl_when_equity_missing(state_dir):
     assert manager.state.daily_realized_pl == pytest.approx(0.0)
 
 
+
+
+def test_max_drawdown_halt_resets_on_new_day(state_dir):
+    manager = RiskManager({"max_drawdown_cap_pct": 0.10, "daily_loss_cap_pct": 1.0, "weekly_loss_cap_pct": 1.0}, mode="paper")
+    now = _utc(2024, 1, 1, 0, 0)
+
+    manager.should_open(now, 1_000.0, [], "EUR_USD", 0.2)
+    manager.enforce_equity_floor(now + timedelta(minutes=5), 890.0, close_all_cb=lambda: None)
+
+    blocked, reason = manager.should_open(now + timedelta(minutes=6), 890.0, [], "EUR_USD", 0.2)
+    assert blocked is False
+    assert reason == "max-drawdown"
+    assert manager.state.max_drawdown_halt is True
+
+    next_day = now + timedelta(days=1)
+    ok, reason = manager.should_open(next_day, 1_000.0, [], "EUR_USD", 0.2)
+    assert ok is True
+    assert reason == "ok"
+    assert manager.state.max_drawdown_halt is False
+
 def test_default_atr_multipliers_are_applied(state_dir):
     manager = RiskManager({}, mode="paper")
 
