@@ -284,6 +284,7 @@ config["merge_default_instruments"] = _as_bool(
     os.getenv("MERGE_DEFAULT_INSTRUMENTS", config.get("merge_default_instruments", False))
 )
 config["instruments"] = _resolve_instruments_config(config)
+print(f"[CONFIG] instruments resolved: {config['instruments']}", flush=True)
 config["timeframe"] = os.getenv("TIMEFRAME", config.get("timeframe", "M5"))
 config["use_macd_confirmation"] = _as_bool(
     os.getenv("USE_MACD_CONFIRMATION", config.get("use_macd_confirmation", False))
@@ -375,7 +376,10 @@ if aggressive_test_mode:
     print(f"[CONFIG] Risk per trade set to {risk_per_trade_pct}%", flush=True)
 
 risk_cap_pct = float(os.getenv("MAX_RISK_PER_TRADE_CAP_PCT", 1.0)) / 100.0
-if _as_bool(os.getenv("ENABLE_RISK_CAP", False)) and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
+risk_cap_enabled = _as_bool(os.getenv("ENABLE_RISK_CAP", aggressive_test_mode))
+if aggressive_test_mode and risk_cap_enabled and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
+    print(f"[CONFIG] risk cap enabled (aggressive test default) cap_pct={risk_cap_pct*100:.2f}%", flush=True)
+if risk_cap_enabled and not _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
     original_risk_pct = float(risk_config.get("risk_per_trade_pct", 0.005))
     capped_risk_pct = _clamp_risk_pct(original_risk_pct, cap=risk_cap_pct)
     if capped_risk_pct != original_risk_pct:
@@ -384,7 +388,6 @@ if _as_bool(os.getenv("ENABLE_RISK_CAP", False)) and not _as_bool(os.getenv("ALL
             flush=True,
         )
     risk_config["risk_per_trade_pct"] = capped_risk_pct
-
 config["cooldown_candles"] = risk_cooldown_candles
 config["cooldown_minutes"] = risk_tf_minutes * risk_cooldown_candles if risk_tf_minutes else config.get("cooldown_minutes", 0)
 config["max_open_trades"] = int(os.getenv("MAX_OPEN_TRADES", risk_config.get("max_concurrent_positions", config.get("max_open_trades", 3))))

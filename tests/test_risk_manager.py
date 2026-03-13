@@ -403,3 +403,24 @@ def test_clear_max_drawdown_halt_without_equity_noop_when_not_halted(state_dir):
     changed = manager.clear_max_drawdown_halt()
     assert changed is False
     assert manager.state.max_drawdown_halt is False
+
+
+def test_clear_weekly_loss_cap_reanchors_and_allows_entries(state_dir):
+    manager = RiskManager({"weekly_loss_cap_pct": 0.03, "daily_loss_cap_pct": 1.0}, mode="paper")
+    now = _utc(2024, 1, 1, 0, 0)
+
+    manager.should_open(now, 1_000.0, [], "EUR_USD", 0.1)
+
+    blocked_now = now + timedelta(minutes=10)
+    ok, reason = manager.should_open(blocked_now, 960.0, [], "EUR_USD", 0.1)
+    assert ok is False
+    assert reason == "weekly-loss-cap"
+
+    changed = manager.clear_weekly_loss_cap(960.0)
+    assert changed is True
+    assert manager.state.week_start_equity == pytest.approx(960.0)
+    assert manager.state.weekly_realized_pl == pytest.approx(0.0)
+
+    ok, reason = manager.should_open(blocked_now + timedelta(minutes=1), 960.0, [], "EUR_USD", 0.1)
+    assert ok is True
+    assert reason == "ok"

@@ -452,6 +452,31 @@ class RiskManager:
             flush=True,
         )
 
+
+    def clear_weekly_loss_cap(self, equity: Optional[float] = None) -> bool:
+        """Reset weekly loss baseline so weekly-loss-cap no longer blocks entries."""
+        changed = False
+        if self.state.weekly_realized_pl != 0.0:
+            self.state.weekly_realized_pl = 0.0
+            changed = True
+
+        sanitized = _sanitize_equity(equity)
+        if sanitized is not None:
+            if self.state.week_start_equity != sanitized:
+                self.state.week_start_equity = sanitized
+                changed = True
+        elif self.state.week_start_equity is None and self._last_equity_seen is not None:
+            self.state.week_start_equity = self._last_equity_seen
+            changed = True
+
+        if self.state.has_hit_weekly_target:
+            self.state.has_hit_weekly_target = False
+            changed = True
+
+        if changed:
+            self._save_state()
+        return changed
+
     def clear_max_drawdown_halt(self, equity: Optional[float] = None) -> bool:
         """Clear max-drawdown halt and optionally re-anchor peak equity."""
 
