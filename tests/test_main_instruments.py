@@ -66,3 +66,17 @@ def test_env_instruments_disable_default_merge_when_merge_env_missing(monkeypatc
 
     assert merge_default is False
     assert engine.instruments == ["AUD_USD", "GBP_USD"]
+
+
+def test_engine_env_instruments_override_config_defaults(monkeypatch):
+    monkeypatch.setenv("INSTRUMENTS", "AUD_USD,GBP_USD")
+    monkeypatch.delenv("MERGE_DEFAULT_INSTRUMENTS", raising=False)
+
+    engine = DecisionEngine(
+        {
+            "instruments": DEFAULT_INSTRUMENTS,
+            "merge_default_instruments": True,
+        }
+    )
+
+    assert engine.instruments == ["AUD_USD", "GBP_USD"]

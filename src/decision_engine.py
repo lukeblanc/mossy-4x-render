@@ -78,9 +78,17 @@ class DecisionEngine:
         self._fetch_retry_backoff = max(0.0, float(self.config.get("fetch_retry_backoff", 1.0)))
 
         merge_default = self._as_bool(self.config.get("merge_default_instruments", False))
-        resolved_instruments = self._resolve_instruments(
-            self.config.get("instruments"), merge_default
-        )
+        env_instruments = self._instrument_env_override()
+        if env_instruments is not None:
+            # Keep runtime env instrument scope authoritative unless merge is
+            # explicitly requested via env.
+            if os.getenv("MERGE_DEFAULT_INSTRUMENTS") is None:
+                merge_default = False
+            resolved_instruments = self._resolve_instruments(env_instruments, merge_default)
+        else:
+            resolved_instruments = self._resolve_instruments(
+                self.config.get("instruments"), merge_default
+            )
         self.instruments: List[str] = resolved_instruments
         self.config["instruments"] = resolved_instruments
         print(
@@ -309,6 +317,13 @@ class DecisionEngine:
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on", "y"}
         return bool(value)
+
+    @staticmethod
+    def _instrument_env_override() -> Optional[str]:
+        for key in ("INSTRUMENTS", "INSTRUMENT"):
+            if key in os.environ:
+                return os.environ.get(key)
+        return None
 
     def _normalize_candles(self, candles: List[Dict]) -> List[Dict[str, float]]:
         normalized: List[Dict[str, float]] = []
