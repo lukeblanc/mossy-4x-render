@@ -36,7 +36,17 @@ services:
       - key: OANDA_API_KEY
         sync: false
       - key: INSTRUMENTS
-        value: "EUR_USD"
+        value: "AUD_USD,GBP_USD"
+      - key: MERGE_DEFAULT_INSTRUMENTS
+        value: "false"
+      - key: ENABLE_RISK_CAP
+        value: "true"
+      - key: MAX_RISK_PER_TRADE_CAP_PCT
+        value: "1.0"
+      - key: ALLOW_HIGH_RISK
+        value: "false"
+      - key: RESET_WEEKLY_LOSS_CAP
+        value: "false"
       - key: OANDA_ACCOUNT_ID
         sync: false
 # ---------- MCP SERVICES ----------
