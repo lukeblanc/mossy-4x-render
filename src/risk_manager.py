@@ -46,6 +46,12 @@ def _sanitize_equity(equity: Optional[float]) -> Optional[float]:
     return value
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+    return bool(value)
+
+
 @dataclass
 class RiskState:
     day_id: Optional[str] = None
@@ -172,6 +178,7 @@ class RiskManager:
         self.risk_per_trade_pct = float(
             self.config.get("risk_per_trade_pct", 0.005)
         )
+        self._apply_env_risk_cap()
         env_max_positions = os.getenv("MAX_CONCURRENT_POSITIONS") or os.getenv("MAX_OPEN_TRADES")
         max_positions_cfg = self.config.get("max_concurrent_positions", self.config.get("max_open_trades", 3))
         self.max_concurrent_positions = int(env_max_positions or max_positions_cfg or 3)
@@ -226,6 +233,27 @@ class RiskManager:
         )
         self.equity_adjustment_pct = max(0.0, float(equity_adjustment_pct_cfg))
         self.equity_adjustment_abs = max(0.0, float(equity_adjustment_abs_cfg))
+
+    def _apply_env_risk_cap(self) -> None:
+        if not _as_bool(os.getenv("ENABLE_RISK_CAP", False)):
+            return
+        if _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
+            return
+
+        try:
+            cap_pct = float(os.getenv("MAX_RISK_PER_TRADE_CAP_PCT", "1.0")) / 100.0
+        except (TypeError, ValueError):
+            cap_pct = 0.01
+        cap_pct = max(0.001, min(cap_pct, 1.0))
+
+        original = float(self.risk_per_trade_pct)
+        capped = max(0.001, min(original, cap_pct))
+        if capped < original:
+            print(
+                f"[RISK] risk capped from {original*100:.1f}% to {capped*100:.1f}%",
+                flush=True,
+            )
+        self.risk_per_trade_pct = capped
 
     # ------------------------------------------------------------------
     # Persistence helpers
