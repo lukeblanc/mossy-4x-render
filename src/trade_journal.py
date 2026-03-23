@@ -514,9 +514,11 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
     for trade in trades:
         by_instrument.setdefault(trade["instrument"], []).append(trade)
 
+    instrument_metrics: dict[str, dict[str, float | int]] = {}
     print("\n[PERFORMANCE_BY_INSTRUMENT]", flush=True)
     for instrument in sorted(by_instrument.keys()):
         segment_metrics = _compute_segment_metrics(by_instrument[instrument])
+        instrument_metrics[instrument] = segment_metrics
         print(f"instrument={instrument}", flush=True)
         print(f"trades={segment_metrics['total_trades']}", flush=True)
         print(f"win_rate={segment_metrics['win_rate_pct']:.2f}", flush=True)
@@ -525,6 +527,24 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
         print(f"expectancy={segment_metrics['expectancy']:.4f}", flush=True)
         print(f"profit_factor={segment_metrics['profit_factor']:.4f}", flush=True)
         print("", flush=True)
+
+    analysis_ts = datetime.now(timezone.utc)
+    report_text = _format_performance_report(
+        analysis_ts=analysis_ts,
+        metrics=metrics,
+        max_drawdown=max_drawdown,
+        longest_losing_streak=longest_losing_streak,
+        instrument_metrics=instrument_metrics,
+    )
+
+    report_dir = Path(os.getenv("PERFORMANCE_REPORT_DIR", "/var/data/performance_reports/"))
+    report_path = _save_performance_pdf(
+        report_text=report_text,
+        analysis_ts=analysis_ts,
+        total_trades=int(metrics["total_trades"]),
+        report_dir=report_dir,
+    )
+    print(f"[PERFORMANCE_PDF_SAVED] path={report_path.resolve()}", flush=True)
 
 
 __all__ = ["TradeJournal", "default_journal_path", "run_performance_analysis"]

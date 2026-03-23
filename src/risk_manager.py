@@ -46,6 +46,12 @@ def _sanitize_equity(equity: Optional[float]) -> Optional[float]:
     return value
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+    return bool(value)
+
+
 @dataclass
 class RiskState:
     day_id: Optional[str] = None
@@ -172,6 +178,7 @@ class RiskManager:
         self.risk_per_trade_pct = float(
             self.config.get("risk_per_trade_pct", 0.005)
         )
+        self._apply_env_risk_cap()
         env_max_positions = os.getenv("MAX_CONCURRENT_POSITIONS") or os.getenv("MAX_OPEN_TRADES")
         max_positions_cfg = self.config.get("max_concurrent_positions", self.config.get("max_open_trades", 3))
         self.max_concurrent_positions = int(env_max_positions or max_positions_cfg or 3)
@@ -226,6 +233,27 @@ class RiskManager:
         )
         self.equity_adjustment_pct = max(0.0, float(equity_adjustment_pct_cfg))
         self.equity_adjustment_abs = max(0.0, float(equity_adjustment_abs_cfg))
+
+    def _apply_env_risk_cap(self) -> None:
+        if not _as_bool(os.getenv("ENABLE_RISK_CAP", False)):
+            return
+        if _as_bool(os.getenv("ALLOW_HIGH_RISK", False)):
+            return
+
+        try:
+            cap_pct = float(os.getenv("MAX_RISK_PER_TRADE_CAP_PCT", "1.0")) / 100.0
+        except (TypeError, ValueError):
+            cap_pct = 0.01
+        cap_pct = max(0.001, min(cap_pct, 1.0))
+
+        original = float(self.risk_per_trade_pct)
+        capped = max(0.001, min(original, cap_pct))
+        if capped < original:
+            print(
+                f"[RISK] risk capped from {original*100:.1f}% to {capped*100:.1f}%",
+                flush=True,
+            )
+        self.risk_per_trade_pct = capped
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -423,6 +451,44 @@ class RiskManager:
             f"[RISK] Loss streak pause active until {pause_until.isoformat()}",
             flush=True,
         )
+
+
+    def clear_weekly_loss_cap(self, equity: Optional[float] = None) -> bool:
+        """Reset weekly loss baseline so weekly-loss-cap no longer blocks entries."""
+        changed = False
+        if self.state.weekly_realized_pl != 0.0:
+            self.state.weekly_realized_pl = 0.0
+            changed = True
+
+        sanitized = _sanitize_equity(equity)
+        if sanitized is not None:
+            if self.state.week_start_equity != sanitized:
+                self.state.week_start_equity = sanitized
+                changed = True
+        elif self.state.week_start_equity is None and self._last_equity_seen is not None:
+            self.state.week_start_equity = self._last_equity_seen
+            changed = True
+
+        if self.state.has_hit_weekly_target:
+            self.state.has_hit_weekly_target = False
+            changed = True
+
+        if changed:
+            self._save_state()
+        return changed
+
+    def clear_max_drawdown_halt(self, equity: Optional[float] = None) -> bool:
+        """Clear max-drawdown halt and optionally re-anchor peak equity."""
+
+        valid_equity = _sanitize_equity(equity)
+        changed = bool(self.state.max_drawdown_halt)
+        self.state.max_drawdown_halt = False
+        if valid_equity is not None:
+            self.state.peak_equity = valid_equity
+            changed = True
+        if changed:
+            self._save_state()
+        return changed
 
     def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0) -> None:
         """
