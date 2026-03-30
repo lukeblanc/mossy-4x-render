@@ -68,3 +68,9 @@ The trailing exit is controlled via environment variables (all optional):
 ## Entry confirmation
 
 - `USE_MACD_CONFIRMATION` (default `false`) — when enabled, the standard 12/26/9 MACD must agree with the existing EMA/RSI signal. MACD only filters entries; it never opens trades on its own.
+
+## Verbose market logging (temporary debugging)
+
+- `VERBOSE_MARKET_LOGS=false` (default) keeps repetitive `[SCAN]`/`[SIGNAL]` lines at debug level and muted.
+- Set `VERBOSE_MARKET_LOGS=true` only during short troubleshooting windows to surface per-instrument scan/signal traces.
+- Revert to `VERBOSE_MARKET_LOGS=false` after debugging to reduce log noise and duplicate-looking lines.
