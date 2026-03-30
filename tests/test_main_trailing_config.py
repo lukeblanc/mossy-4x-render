@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Dict
 
 import src.main as main_mod
@@ -45,3 +46,27 @@ def test_trailing_config_warns_on_non_positive_thresholds(monkeypatch, capsys):
     assert "giveback_ccy=-1.0" in captured.out
     assert trailing["arm_ccy"] == 0.0
     assert trailing["giveback_ccy"] == -1.0
+
+
+def test_format_trading_summary_uses_explicit_trade_counter_names():
+    snapshot = SimpleNamespace(
+        source="trades",
+        lifetime_closed_trades=42,
+        session_closed_trades=7,
+        wins=4,
+        losses=3,
+        loss_streak=2,
+        risk_multiplier=0.75,
+        filter_run_tag="MINI_RUN",
+        filter_window_start_utc="2026-03-30T00:00:00+00:00",
+        filter_window_end_utc="2026-03-30T01:00:00+00:00",
+    )
+
+    summary = main_mod._format_trading_summary(snapshot)
+
+    assert "lifetime_closed_trades=42" in summary
+    assert "session_closed_trades=7" in summary
+    assert " closed=" not in summary
+    assert "run_tag=MINI_RUN" in summary
+    assert "window_start_utc=2026-03-30T00:00:00+00:00" in summary
+    assert "window_end_utc=2026-03-30T01:00:00+00:00" in summary

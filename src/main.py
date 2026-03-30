@@ -75,15 +75,27 @@ from src.risk_setup import (
 from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
 
 VERSION = "v1.6.1"
+STARTUP_UTC = datetime.now(timezone.utc)
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
+
+
+def _adaptive_window_start_utc() -> str:
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start = max(day_start, STARTUP_UTC.replace(microsecond=0))
+    return window_start.isoformat()
+
+
 adaptive_tuner = AdaptiveTuner(
     journal.path,
     lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)),
     min_sample=int(os.getenv("ADAPTIVE_MIN_SAMPLE", 8)),
+    run_tag=os.getenv("ADAPTIVE_RUN_TAG", "MINI_RUN"),
+    window_start_utc=os.getenv("ADAPTIVE_WINDOW_START_UTC", _adaptive_window_start_utc()),
 )
 MINI_RUN_TAG = "MINI_RUN"
 
@@ -110,6 +122,19 @@ def _adaptive_snapshot_signature() -> str:
         return ",".join(params)
     except Exception:
         return "unavailable"
+
+
+def _format_trading_summary(snapshot) -> str:
+    return (
+        f"source={snapshot.source} "
+        f"lifetime_closed_trades={snapshot.lifetime_closed_trades} "
+        f"session_closed_trades={snapshot.session_closed_trades} "
+        f"wins={snapshot.wins} losses={snapshot.losses} "
+        f"loss_streak={snapshot.loss_streak} risk_mult={snapshot.risk_multiplier:.2f} "
+        f"run_tag={snapshot.filter_run_tag} "
+        f"window_start_utc={snapshot.filter_window_start_utc} "
+        f"window_end_utc={snapshot.filter_window_end_utc}"
+    )
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict:
@@ -487,17 +512,27 @@ async def heartbeat() -> None:
 
     journal_path = journal.path
     journal_exists = journal_path.exists()
-    try:
-        trade_count = journal.count_trade_events()
+    snap = _safe_adaptive_snapshot("heartbeat")
+    if snap is not None:
         print(
-            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} total_trades={trade_count}",
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} "
+            f"lifetime_closed_trades={snap.lifetime_closed_trades} "
+            f"session_closed_trades={snap.session_closed_trades}",
             flush=True,
         )
-    except Exception as exc:
-        print(
-            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
-            flush=True,
-        )
+    else:
+        try:
+            trade_count = journal.count_trade_events()
+            print(
+                f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} "
+                f"lifetime_closed_trades={trade_count} session_closed_trades={trade_count}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} error={exc}",
+                flush=True,
+            )
 
     print(
         f"[RUNTIME] revision={_runtime_revision()} main={Path(__file__).resolve()}",
@@ -522,13 +557,12 @@ async def heartbeat() -> None:
         f"{ts_local} equity={equity:.2f} open_trades={open_count}",
     )
 
-    snap = _safe_adaptive_snapshot("heartbeat")
     if snap is not None:
         log_cycle_event(
             "INFO",
             cycle_context,
             "TRADING_SUMMARY",
-            f"source={snap.source} closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
+            _format_trading_summary(snap),
         )
 
 suppression_counters = {
@@ -582,6 +616,16 @@ def _startup_checks() -> None:
         open_count = 0
 
     risk.startup_daily_reset(equity, open_positions_count=open_count)
+    snap = _safe_adaptive_snapshot("startup")
+    if snap is not None:
+        print(
+            "[JOURNAL][STARTUP] "
+            f"lifetime_closed_trades={snap.lifetime_closed_trades} "
+            f"session_closed_trades={snap.session_closed_trades} "
+            f"source={snap.source} run_tag={snap.filter_run_tag} "
+            f"window_start_utc={snap.filter_window_start_utc} window_end_utc={snap.filter_window_end_utc}",
+            flush=True,
+        )
 
     if _as_bool(os.getenv("RESET_MAX_DRAWDOWN_HALT", False)):
         if risk.clear_max_drawdown_halt(equity):
@@ -1324,10 +1368,17 @@ def launch_status_server_thread() -> threading.Thread:
 if __name__ == "__main__":
     journal_path = journal.path
     journal_exists = journal_path.exists()
+    startup_snap = _safe_adaptive_snapshot("main_boot")
     try:
-        trade_count = journal.count_trade_events()
+        if startup_snap is not None:
+            trade_count = startup_snap.lifetime_closed_trades
+            session_count = startup_snap.session_closed_trades
+        else:
+            trade_count = journal.count_trade_events()
+            session_count = trade_count
         print(
-            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} total_trades={trade_count}",
+            f"[JOURNAL] path={journal_path} exists={str(journal_exists).lower()} "
+            f"lifetime_closed_trades={trade_count} session_closed_trades={session_count}",
             flush=True,
         )
     except Exception as exc:
