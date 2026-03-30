@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import json
 import os
 import inspect
@@ -574,6 +575,67 @@ suppression_counters = {
     "blocked_spread": 0,
 }
 
+FILTER_REPORT_EVERY_CYCLES = max(
+    1, int(os.getenv("FILTER_REPORT_EVERY_CYCLES", config.get("filter_report_every_cycles", 60)))
+)
+FILTER_THRESHOLD_TOLERANCE_CAP_PIPS = max(
+    0.1,
+    _coerce_float(
+        os.getenv(
+            "FILTER_THRESHOLD_TOLERANCE_CAP_PIPS",
+            config.get("filter_threshold_tolerance_cap_pips", 25.0),
+        ),
+        25.0,
+    ),
+)
+
+_reason_counts_by_instrument: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+_signal_counts_by_instrument: dict[str, int] = defaultdict(int)
+_decision_cycle_count = 0
+
+
+def _normalize_block_reason(reason: str | None) -> str:
+    cleaned = str(reason or "unknown").strip().lower().replace("_", "-")
+    return cleaned or "unknown"
+
+
+def _record_signal_evaluated(instrument: str) -> None:
+    _signal_counts_by_instrument[instrument] += 1
+
+
+def _record_block_reason(instrument: str, reason: str | None) -> None:
+    normalized = _normalize_block_reason(reason)
+    _reason_counts_by_instrument[instrument][normalized] += 1
+
+
+def _format_filter_block_summary_lines(cycle_count: int) -> list[str]:
+    lines: list[str] = []
+    for instrument in sorted(_signal_counts_by_instrument):
+        total = _signal_counts_by_instrument[instrument]
+        reasons = _reason_counts_by_instrument.get(instrument, {})
+        blocked = sum(reasons.values())
+        block_rate = (blocked / total) if total else 0.0
+        reason_clause = ",".join(
+            f"{reason}:{count}" for reason, count in sorted(reasons.items())
+        ) or "none"
+        lines.append(
+            f"[FILTER][SUMMARY] cycles={cycle_count} instrument={instrument} "
+            f"blocked={blocked} total={total} block_rate={block_rate:.1%} reasons={reason_clause}"
+        )
+    return lines
+
+
+def _maybe_emit_filter_block_summary(cycle_count: int) -> None:
+    if cycle_count <= 0 or cycle_count % FILTER_REPORT_EVERY_CYCLES != 0:
+        return
+    for line in _format_filter_block_summary_lines(cycle_count):
+        print(line, flush=True)
+
+
+def _reset_filter_block_stats() -> None:
+    _reason_counts_by_instrument.clear()
+    _signal_counts_by_instrument.clear()
+
 
 
 
@@ -960,6 +1022,7 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
     )
 
 async def decision_cycle() -> None:
+    global _decision_cycle_count
     now_utc = datetime.now(timezone.utc)
     cycle_context = _new_cycle_context(now_utc, prefix="decision")
     tick_bucket = cycle_context["tick_bucket"]
@@ -1015,6 +1078,7 @@ async def decision_cycle() -> None:
         for evaluation in evaluations:
             cycle_stats["evaluations"] += 1
             suppression_counters["signals_generated"] += 1
+            _record_signal_evaluated(evaluation.instrument)
             log_cycle_event(
                 "DEBUG",
                 cycle_context,
@@ -1050,6 +1114,7 @@ async def decision_cycle() -> None:
 
             if not session_decision.allowed:
                 suppression_counters["blocked_off_session"] += 1
+                _record_block_reason(evaluation.instrument, session_decision.reason or "off-session")
                 cycle_stats["blocked_off_session"] += 1
                 cycle_stats["skipped"] += 1
                 ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
@@ -1062,6 +1127,7 @@ async def decision_cycle() -> None:
             should_trade, skip_reason = _should_place_trade(open_trades, evaluation)
             if not should_trade:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, skip_reason)
                 if skip_reason == "max-open":
                     suppression_counters["blocked_max_positions"] += 1
                     cycle_stats["blocked_max_positions"] += 1
@@ -1070,6 +1136,7 @@ async def decision_cycle() -> None:
             # Final broker-side duplicate guard before risk checks or order submission.
             if _instrument_open_on_broker(evaluation.instrument):
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, "broker-duplicate")
                 print(
                     f"[TRADE] Skipping {evaluation.instrument}; broker reports existing open position",
                     flush=True,
@@ -1088,9 +1155,11 @@ async def decision_cycle() -> None:
                 open_trades,
                 evaluation.instrument,
                 spread_pips,
+                atr_price_units=diagnostics.get("atr"),
             )
             if not ok_to_open:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, risk_reason)
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to {risk_reason}",
                     flush=True,
@@ -1108,6 +1177,7 @@ async def decision_cycle() -> None:
 
             if getattr(risk, "demo_mode", False) and now_utc.weekday() >= 5:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, "weekend-lock")
                 print(
                     "[WEEKEND] Entry blocked - weekend lock active (UTC Saturday/Sunday)",
                     flush=True,
@@ -1121,6 +1191,7 @@ async def decision_cycle() -> None:
 
             if not trend_ok:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, "trend-misaligned")
                 print(
                     f"[FILTER] Trend misaligned {evaluation.instrument} signal={evaluation.signal} "
                     f"ema50={ema_trend_fast:.5f} ema200={ema_trend_slow:.5f}",
@@ -1141,6 +1212,8 @@ async def decision_cycle() -> None:
             )
             if xau_blocked or xau_guard_block:
                 cycle_stats["skipped"] += 1
+                xau_reason = "xau-rsi-atr-block" if xau_blocked else f"xau-guard-{xau_guard_reason}"
+                _record_block_reason(evaluation.instrument, xau_reason)
                 print(
                     f"[FILTER] XAU_USD blocked {evaluation.signal}: rsi={rsi_val:.2f} atr_ratio={atr_ratio:.2f} guard={xau_guard_reason} guard_atr={xau_atr_val:.5f} guard_ratio={xau_atr_ratio:.2f}",
                     flush=True,
@@ -1154,6 +1227,7 @@ async def decision_cycle() -> None:
             )
             if not macd_ok:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, "macd-veto")
                 print(
                     f"[FILTER] MACD veto {evaluation.instrument} macd={macd_line:.5f} "
                     f"signal={macd_signal_line:.5f} hist={macd_histogram:.5f}",
@@ -1173,6 +1247,7 @@ async def decision_cycle() -> None:
             )
             if not orb_ok:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, orb_reason or "orb-block")
                 print(
                     f"[FILTER] ORB block {evaluation.instrument} reason={orb_reason}",
                     flush=True,
@@ -1226,6 +1301,7 @@ async def decision_cycle() -> None:
             )
             if units <= 0:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, "zero-position-size")
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to zero position size",
                     flush=True,
@@ -1305,12 +1381,15 @@ async def decision_cycle() -> None:
                 )
             else:
                 cycle_stats["skipped"] += 1
+                _record_block_reason(evaluation.instrument, "order-failed")
                 print(
                     f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"
                     f" response={result}",
                     flush=True,
                 )
     finally:
+        _decision_cycle_count += 1
+        _maybe_emit_filter_block_summary(_decision_cycle_count)
         if not _summary_already_emitted(tick_bucket):
             log_cycle_event(
                 "INFO",

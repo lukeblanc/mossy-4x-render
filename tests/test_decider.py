@@ -601,6 +601,38 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
         monkeypatch.setattr(main, "datetime", datetime)
 
 
+def test_filter_reason_counter_and_periodic_summary_format(capsys):
+    main._reset_filter_block_stats()
+    main._record_signal_evaluated("EUR_USD")
+    main._record_signal_evaluated("EUR_USD")
+    main._record_signal_evaluated("XAU_USD")
+    main._record_block_reason("EUR_USD", "spread-too-wide")
+    main._record_block_reason("EUR_USD", "inside-opening-range")
+    main._record_block_reason("XAU_USD", "trend-misaligned")
+
+    lines = main._format_filter_block_summary_lines(cycle_count=60)
+    assert len(lines) == 2
+    assert lines[0].startswith("[FILTER][SUMMARY] cycles=60 instrument=EUR_USD")
+    assert "block_rate=100.0%" in lines[0]
+    assert "reasons=inside-opening-range:1,spread-too-wide:1" in lines[0]
+    assert lines[1].startswith("[FILTER][SUMMARY] cycles=60 instrument=XAU_USD")
+    assert "block_rate=100.0%" in lines[1]
+    assert "reasons=trend-misaligned:1" in lines[1]
+
+    original_every = main.FILTER_REPORT_EVERY_CYCLES
+    try:
+        main.FILTER_REPORT_EVERY_CYCLES = 2
+        main._maybe_emit_filter_block_summary(cycle_count=1)
+        assert capsys.readouterr().out == ""
+        main._maybe_emit_filter_block_summary(cycle_count=2)
+        emitted = capsys.readouterr().out
+        assert "[FILTER][SUMMARY] cycles=2 instrument=EUR_USD" in emitted
+        assert "reasons=inside-opening-range:1,spread-too-wide:1" in emitted
+    finally:
+        main.FILTER_REPORT_EVERY_CYCLES = original_every
+        main._reset_filter_block_stats()
+
+
 def test_decision_cycle_allows_entries_inside_session(monkeypatch):
     class DummyRisk:
         risk_per_trade_pct = 0.001
