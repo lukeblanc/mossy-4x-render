@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections import deque
 import json
 import os
 import inspect
@@ -30,6 +31,9 @@ BOT_STATE = {
     "drawdown_pct": None,
     "open_trades": 0,
     "last_heartbeat": None,
+    "scheduler_alive": False,
+    "last_cycle_age_sec": None,
+    "last_broker_sync_age_sec": None,
 }
 
 _ACTIVE_CYCLE_TICKS: set[str] = set()
@@ -503,8 +507,8 @@ risk = build_risk_manager(
     state_dir=DATA_DIR,
 )
 async def heartbeat() -> None:
-    watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
-    now_utc = datetime.now(timezone.utc)
+    watchdog.last_heartbeat_ts = _utc_now()
+    now_utc = _utc_now()
     cycle_context = _new_cycle_context(now_utc, prefix="heartbeat")
 
     ts_local = now_utc.astimezone().isoformat()
@@ -548,7 +552,13 @@ async def heartbeat() -> None:
         "status": "running",
         "equity": float(equity),
         "open_trades": int(open_count),
-        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+        "last_heartbeat": _utc_now().isoformat(),
+    })
+    health = _health_status(now_utc)
+    BOT_STATE.update({
+        "scheduler_alive": health["scheduler_alive"],
+        "last_cycle_age_sec": health["last_cycle_age_sec"],
+        "last_broker_sync_age_sec": health["last_broker_sync_age_sec"],
     })
 
     log_cycle_event(
@@ -565,6 +575,17 @@ async def heartbeat() -> None:
             "TRADING_SUMMARY",
             _format_trading_summary(snap),
         )
+    log_cycle_event(
+        "INFO",
+        cycle_context,
+        "HEALTH_STATUS",
+        (
+            f"scheduler_alive={health['scheduler_alive']} "
+            f"last_cycle_age_sec={health['last_cycle_age_sec']} "
+            f"open_trades_count={health['open_trades_count']} "
+            f"last_broker_sync_age_sec={health['last_broker_sync_age_sec']}"
+        ),
+    )
 
 suppression_counters = {
     "signals_generated": 0,
@@ -592,6 +613,82 @@ FILTER_THRESHOLD_TOLERANCE_CAP_PIPS = max(
 _reason_counts_by_instrument: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 _signal_counts_by_instrument: dict[str, int] = defaultdict(int)
 _decision_cycle_count = 0
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _compute_percentile(values: List[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    rank = max(0.0, min(1.0, percentile)) * (len(values) - 1)
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return float(values[lower])
+    lower_v = float(values[lower])
+    upper_v = float(values[upper])
+    return lower_v + (upper_v - lower_v) * (rank - lower)
+
+
+class CycleHealthTracker:
+    def __init__(
+        self,
+        *,
+        gap_warn_seconds: float = 90.0,
+        percentile_window: int = 512,
+        summary_interval_seconds: int = 900,
+    ) -> None:
+        self.gap_warn_seconds = float(gap_warn_seconds)
+        self.summary_interval_seconds = max(60, int(summary_interval_seconds))
+        self._durations_sec: deque[float] = deque(maxlen=max(10, int(percentile_window)))
+        self.last_cycle_completed_ts: datetime | None = None
+        self.last_summary_ts: datetime | None = None
+
+    def cycle_age_seconds(self, now_utc: datetime | None = None) -> float | None:
+        if self.last_cycle_completed_ts is None:
+            return None
+        now = now_utc or _utc_now()
+        return max(0.0, (now - self.last_cycle_completed_ts).total_seconds())
+
+    def is_cycle_stale(self, now_utc: datetime | None = None) -> bool:
+        age = self.cycle_age_seconds(now_utc)
+        return age is not None and age > self.gap_warn_seconds
+
+    def record_cycle_complete(self, duration_seconds: float, now_utc: datetime | None = None) -> None:
+        self._durations_sec.append(max(0.0, float(duration_seconds)))
+        self.last_cycle_completed_ts = now_utc or _utc_now()
+
+    def duration_percentiles(self) -> tuple[float, float]:
+        values = sorted(self._durations_sec)
+        return _compute_percentile(values, 0.50), _compute_percentile(values, 0.95)
+
+    def sample_count(self) -> int:
+        return len(self._durations_sec)
+
+    def should_emit_summary(self, now_utc: datetime | None = None) -> bool:
+        if not self._durations_sec:
+            return False
+        now = now_utc or _utc_now()
+        if self.last_summary_ts is None:
+            self.last_summary_ts = now
+            return True
+        elapsed = (now - self.last_summary_ts).total_seconds()
+        if elapsed >= self.summary_interval_seconds:
+            self.last_summary_ts = now
+            return True
+        return False
+
+
+CYCLE_HEALTH = CycleHealthTracker(
+    gap_warn_seconds=_coerce_float(os.getenv("CYCLE_GAP_WARN_SECONDS", "90"), 90.0),
+    summary_interval_seconds=int(_coerce_float(os.getenv("CYCLE_HEALTH_LOG_INTERVAL_SECONDS", "900"), 900.0)),
+)
+_LAST_BROKER_SYNC_TS: datetime | None = None
+_SCHEDULER_REF: AsyncIOScheduler | None = None
 
 
 def _normalize_block_reason(reason: str | None) -> str:
@@ -709,12 +806,17 @@ def _startup_checks() -> None:
 
 
 def _open_trades_state() -> List[Dict]:
+    global _LAST_BROKER_SYNC_TS
     try:
-        return broker.list_open_trades()
+        trades = broker.list_open_trades()
+        _LAST_BROKER_SYNC_TS = _utc_now()
+        return trades
     except AttributeError:
         # Older broker implementations may not yet expose list_open_trades.
+        _LAST_BROKER_SYNC_TS = _utc_now()
         return []
     except Exception as exc:
+        _LAST_BROKER_SYNC_TS = _utc_now()
         print(f"[TRADE][WARN] Unable to refresh open trades: {exc}", flush=True)
         return []
 
@@ -756,6 +858,31 @@ def _should_place_trade(open_trades: List[Dict], evaluation: Evaluation) -> tupl
         return False, "cooldown"
 
     return True, None
+
+
+def _scheduler_alive() -> bool:
+    scheduler = _SCHEDULER_REF
+    if scheduler is None:
+        return False
+    return bool(getattr(scheduler, "running", False))
+
+
+def _age_seconds(ts: datetime | None, now_utc: datetime | None = None) -> float | None:
+    if ts is None:
+        return None
+    now = now_utc or _utc_now()
+    return max(0.0, (now - ts).total_seconds())
+
+
+def _health_status(now_utc: datetime | None = None) -> Dict:
+    now = now_utc or _utc_now()
+    open_count = len(_open_trades_state())
+    return {
+        "scheduler_alive": _scheduler_alive(),
+        "last_cycle_age_sec": CYCLE_HEALTH.cycle_age_seconds(now),
+        "open_trades_count": open_count,
+        "last_broker_sync_age_sec": _age_seconds(_LAST_BROKER_SYNC_TS, now),
+    }
 
 
 def _instrument_open_on_broker(instrument: str) -> bool:
@@ -1023,9 +1150,18 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
 
 async def decision_cycle() -> None:
     global _decision_cycle_count
-    now_utc = datetime.now(timezone.utc)
+    started_monotonic = time.monotonic()
+    now_utc = _utc_now()
     cycle_context = _new_cycle_context(now_utc, prefix="decision")
     tick_bucket = cycle_context["tick_bucket"]
+    cycle_age = CYCLE_HEALTH.cycle_age_seconds(now_utc)
+    if cycle_age is not None and cycle_age > CYCLE_HEALTH.gap_warn_seconds:
+        log_cycle_event(
+            "WARN",
+            cycle_context,
+            "CYCLE_GAP",
+            f"stale_cycle_gap_sec={cycle_age:.1f} threshold_sec={CYCLE_HEALTH.gap_warn_seconds:.1f}",
+        )
     if not _begin_cycle_tick(tick_bucket):
         log_cycle_event(
             "WARN",
@@ -1388,8 +1524,23 @@ async def decision_cycle() -> None:
                     flush=True,
                 )
     finally:
+        finished_utc = _utc_now()
+        cycle_duration = max(0.0, time.monotonic() - started_monotonic)
+        CYCLE_HEALTH.record_cycle_complete(cycle_duration, finished_utc)
         _decision_cycle_count += 1
         _maybe_emit_filter_block_summary(_decision_cycle_count)
+        if CYCLE_HEALTH.should_emit_summary(finished_utc):
+            p50, p95 = CYCLE_HEALTH.duration_percentiles()
+            log_cycle_event(
+                "INFO",
+                cycle_context,
+                "CYCLE_LATENCY",
+                (
+                    f"count={CYCLE_HEALTH.sample_count()} "
+                    f"p50_sec={p50:.3f} p95_sec={p95:.3f} "
+                    f"interval_sec={CYCLE_HEALTH.summary_interval_seconds}"
+                ),
+            )
         if not _summary_already_emitted(tick_bucket):
             log_cycle_event(
                 "INFO",
@@ -1408,10 +1559,11 @@ async def decision_cycle() -> None:
                 ),
             )
         _end_cycle_tick(tick_bucket)
-        watchdog.last_decision_ts = datetime.now(timezone.utc)
+        watchdog.last_decision_ts = finished_utc
 
 
 async def runner() -> None:
+    global _SCHEDULER_REF
     _startup_checks()
 
     equity = broker.account_equity()
@@ -1421,6 +1573,8 @@ async def runner() -> None:
     scheduler.add_job(heartbeat, "interval", minutes=1)
     scheduler.add_job(decision_cycle, "interval", minutes=1)
     scheduler.start()
+    _SCHEDULER_REF = scheduler
+    BOT_STATE["scheduler_alive"] = True
     asyncio.create_task(watchdog.run())
     await heartbeat()
     await decision_cycle()
@@ -1433,7 +1587,10 @@ def start_status_server():
 
     @app.route("/status", methods=["GET"])
     def status():
-        return jsonify(BOT_STATE)
+        health = _health_status()
+        payload = dict(BOT_STATE)
+        payload.update(health)
+        return jsonify(payload)
 
     port = int(os.environ.get("PORT", 10000))
     serve(app, host="0.0.0.0", port=port)
