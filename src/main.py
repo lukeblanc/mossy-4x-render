@@ -31,6 +31,10 @@ BOT_STATE = {
     "last_heartbeat": None,
 }
 
+_ACTIVE_CYCLE_TICKS: set[str] = set()
+_SUMMARY_EMITTED_TICKS: set[str] = set()
+_CYCLE_GUARD_LOCK = threading.Lock()
+
 
 
 
@@ -180,6 +184,56 @@ def _as_bool(value: object) -> bool:
 
 
 ADAPTIVE_TUNING_ENABLED = _as_bool(os.getenv("ADAPTIVE_TUNING_ENABLED", True))
+VERBOSE_MARKET_LOGS = _as_bool(os.getenv("VERBOSE_MARKET_LOGS", "false"))
+
+
+def _cycle_tick_bucket(now_utc: datetime) -> str:
+    return now_utc.replace(second=0, microsecond=0).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def _new_cycle_context(now_utc: datetime, prefix: str = "decision") -> Dict[str, str]:
+    tick_bucket = _cycle_tick_bucket(now_utc)
+    return {
+        "cycle_id": f"{prefix}-{tick_bucket}-{uuid.uuid4().hex[:8]}",
+        "tick_bucket": tick_bucket,
+    }
+
+
+def log_cycle_event(level: str, cycle_context: Dict[str, str], tag: str, message: str) -> None:
+    normalized_level = (level or "INFO").upper()
+    if normalized_level == "DEBUG" and not VERBOSE_MARKET_LOGS:
+        return
+    cycle_id = cycle_context.get("cycle_id", "n/a")
+    tick_bucket = cycle_context.get("tick_bucket", "n/a")
+    print(
+        f"[{normalized_level}][cycle={cycle_id}][tick={tick_bucket}][{tag}] {message}",
+        flush=True,
+    )
+
+
+def _begin_cycle_tick(tick_bucket: str) -> bool:
+    with _CYCLE_GUARD_LOCK:
+        if tick_bucket in _ACTIVE_CYCLE_TICKS:
+            return False
+        _ACTIVE_CYCLE_TICKS.add(tick_bucket)
+        return True
+
+
+def _end_cycle_tick(tick_bucket: str) -> None:
+    with _CYCLE_GUARD_LOCK:
+        _ACTIVE_CYCLE_TICKS.discard(tick_bucket)
+
+
+def _summary_already_emitted(tick_bucket: str) -> bool:
+    with _CYCLE_GUARD_LOCK:
+        if tick_bucket in _SUMMARY_EMITTED_TICKS:
+            return True
+        _SUMMARY_EMITTED_TICKS.add(tick_bucket)
+        stale_keys = sorted(_SUMMARY_EMITTED_TICKS)
+        if len(stale_keys) > 10:
+            for key in stale_keys[:-10]:
+                _SUMMARY_EMITTED_TICKS.discard(key)
+        return False
 
 
 def _coerce_float(value: object, fallback: float = 0.0) -> float:
@@ -424,8 +478,10 @@ risk = build_risk_manager(
 )
 async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    cycle_context = _new_cycle_context(now_utc, prefix="heartbeat")
 
-    ts_local = datetime.now(timezone.utc).astimezone().isoformat()
+    ts_local = now_utc.astimezone().isoformat()
     equity = broker.account_equity()
     open_count = len(_open_trades_state())
 
@@ -459,16 +515,20 @@ async def heartbeat() -> None:
         "last_heartbeat": datetime.now(timezone.utc).isoformat(),
     })
 
-    print(
-        f"[HEARTBEAT] {ts_local} equity={equity:.2f} open_trades={open_count}",
-        flush=True,
+    log_cycle_event(
+        "INFO",
+        cycle_context,
+        "HEARTBEAT",
+        f"{ts_local} equity={equity:.2f} open_trades={open_count}",
     )
 
     snap = _safe_adaptive_snapshot("heartbeat")
     if snap is not None:
-        print(
-            f"[TRADING_SUMMARY] source={snap.source} closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
-            flush=True,
+        log_cycle_event(
+            "INFO",
+            cycle_context,
+            "TRADING_SUMMARY",
+            f"source={snap.source} closed={snap.closed_trades} wins={snap.wins} losses={snap.losses} loss_streak={snap.loss_streak} risk_mult={snap.risk_multiplier:.2f}",
         )
 
 suppression_counters = {
@@ -857,6 +917,26 @@ def _log_projector(evaluation: Evaluation, now_utc: datetime) -> None:
 
 async def decision_cycle() -> None:
     now_utc = datetime.now(timezone.utc)
+    cycle_context = _new_cycle_context(now_utc, prefix="decision")
+    tick_bucket = cycle_context["tick_bucket"]
+    if not _begin_cycle_tick(tick_bucket):
+        log_cycle_event(
+            "WARN",
+            cycle_context,
+            "CYCLE",
+            "duplicate invocation skipped before evaluation",
+        )
+        return
+
+    cycle_stats = {
+        "evaluations": 0,
+        "executed": 0,
+        "skipped": 0,
+        "blocked_off_session": 0,
+        "blocked_risk": 0,
+        "blocked_max_positions": 0,
+        "blocked_spread": 0,
+    }
     equity = broker.account_equity()
     try:
         risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
@@ -889,7 +969,14 @@ async def decision_cycle() -> None:
             orb.reset_for_session(session_snapshot)
 
         for evaluation in evaluations:
+            cycle_stats["evaluations"] += 1
             suppression_counters["signals_generated"] += 1
+            log_cycle_event(
+                "DEBUG",
+                cycle_context,
+                "SCAN",
+                f"instrument={evaluation.instrument} signal={evaluation.signal}",
+            )
             _log_projector(evaluation, now_utc)
             diagnostics = evaluation.diagnostics or {}
             trend_ok, ema_trend_fast, ema_trend_slow = _trend_aligned(evaluation.signal, diagnostics)
@@ -919,6 +1006,8 @@ async def decision_cycle() -> None:
 
             if not session_decision.allowed:
                 suppression_counters["blocked_off_session"] += 1
+                cycle_stats["blocked_off_session"] += 1
+                cycle_stats["skipped"] += 1
                 ts = now_utc.astimezone(timezone.utc).strftime("%H:%M")
                 print(
                     f"[FILTER] Entries paused (off-session) now_utc={ts} mode={session_mode} reason={session_decision.reason}",
@@ -928,12 +1017,15 @@ async def decision_cycle() -> None:
 
             should_trade, skip_reason = _should_place_trade(open_trades, evaluation)
             if not should_trade:
+                cycle_stats["skipped"] += 1
                 if skip_reason == "max-open":
                     suppression_counters["blocked_max_positions"] += 1
+                    cycle_stats["blocked_max_positions"] += 1
                 continue
 
             # Final broker-side duplicate guard before risk checks or order submission.
             if _instrument_open_on_broker(evaluation.instrument):
+                cycle_stats["skipped"] += 1
                 print(
                     f"[TRADE] Skipping {evaluation.instrument}; broker reports existing open position",
                     flush=True,
@@ -954,19 +1046,24 @@ async def decision_cycle() -> None:
                 spread_pips,
             )
             if not ok_to_open:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to {risk_reason}",
                     flush=True,
                 )
                 if risk_reason == "max-positions":
                     suppression_counters["blocked_max_positions"] += 1
+                    cycle_stats["blocked_max_positions"] += 1
                 elif risk_reason == "spread-too-wide":
                     suppression_counters["blocked_spread"] += 1
+                    cycle_stats["blocked_spread"] += 1
                 else:
                     suppression_counters["blocked_risk"] += 1
+                    cycle_stats["blocked_risk"] += 1
                 continue
 
             if getattr(risk, "demo_mode", False) and now_utc.weekday() >= 5:
+                cycle_stats["skipped"] += 1
                 print(
                     "[WEEKEND] Entry blocked - weekend lock active (UTC Saturday/Sunday)",
                     flush=True,
@@ -979,6 +1076,7 @@ async def decision_cycle() -> None:
             entry_price = diagnostics.get("close")
 
             if not trend_ok:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[FILTER] Trend misaligned {evaluation.instrument} signal={evaluation.signal} "
                     f"ema50={ema_trend_fast:.5f} ema200={ema_trend_slow:.5f}",
@@ -998,17 +1096,20 @@ async def decision_cycle() -> None:
                 guard_scale=float(config.get("xau_atr_guard_size_scale", 0.5)),
             )
             if xau_blocked or xau_guard_block:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[FILTER] XAU_USD blocked {evaluation.signal}: rsi={rsi_val:.2f} atr_ratio={atr_ratio:.2f} guard={xau_guard_reason} guard_atr={xau_atr_val:.5f} guard_ratio={xau_atr_ratio:.2f}",
                     flush=True,
                 )
                 suppression_counters["blocked_risk"] += 1
+                cycle_stats["blocked_risk"] += 1
                 continue
 
             macd_ok, macd_line, macd_signal_line, macd_histogram = _macd_confirms(
                 evaluation.signal, diagnostics
             )
             if not macd_ok:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[FILTER] MACD veto {evaluation.instrument} macd={macd_line:.5f} "
                     f"signal={macd_signal_line:.5f} hist={macd_histogram:.5f}",
@@ -1027,6 +1128,7 @@ async def decision_cycle() -> None:
                 now_utc,
             )
             if not orb_ok:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[FILTER] ORB block {evaluation.instrument} reason={orb_reason}",
                     flush=True,
@@ -1079,6 +1181,7 @@ async def decision_cycle() -> None:
                 flush=True,
             )
             if units <= 0:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[TRADE] Skipping {evaluation.instrument} due to zero position size",
                     flush=True,
@@ -1092,6 +1195,12 @@ async def decision_cycle() -> None:
                 sl_distance=sl_distance,
                 tp_distance=tp_distance,
                 entry_price=entry_price,
+            )
+            log_cycle_event(
+                "DEBUG",
+                cycle_context,
+                "SIGNAL",
+                f"instrument={evaluation.instrument} action={evaluation.signal} status={result.get('status', 'UNKNOWN')}",
             )
             if result.get("status") == "SENT":
                 sl_price, tp_price = _calc_exit_prices(evaluation.signal, entry_price, sl_distance, tp_distance)
@@ -1141,19 +1250,41 @@ async def decision_cycle() -> None:
                 open_trades.append({"instrument": evaluation.instrument, "id": ticket})
                 risk.register_entry(now_utc, evaluation.instrument)
                 suppression_counters["signals_executed"] += 1
-                print(
-                    f"[ORDER] ticket={ticket or 'n/a'} instrument={evaluation.instrument} "
+                cycle_stats["executed"] += 1
+                log_cycle_event(
+                    "INFO",
+                    cycle_context,
+                    "ORDER",
+                    f"ticket={ticket or 'n/a'} instrument={evaluation.instrument} "
                     f"sl={ 'n/a' if sl_price is None else f'{sl_price:.5f}'} "
                     f"tp={ 'n/a' if tp_price is None else f'{tp_price:.5f}'}",
-                    flush=True,
                 )
             else:
+                cycle_stats["skipped"] += 1
                 print(
                     f"[TRADE] Order failed instrument={evaluation.instrument} signal={evaluation.signal}"
                     f" response={result}",
                     flush=True,
                 )
     finally:
+        if not _summary_already_emitted(tick_bucket):
+            log_cycle_event(
+                "INFO",
+                cycle_context,
+                "CYCLE_SUMMARY",
+                " ".join(
+                    [
+                        f"evaluations={cycle_stats['evaluations']}",
+                        f"executed={cycle_stats['executed']}",
+                        f"skipped={cycle_stats['skipped']}",
+                        f"blocked_off_session={cycle_stats['blocked_off_session']}",
+                        f"blocked_max_positions={cycle_stats['blocked_max_positions']}",
+                        f"blocked_spread={cycle_stats['blocked_spread']}",
+                        f"blocked_risk={cycle_stats['blocked_risk']}",
+                    ]
+                ),
+            )
+        _end_cycle_tick(tick_bucket)
         watchdog.last_decision_ts = datetime.now(timezone.utc)
 
 
