@@ -23,6 +23,8 @@
   "xau_atr_guard_action": "skip",
   "xau_atr_guard_size_scale": 0.5,
   "xau_atr_guard_note": "Skip or scale position size when XAU_USD ATR exceeds baseline * guard ratio",
+  "filter_report_every_cycles": 60,
+  "filter_threshold_tolerance_cap_pips": 25.0,
   "use_macd_confirmation": true,
   "instruments": [
     "EUR_USD",
@@ -63,6 +65,9 @@
       "XAU_USD": 5.0
     },
     "default_spread_pips_limit": 2.5,
+    "xau_spread_pips_limit": 5.0,
+    "xau_spread_atr_ratio": 0.25,
+    "spread_limit_tolerance_cap_pips": 25.0,
     "rollover_quiet_awst": {
       "start": "04:55",
       "end": "05:05"

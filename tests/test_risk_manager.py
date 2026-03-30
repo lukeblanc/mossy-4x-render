@@ -87,6 +87,41 @@ def test_cooldown_and_spread_limits(state_dir):
     assert ok is True
 
 
+def test_xau_spread_limit_supports_absolute_atr_relative_and_cap(state_dir):
+    manager = RiskManager(
+        {
+            "spread_pips_limit": {"XAU_USD": 5.0},
+            "xau_spread_pips_limit": 4.0,
+            "xau_spread_atr_ratio": 0.5,
+            "spread_limit_tolerance_cap_pips": 3.0,
+        },
+        mode="paper",
+    )
+    now = _utc(2024, 1, 1, 2, 0)
+
+    ok, reason = manager.should_open(
+        now,
+        10_000.0,
+        [],
+        "XAU_USD",
+        3.2,
+        atr_price_units=0.10,
+    )
+    assert ok is False
+    assert reason == "spread-too-wide"
+
+    ok, reason = manager.should_open(
+        now,
+        10_000.0,
+        [],
+        "XAU_USD",
+        2.9,
+        atr_price_units=0.10,
+    )
+    assert ok is True
+    assert reason == "ok"
+
+
 def test_daily_loss_cap_blocks_after_drawdown(state_dir):
     manager = RiskManager({"daily_loss_cap_pct": 0.01}, mode="paper")
     today = _utc(2024, 1, 1, 4, 0)

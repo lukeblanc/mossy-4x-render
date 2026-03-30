@@ -321,6 +321,7 @@ class RiskManager:
         open_positions: list,
         instrument: str,
         spread_pips: Optional[float],
+        atr_price_units: Optional[float] = None,
     ) -> Tuple[bool, str]:
         self._rollover(now_utc, equity)
         open_positions_count = len(open_positions) if open_positions is not None else None
@@ -384,7 +385,10 @@ class RiskManager:
         if self._in_rollover_window(now_utc):
             return False, "rollover-window"
 
-        spread_limit = self._spread_limit_for(instrument)
+        spread_limit = self._spread_limit_for(
+            instrument,
+            atr_price_units=atr_price_units,
+        )
         if spread_limit is not None and spread_pips is not None:
             if spread_pips > spread_limit:
                 return False, "spread-too-wide"
@@ -729,15 +733,53 @@ class RiskManager:
                 awst_now += timedelta(days=1)
         return start <= awst_now < end
 
-    def _spread_limit_for(self, instrument: str) -> Optional[float]:
+    def _spread_limit_for(
+        self,
+        instrument: str,
+        *,
+        atr_price_units: Optional[float] = None,
+    ) -> Optional[float]:
+        cap_limit = self._coerce_positive(
+            self.config.get(
+                "spread_limit_tolerance_cap_pips",
+                os.getenv("SPREAD_LIMIT_TOLERANCE_CAP_PIPS", 25.0),
+            ),
+            cap=None,
+        )
+        if cap_limit <= 0:
+            cap_limit = 25.0
+
+        xau_limit = self._xau_spread_limit(atr_price_units, cap_limit=cap_limit)
+        if instrument == "XAU_USD" and xau_limit is not None:
+            return xau_limit
+
         if instrument in self.spread_pips_limit:
-            return float(self.spread_pips_limit[instrument])
+            return min(float(self.spread_pips_limit[instrument]), cap_limit)
         if self.default_spread_limit is None:
             return None
         try:
-            return float(self.default_spread_limit)
+            return min(float(self.default_spread_limit), cap_limit)
         except (TypeError, ValueError):
             return None
+
+    def _xau_spread_limit(self, atr_price_units: Optional[float], *, cap_limit: float) -> Optional[float]:
+        raw_abs_limit = (
+            os.getenv("XAU_SPREAD_PIPS_LIMIT")
+            or self.config.get("xau_spread_pips_limit")
+            or self.spread_pips_limit.get("XAU_USD")
+        )
+        abs_limit = self._coerce_positive(raw_abs_limit, cap=None)
+
+        atr_ratio_raw = os.getenv("XAU_SPREAD_ATR_RATIO") or self.config.get("xau_spread_atr_ratio")
+        atr_ratio = self._coerce_positive(atr_ratio_raw, cap=None)
+        atr_relative_limit: Optional[float] = None
+        if atr_ratio > 0 and atr_price_units is not None and atr_price_units > 0:
+            atr_relative_limit = (atr_price_units / 0.01) * atr_ratio
+
+        candidates = [value for value in (abs_limit, atr_relative_limit) if value and value > 0]
+        if not candidates:
+            return None
+        return min(min(candidates), cap_limit)
 
     @staticmethod
     def _coerce_positive(value: object, *, cap: Optional[float] = None) -> float:
