@@ -414,6 +414,53 @@ def _max_drawdown_and_losing_streak(trades: list[dict[str, Any]]) -> tuple[float
     return max_drawdown, longest_losing_streak
 
 
+def _write_performance_pdf(report_dir: Path, total_trades: int) -> Path:
+    """Write a tiny single-page PDF summary artifact and return its path."""
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output = report_dir / f"performance_{total_trades}trades.pdf"
+    lines = ("Performance Summary", f"Total trades: {total_trades}")
+    text_ops = [
+        "BT",
+        "/F1 14 Tf",
+        "72 740 Td",
+    ]
+    for i, line in enumerate(lines):
+        escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        if i > 0:
+            text_ops.append("0 -20 Td")
+        text_ops.append(f"({escaped}) Tj")
+    text_ops.append("ET")
+    stream = ("\n".join(text_ops) + "\n").encode("latin-1", errors="replace")
+
+    objects = [
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n",
+        f"4 0 obj << /Length {len(stream)} >> stream\n".encode("ascii") + stream + b"endstream endobj\n",
+        b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n",
+    ]
+
+    header = b"%PDF-1.4\n"
+    body = bytearray(header)
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(body))
+        body.extend(obj)
+
+    xref_pos = len(body)
+    count = len(objects) + 1
+    body.extend(f"xref\n0 {count}\n".encode("ascii"))
+    body.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        body.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    body.extend(
+        f"trailer << /Size {count} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("ascii")
+    )
+
+    output.write_bytes(bytes(body))
+    return output
+
 def run_performance_analysis(db_path: Path | str | None = None) -> None:
     """Compute and print performance analytics from all closed trades in trade_journal.db."""
 
@@ -468,6 +515,10 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
     print(f"max_drawdown={max_drawdown:.2f}", flush=True)
     print(f"longest_losing_streak={longest_losing_streak}", flush=True)
     print(f"avg_trade_duration={metrics['avg_trade_duration']:.2f}", flush=True)
+
+    if metrics["total_trades"] > 0:
+        report_root = Path(os.getenv("PERFORMANCE_REPORT_DIR", "reports"))
+        _write_performance_pdf(report_root, metrics["total_trades"])
 
     by_instrument: dict[str, list[dict[str, Any]]] = {}
     for trade in trades:

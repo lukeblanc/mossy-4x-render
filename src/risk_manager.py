@@ -573,6 +573,8 @@ class RiskManager:
             self.state.day_start_equity = valid_equity
             self.state.daily_realized_pl = 0.0
             self.state.loss_streak_pause_until = None
+            if self.state.max_drawdown_halt:
+                self.state.max_drawdown_halt = False
             if prev_day_id is not None:
                 self.state.daily_entry_count = 0
             changed = True

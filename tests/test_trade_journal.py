@@ -120,3 +120,37 @@ def test_run_performance_analysis_creates_pdf(tmp_path, monkeypatch):
 
     pdf_files = list(report_dir.glob("performance_*trades.pdf"))
     assert pdf_files, "Expected a generated PDF report"
+    pdf_data = pdf_files[0].read_bytes()
+    assert pdf_data.startswith(b"%PDF-1.4")
+    assert b"(Total trades: 1) Tj" in pdf_data
+
+
+def test_run_performance_analysis_skips_pdf_when_no_closed_trades(tmp_path, monkeypatch):
+    from src.trade_journal import run_performance_analysis
+
+    db_path = tmp_path / "journal.db"
+    report_dir = tmp_path / "reports"
+    monkeypatch.setenv("PERFORMANCE_REPORT_DIR", str(report_dir))
+
+    journal = TradeJournal(db_path)
+    entry_ts = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    journal.record_entry(
+        trade_id="T-PDF-OPEN",
+        timestamp_utc=entry_ts,
+        instrument="EUR_USD",
+        side="BUY",
+        units=1000,
+        entry_price=1.2345,
+        stop_loss_price=1.2300,
+        take_profit_price=1.2400,
+        spread_at_entry=0.12,
+        session_id="LONDON",
+        session_mode="STRICT",
+        run_tag="MINI_RUN",
+        gating_flags={"session_ok": True},
+        indicators_snapshot={"rsi": 55.5},
+    )
+
+    run_performance_analysis(db_path)
+
+    assert not list(report_dir.glob("performance_*trades.pdf"))
