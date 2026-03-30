@@ -641,7 +641,6 @@ class RiskManager:
             self.state.loss_streak_pause_until = None
             if self.state.max_drawdown_halt:
                 self.state.max_drawdown_halt = False
-                print("[RISK] Cleared max-drawdown halt on new trading day", flush=True)
             if prev_day_id is not None:
                 self.state.daily_entry_count = 0
             changed = True

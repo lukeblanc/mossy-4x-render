@@ -414,15 +414,24 @@ def _max_drawdown_and_losing_streak(trades: list[dict[str, Any]]) -> tuple[float
     return max_drawdown, longest_losing_streak
 
 
-
-
 def _write_performance_pdf(report_dir: Path, total_trades: int) -> Path:
-    """Write a tiny PDF summary artifact and return its path."""
+    """Write a tiny single-page PDF summary artifact and return its path."""
 
     report_dir.mkdir(parents=True, exist_ok=True)
     output = report_dir / f"performance_{total_trades}trades.pdf"
-    content = f"Performance Summary\nTotal trades: {total_trades}\n"
-    stream = content.encode("latin-1", errors="replace")
+    lines = ("Performance Summary", f"Total trades: {total_trades}")
+    text_ops = [
+        "BT",
+        "/F1 14 Tf",
+        "72 740 Td",
+    ]
+    for i, line in enumerate(lines):
+        escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        if i > 0:
+            text_ops.append("0 -20 Td")
+        text_ops.append(f"({escaped}) Tj")
+    text_ops.append("ET")
+    stream = ("\n".join(text_ops) + "\n").encode("latin-1", errors="replace")
 
     objects = [
         b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
@@ -507,8 +516,9 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
     print(f"longest_losing_streak={longest_losing_streak}", flush=True)
     print(f"avg_trade_duration={metrics['avg_trade_duration']:.2f}", flush=True)
 
-    report_root = Path(os.getenv("PERFORMANCE_REPORT_DIR", "reports"))
-    _write_performance_pdf(report_root, metrics["total_trades"])
+    if metrics["total_trades"] > 0:
+        report_root = Path(os.getenv("PERFORMANCE_REPORT_DIR", "reports"))
+        _write_performance_pdf(report_root, metrics["total_trades"])
 
     by_instrument: dict[str, list[dict[str, Any]]] = {}
     for trade in trades:
