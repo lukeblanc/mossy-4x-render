@@ -29,3 +29,25 @@ def test_cycle_percentiles_and_summary_interval_with_controlled_time():
     assert tracker.should_emit_summary(t0) is True
     assert tracker.should_emit_summary(t0 + timedelta(minutes=10)) is False
     assert tracker.should_emit_summary(t0 + timedelta(minutes=16)) is True
+
+
+def test_health_status_uses_cached_open_trades_snapshot(monkeypatch):
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_open_trades(self):
+            self.calls += 1
+            return [{"instrument": "EUR_USD"}]
+
+    broker = DummyBroker()
+    monkeypatch.setattr(main_mod, "broker", broker)
+    monkeypatch.setattr(main_mod, "_LAST_OPEN_TRADES_TS", None)
+    monkeypatch.setattr(main_mod, "_LAST_OPEN_TRADES_SNAPSHOT", [])
+
+    first = main_mod._health_status()
+    second = main_mod._health_status()
+
+    assert first["open_trades_count"] == 1
+    assert second["open_trades_count"] == 1
+    assert broker.calls == 1

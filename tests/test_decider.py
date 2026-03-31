@@ -1071,6 +1071,91 @@ def test_fetch_candles_does_not_retry_on_client_error(capfd, sample_config):
     assert "[WARN] EUR_USD fetch failed 400 – skipping" in captured
 
 
+def test_instrument_open_on_broker_prefetched_snapshot_skips_broker_call(monkeypatch):
+    calls = {"list_open_trades": 0}
+
+    class DummyBroker:
+        def list_open_trades(self):
+            calls["list_open_trades"] += 1
+            return [{"instrument": "EUR_USD"}]
+
+    monkeypatch.setattr(main, "broker", DummyBroker())
+
+    assert main._instrument_open_on_broker(
+        "EUR_USD",
+        open_trades=[{"instrument": "EUR_USD"}],
+    )
+    assert calls["list_open_trades"] == 0
+
+
+def test_decision_cycle_fetches_open_trades_once_for_duplicate_checks(monkeypatch):
+    class DummyEngine:
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={"ema_trend_fast": 2.0, "ema_trend_slow": 1.0},
+                    reason="trend",
+                    market_active=True,
+                    candles=[{"o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0}],
+                )
+            ]
+
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+        demo_mode = False
+
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr, instrument=None):
+            return 0.01
+
+        def register_entry(self, *args, **kwargs):
+            pass
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.place_calls = 0
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def list_open_trades(self):
+            self.list_calls += 1
+            return [{"instrument": "EUR_USD", "id": "existing"}]
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.1
+
+        def close_all_positions(self) -> None:
+            pass
+
+        def place_order(self, *args, **kwargs):
+            self.place_calls += 1
+            return {"status": "SENT"}
+
+    dummy_broker = DummyBroker()
+    monkeypatch.setattr(main, "engine", DummyEngine())
+    monkeypatch.setattr(main, "risk", DummyRisk())
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
+    monkeypatch.setattr(main, "_safe_adaptive_snapshot", lambda context: None)
+    monkeypatch.setattr(main, "_macd_confirms", lambda *args, **kwargs: (True, 0.0, 0.0, 0.0))
+    monkeypatch.setattr(main, "_orb_filter", lambda *args, **kwargs: (True, None, {}))
+
+    asyncio.run(main.decision_cycle())
+
+    assert dummy_broker.list_calls == 1
+    assert dummy_broker.place_calls == 0
+
+
 def test_resolve_instruments_normalizes_input(sample_config):
     config = {
         **sample_config,
