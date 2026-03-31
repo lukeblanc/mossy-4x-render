@@ -1390,10 +1390,32 @@ async def decision_cycle() -> None:
                 )
                 continue
 
+            base_risk_pct = float(risk.risk_per_trade_pct)
             adaptive_snap = _safe_adaptive_snapshot("decision_cycle")
-            effective_risk_pct = risk.risk_per_trade_pct
+            adaptive_risk_pct = base_risk_pct
             if adaptive_snap is not None:
-                effective_risk_pct = max(0.001, min(0.025, risk.risk_per_trade_pct * adaptive_snap.risk_multiplier))
+                adaptive_risk_pct = max(
+                    0.001,
+                    min(0.025, base_risk_pct * adaptive_snap.risk_multiplier),
+                )
+
+            xau_scale_active = (
+                evaluation.instrument == "XAU_USD" and xau_guard_reason == "scale" and xau_risk_scale > 0.0
+            )
+            effective_risk_pct = adaptive_risk_pct
+            if xau_scale_active:
+                effective_risk_pct = max(
+                    0.001,
+                    min(0.025, adaptive_risk_pct * xau_risk_scale),
+                )
+
+            print(
+                f"[RISK] {evaluation.instrument} base_pct={base_risk_pct:.6f} "
+                f"adaptive_pct={adaptive_risk_pct:.6f} "
+                f"xau_final_pct={effective_risk_pct:.6f} "
+                f"xau_guard={xau_guard_reason} xau_scale={xau_risk_scale:.3f}",
+                flush=True,
+            )
 
             try:
                 size_result = position_sizer.units_for_risk(
