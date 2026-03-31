@@ -239,6 +239,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
     dummy_engine = DummyEngine()
     dummy_broker = DummyBroker()
     dummy_risk = DummyRisk()
+    monkeypatch.setitem(main.config["risk"], "tp_enabled", True)
     monkeypatch.setattr(main, "engine", dummy_engine)
     monkeypatch.setattr(main, "broker", dummy_broker)
     monkeypatch.setattr(main, "_open_trades_state", lambda: [])
@@ -260,13 +261,14 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
     try:
         assert dummy_engine.marked == ["EUR_USD"]
         expected_sl = dummy_risk.sl_distance_from_atr(0.01)
+        expected_tp = dummy_risk.tp_distance_from_atr(0.01)
         assert dummy_broker.calls == [
             {
                 "instrument": "EUR_USD",
                 "signal": "BUY",
                 "units": 100,
                 "sl_distance": expected_sl,
-                "tp_distance": 0.0,
+                "tp_distance": expected_tp,
                 "entry_price": 1.2345,
             }
         ]
@@ -275,6 +277,96 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
     finally:
         watchdog.last_decision_ts = original_ts
         monkeypatch.setattr(main, "datetime", datetime)
+
+
+def test_decision_cycle_keeps_tp_disabled_when_configured(monkeypatch):
+    class DummyRisk:
+        risk_per_trade_pct = 0.001
+
+        def enforce_equity_floor(self, *args, **kwargs) -> None:
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr, instrument=None):
+            return 0.01 if atr else 0.0
+
+        def tp_distance_from_atr(self, atr, instrument=None):
+            return 0.02 if atr else 0.0
+
+        def register_entry(self, *args, **kwargs) -> None:
+            pass
+
+        def register_exit(self, realized_pl: float) -> None:
+            pass
+
+    class DummyEngine:
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="EUR_USD",
+                    signal="BUY",
+                    diagnostics={
+                        "atr": 0.01,
+                        "atr_baseline_50": 0.01,
+                        "close": 1.2345,
+                        "ema_trend_fast": 1.25,
+                        "ema_trend_slow": 1.2,
+                    },
+                    reason="trend",
+                    market_active=True,
+                    candles=[
+                        {"o": 1.0, "h": 1.05, "l": 0.99, "c": 1.01},
+                        {"o": 1.01, "h": 1.07, "l": 1.0, "c": 1.04},
+                        {"o": 1.04, "h": 1.08, "l": 1.02, "c": 1.06},
+                    ],
+                )
+            ]
+
+        def mark_trade(self, instrument: str) -> None:
+            pass
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, object]] = []
+
+        def place_order(
+            self,
+            instrument: str,
+            signal: str,
+            units: int,
+            *,
+            sl_distance: float | None = None,
+            tp_distance: float | None = None,
+            entry_price: float | None = None,
+        ) -> Dict[str, str]:
+            self.calls.append({"tp_distance": tp_distance})
+            return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+    monkeypatch.setitem(main.config["risk"], "tp_enabled", False)
+    monkeypatch.setattr(main, "engine", DummyEngine())
+    broker = DummyBroker()
+    monkeypatch.setattr(main, "broker", broker)
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main, "risk", DummyRisk())
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
+    monkeypatch.setattr(
+        main.position_sizer,
+        "units_for_risk",
+        lambda equity, entry_price, stop_distance, risk_pct: 100,
+    )
+
+    asyncio.run(main.decision_cycle())
+
+    assert broker.calls
+    assert broker.calls[0]["tp_distance"] == 0.0
 
 
 def test_decision_cycle_updates_watchdog_on_error(monkeypatch):
