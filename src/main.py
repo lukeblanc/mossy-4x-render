@@ -513,7 +513,7 @@ async def heartbeat() -> None:
 
     ts_local = now_utc.astimezone().isoformat()
     equity = broker.account_equity()
-    open_count = len(_open_trades_state())
+    open_count = len(_open_trades_state(force_refresh=False))
 
     journal_path = journal.path
     journal_exists = journal_path.exists()
@@ -688,6 +688,12 @@ CYCLE_HEALTH = CycleHealthTracker(
     summary_interval_seconds=int(_coerce_float(os.getenv("CYCLE_HEALTH_LOG_INTERVAL_SECONDS", "900"), 900.0)),
 )
 _LAST_BROKER_SYNC_TS: datetime | None = None
+_LAST_OPEN_TRADES_SNAPSHOT: List[Dict] = []
+_LAST_OPEN_TRADES_TS: datetime | None = None
+_OPEN_TRADES_CACHE_TTL_SECONDS = max(
+    1.0,
+    _coerce_float(os.getenv("OPEN_TRADES_CACHE_TTL_SECONDS", "15"), 15.0),
+)
 _SCHEDULER_REF: AsyncIOScheduler | None = None
 
 
@@ -768,7 +774,7 @@ def _startup_checks() -> None:
         return
 
     try:
-        open_trades = _open_trades_state()
+        open_trades = _open_trades_state(force_refresh=True)
         open_count = len(open_trades or [])
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[STARTUP-RESET][WARN] Unable to inspect open trades: {exc}", flush=True)
@@ -805,15 +811,23 @@ def _startup_checks() -> None:
             print("[RISK] RESET_WEEKLY_LOSS_CAP requested but no weekly baseline changes were needed", flush=True)
 
 
-def _open_trades_state() -> List[Dict]:
-    global _LAST_BROKER_SYNC_TS
+def _open_trades_state(*, force_refresh: bool = True) -> List[Dict]:
+    global _LAST_BROKER_SYNC_TS, _LAST_OPEN_TRADES_TS, _LAST_OPEN_TRADES_SNAPSHOT
+    if not force_refresh and _LAST_OPEN_TRADES_TS is not None:
+        age = _age_seconds(_LAST_OPEN_TRADES_TS)
+        if age is not None and age <= _OPEN_TRADES_CACHE_TTL_SECONDS:
+            return list(_LAST_OPEN_TRADES_SNAPSHOT)
     try:
         trades = broker.list_open_trades()
         _LAST_BROKER_SYNC_TS = _utc_now()
-        return trades
+        _LAST_OPEN_TRADES_TS = _LAST_BROKER_SYNC_TS
+        _LAST_OPEN_TRADES_SNAPSHOT = list(trades or [])
+        return list(_LAST_OPEN_TRADES_SNAPSHOT)
     except AttributeError:
         # Older broker implementations may not yet expose list_open_trades.
         _LAST_BROKER_SYNC_TS = _utc_now()
+        _LAST_OPEN_TRADES_TS = _LAST_BROKER_SYNC_TS
+        _LAST_OPEN_TRADES_SNAPSHOT = []
         return []
     except Exception as exc:
         _LAST_BROKER_SYNC_TS = _utc_now()
@@ -876,7 +890,7 @@ def _age_seconds(ts: datetime | None, now_utc: datetime | None = None) -> float 
 
 def _health_status(now_utc: datetime | None = None) -> Dict:
     now = now_utc or _utc_now()
-    open_count = len(_open_trades_state())
+    open_count = len(_open_trades_state(force_refresh=False))
     return {
         "scheduler_alive": _scheduler_alive(),
         "last_cycle_age_sec": CYCLE_HEALTH.cycle_age_seconds(now),
@@ -885,14 +899,17 @@ def _health_status(now_utc: datetime | None = None) -> Dict:
     }
 
 
-def _instrument_open_on_broker(instrument: str) -> bool:
+def _instrument_open_on_broker(instrument: str, open_trades: List[Dict] | None = None) -> bool:
     """Cross-check broker state to prevent duplicate exposure."""
 
-    try:
-        trades = broker.list_open_trades()
-    except Exception as exc:
-        print(f"[TRADE][WARN] Unable to verify broker positions for {instrument}: {exc}", flush=True)
-        return False
+    if open_trades is None:
+        try:
+            trades = broker.list_open_trades()
+        except Exception as exc:
+            print(f"[TRADE][WARN] Unable to verify broker positions for {instrument}: {exc}", flush=True)
+            return False
+    else:
+        trades = open_trades
 
     for trade in trades or []:
         if trade.get("instrument") == instrument:
@@ -1270,7 +1287,7 @@ async def decision_cycle() -> None:
                 continue
 
             # Final broker-side duplicate guard before risk checks or order submission.
-            if _instrument_open_on_broker(evaluation.instrument):
+            if _instrument_open_on_broker(evaluation.instrument, open_trades=open_trades):
                 cycle_stats["skipped"] += 1
                 _record_block_reason(evaluation.instrument, "broker-duplicate")
                 print(
