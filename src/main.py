@@ -437,6 +437,7 @@ risk_config["sl_atr_mult"] = float(os.getenv("SL_ATR_MULT", os.getenv("ATR_STOP_
 risk_config["tp_atr_mult"] = float(os.getenv("TP_ATR_MULT", tp_default))
 risk_config.setdefault("instrument_atr_multipliers", risk_config.get("instrument_atr_multipliers", config.get("instrument_atr_multipliers", {})))
 risk_config.setdefault("tp_rr_multiple", risk_config["tp_atr_mult"])
+risk_config.setdefault("tp_enabled", _as_bool(os.getenv("TP_ENABLED", risk_config.get("tp_enabled", config.get("tp_enabled", True)))))
 risk_config.setdefault("cooldown_candles", int(os.getenv("COOLDOWN_CANDLES", risk_config.get("cooldown_candles", 9))))
 env_max_positions = os.getenv("MAX_CONCURRENT_POSITIONS") or os.getenv("MAX_OPEN_TRADES")
 max_positions_default = risk_config.get("max_concurrent_positions", config.get("max_open_trades", 3))
@@ -491,6 +492,12 @@ config["aggressive_max_hold_minutes"] = aggressive_max_hold_minutes
 config["aggressive_max_loss_ccy"] = aggressive_max_loss_ccy
 config["aggressive_max_loss_atr_mult"] = aggressive_max_loss_atr_mult
 config["risk"] = risk_config
+print(
+    f"[CONFIG] tp enabled={bool(risk_config.get('tp_enabled', True))} "
+    f"tp_atr_mult={float(risk_config.get('tp_atr_mult', 0.0)):.4f} "
+    f"tp_rr_multiple={float(risk_config.get('tp_rr_multiple', risk_config.get('tp_atr_mult', 0.0))):.4f}",
+    flush=True,
+)
 
 # Abort if live is requested (demo/practice only)
 oanda_env = (os.getenv("OANDA_ENV") or "practice").lower()
@@ -1322,7 +1329,12 @@ async def decision_cycle() -> None:
 
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val, instrument=evaluation.instrument)
-            tp_distance = 0.0  # Disable standard TP to avoid interfering with account-currency profit protection
+            tp_enabled = bool(config.get("risk", {}).get("tp_enabled", True))
+            tp_distance = (
+                risk.tp_distance_from_atr(atr_val, instrument=evaluation.instrument)
+                if tp_enabled
+                else 0.0
+            )
             entry_price = diagnostics.get("close")
 
             if not trend_ok:
