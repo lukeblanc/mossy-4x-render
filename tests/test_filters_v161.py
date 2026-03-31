@@ -266,3 +266,95 @@ def test_off_session_blocks_entries_but_trailing_runs(monkeypatch, capsys):
     finally:
         watchdog.last_decision_ts = original_ts
         _reset_clock(original_datetime)
+
+
+def test_xau_guard_scale_reduces_position_units(monkeypatch):
+    class DummyRisk:
+        risk_per_trade_pct = 0.01
+        demo_mode = False
+
+        def enforce_equity_floor(self, *args, **kwargs):
+            pass
+
+        def should_open(self, *args, **kwargs):
+            return True, "ok"
+
+        def sl_distance_from_atr(self, atr, instrument=None):
+            return 0.5
+
+        def register_entry(self, now_utc, instrument: str):
+            pass
+
+        def register_exit(self, *args, **kwargs):
+            pass
+
+    class DummyEngine:
+        def __init__(self) -> None:
+            self.atr = 1.0
+
+        def evaluate_all(self) -> List[Evaluation]:
+            return [
+                Evaluation(
+                    instrument="XAU_USD",
+                    signal="BUY",
+                    diagnostics={
+                        "atr": self.atr,
+                        "atr_baseline_50": 1.0,
+                        "rsi": 60.0,
+                        "close": 1900.0,
+                        "ema_trend_fast": 1910.0,
+                        "ema_trend_slow": 1900.0,
+                    },
+                    reason="trend",
+                    market_active=True,
+                )
+            ]
+
+        def mark_trade(self, instrument: str) -> None:
+            pass
+
+    class DummyBroker:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, object]] = []
+
+        def place_order(self, instrument: str, signal: str, units: int, *args, **kwargs):
+            self.calls.append({"instrument": instrument, "signal": signal, "units": units})
+            return {"status": "SENT"}
+
+        def account_equity(self) -> float:
+            return 10_000.0
+
+        def current_spread(self, instrument: str) -> float:
+            return 0.5
+
+        def close_all_positions(self) -> None:
+            pass
+
+    dummy_engine = DummyEngine()
+    dummy_broker = DummyBroker()
+    monkeypatch.setattr(main, "engine", dummy_engine)
+    monkeypatch.setattr(main, "broker", dummy_broker)
+    monkeypatch.setattr(main, "risk", DummyRisk())
+    monkeypatch.setattr(main, "profit_guard", type("PG", (), {"process_open_trades": lambda self, trades: []})())
+    monkeypatch.setattr(main, "_open_trades_state", lambda: [])
+    monkeypatch.setattr(main.session_filter, "session_decision", lambda *args, **kwargs: _allow_session_decision())
+    monkeypatch.setattr(main, "_orb_filter", lambda *args, **kwargs: (True, None, None))
+    monkeypatch.setattr(main, "_macd_confirms", lambda *args, **kwargs: (True, 0.0, 0.0, 0.0))
+    monkeypatch.setattr(main, "_safe_adaptive_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        main.position_sizer,
+        "units_for_risk",
+        lambda *args, **kwargs: int(args[3] * 1_000_000),
+    )
+    monkeypatch.setitem(main.config, "xau_atr_guard_ratio", 1.2)
+    monkeypatch.setitem(main.config, "xau_atr_guard_action", "scale")
+    monkeypatch.setitem(main.config, "xau_atr_guard_size_scale", 0.5)
+
+    asyncio.run(main.decision_cycle())
+    baseline_units = dummy_broker.calls[-1]["units"]
+
+    dummy_engine.atr = 1.8
+    asyncio.run(main.decision_cycle())
+    scaled_units = dummy_broker.calls[-1]["units"]
+
+    assert scaled_units < baseline_units
