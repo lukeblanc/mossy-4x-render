@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 from typing import Dict, Iterable, Mapping, Tuple
 
+from src import adaptive_policy
+
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
@@ -119,6 +121,14 @@ def project_market(
     if bias == "NEUTRAL":
         confidence -= 10.0
     confidence = _clamp(confidence, 0.0, 100.0)
+
+    side_hint = "BUY" if ema_fast > ema_slow else "SELL" if ema_fast < ema_slow else "UNKNOWN"
+    adaptive_policy.publish_market_context(
+        pair,
+        indicators,
+        now_utc,
+        side=side_hint,
+    )
 
     return {
         "pair": pair,
