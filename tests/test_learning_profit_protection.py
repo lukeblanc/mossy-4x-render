@@ -40,6 +40,7 @@ class BrokerWithCloseFill:
                 "longOrderFillTransaction": {
                     "pl": "0.55",
                     "price": "0.66010",
+                    "time": "2026-07-11T07:10:00Z",
                 }
             },
         }
@@ -55,9 +56,17 @@ class BrokerWithCloseFill:
         return 0.0001
 
 
-def test_broker_trade_id_reconciles_to_entry_and_saves_realised_pnl(tmp_path):
-    journal = TradeJournal(tmp_path / "trade_journal.db")
-    opened = datetime(2026, 7, 11, 7, 0, tzinfo=timezone.utc)
+class BrokerWithExternalClose(BrokerWithCloseFill):
+    def __init__(self) -> None:
+        super().__init__()
+        self.profits = [0.2]
+        self.closed_details = None
+
+    def trade_details(self, trade_id: str):
+        return self.closed_details
+
+
+def _record_entry(journal: TradeJournal, opened: datetime) -> None:
     journal.record_entry(
         trade_id="order-1",
         timestamp_utc=opened,
@@ -76,6 +85,28 @@ def test_broker_trade_id_reconciles_to_entry_and_saves_realised_pnl(tmp_path):
         equity_after=1500.0,
     )
 
+
+def _read_result(journal: TradeJournal):
+    with sqlite3.connect(journal.path) as conn:
+        row = conn.execute(
+            """
+            SELECT exit_timestamp_utc, exit_price, realized_pnl_ccy,
+                   exit_reason, broker_confirmed, side, entry_price
+            FROM trades
+            WHERE trade_id = 'order-1'
+            """
+        ).fetchone()
+        orphan = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE trade_id = 'broker-trade-99'"
+        ).fetchone()[0]
+    return row, orphan
+
+
+def test_broker_trade_id_reconciles_to_entry_and_saves_realised_pnl(tmp_path):
+    journal = TradeJournal(tmp_path / "trade_journal.db")
+    opened = datetime(2026, 7, 11, 7, 0, tzinfo=timezone.utc)
+    _record_entry(journal, opened)
+
     broker = BrokerWithCloseFill()
     guard = LearningProfitProtection(
         broker,
@@ -93,25 +124,53 @@ def test_broker_trade_id_reconciles_to_entry_and_saves_realised_pnl(tmp_path):
     closed = guard.process_open_trades([trade], now_utc=opened + timedelta(minutes=10))
 
     assert closed == ["broker-trade-99"]
-    with sqlite3.connect(journal.path) as conn:
-        row = conn.execute(
-            """
-            SELECT exit_timestamp_utc, exit_price, realized_pnl_ccy,
-                   exit_reason, broker_confirmed, side, entry_price
-            FROM trades
-            WHERE trade_id = 'order-1'
-            """
-        ).fetchone()
-        orphan = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE trade_id = 'broker-trade-99'"
-        ).fetchone()[0]
-
+    row, orphan = _read_result(journal)
     assert row is not None
-    assert row[0] is not None
+    assert row[0] == "2026-07-11T07:10:00+00:00"
     assert row[1] == pytest.approx(0.66010)
     assert row[2] == pytest.approx(0.55)
     assert row[3] == "TRAIL"
     assert row[4] == 1
     assert row[5] == "BUY"
     assert row[6] == pytest.approx(0.66)
+    assert orphan == 0
+
+
+def test_external_stop_or_take_profit_is_not_forgotten(tmp_path):
+    journal = TradeJournal(tmp_path / "trade_journal.db")
+    opened = datetime(2026, 7, 11, 7, 0, tzinfo=timezone.utc)
+    _record_entry(journal, opened)
+
+    broker = BrokerWithExternalClose()
+    guard = LearningProfitProtection(
+        broker,
+        arm_ccy=1.0,
+        giveback_ccy=0.5,
+        journal=journal,
+    )
+
+    trade = dict(broker.trades[0])
+    trade["openTime"] = opened.isoformat()
+    assert guard.process_open_trades([trade], now_utc=opened + timedelta(minutes=5)) == []
+
+    broker.trades = []
+    broker.closed_details = {
+        "id": "broker-trade-99",
+        "instrument": "AUD_USD",
+        "state": "CLOSED",
+        "currentUnits": "0",
+        "realizedPL": "-1.25",
+        "averageClosePrice": "0.65900",
+        "closeTime": "2026-07-11T07:08:00Z",
+    }
+    closed = guard.process_open_trades([], now_utc=opened + timedelta(minutes=10))
+
+    assert closed == ["broker-trade-99"]
+    row, orphan = _read_result(journal)
+    assert row is not None
+    assert row[0] == "2026-07-11T07:08:00+00:00"
+    assert row[1] == pytest.approx(0.65900)
+    assert row[2] == pytest.approx(-1.25)
+    assert row[3] == "BROKER_CLOSED"
+    assert row[4] == 1
     assert orphan == 0
