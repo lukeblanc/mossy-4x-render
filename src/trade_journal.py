@@ -538,23 +538,6 @@ def run_performance_analysis(db_path: Path | str | None = None) -> None:
         print(f"profit_factor={segment_metrics['profit_factor']:.4f}", flush=True)
         print("", flush=True)
 
-    analysis_ts = datetime.now(timezone.utc)
-    report_text = _format_performance_report(
-        analysis_ts=analysis_ts,
-        metrics=metrics,
-        max_drawdown=max_drawdown,
-        longest_losing_streak=longest_losing_streak,
-        instrument_metrics=instrument_metrics,
-    )
-
-    report_dir = Path(os.getenv("PERFORMANCE_REPORT_DIR", "/var/data/performance_reports/"))
-    report_path = _save_performance_pdf(
-        report_text=report_text,
-        analysis_ts=analysis_ts,
-        total_trades=int(metrics["total_trades"]),
-        report_dir=report_dir,
-    )
-    print(f"[PERFORMANCE_PDF_SAVED] path={report_path.resolve()}", flush=True)
 
 
 __all__ = ["TradeJournal", "default_journal_path", "run_performance_analysis"]

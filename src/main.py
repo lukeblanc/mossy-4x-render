@@ -1347,11 +1347,23 @@ async def decision_cycle() -> None:
             atr_val = diagnostics.get("atr")
             sl_distance = risk.sl_distance_from_atr(atr_val, instrument=evaluation.instrument)
             tp_enabled = bool(config.get("risk", {}).get("tp_enabled", True))
-            tp_distance = (
-                risk.tp_distance_from_atr(atr_val, instrument=evaluation.instrument)
-                if tp_enabled
-                else 0.0
-            )
+            if tp_enabled:
+                tp_distance_fn = getattr(risk, "tp_distance_from_atr", None)
+                if callable(tp_distance_fn):
+                    tp_distance = tp_distance_fn(atr_val, instrument=evaluation.instrument)
+                else:
+                    # Compatibility/safety fallback for older risk-manager builds and
+                    # lightweight test doubles. This preserves take-profit protection
+                    # instead of crashing the entire decision cycle.
+                    tp_mult = float(
+                        config.get("risk", {}).get(
+                            "tp_atr_mult",
+                            config.get("risk", {}).get("tp_rr_multiple", 1.0),
+                        )
+                    )
+                    tp_distance = max(0.0, float(atr_val or 0.0) * tp_mult)
+            else:
+                tp_distance = 0.0
             entry_price = diagnostics.get("close")
 
             if not trend_ok:
