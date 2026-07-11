@@ -34,7 +34,6 @@ jobs:
         id: pytest
         continue-on-error: true
         env:
-          MOSSY_SAFE_DEMO_PROFILE: "false"
           MODE: simulation
           OANDA_ENV: practice
         run: |
@@ -49,6 +48,20 @@ jobs:
           path: pytest-output.txt
           if-no-files-found: error
           retention-days: 3
+
+      - name: Upload source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: |
+            src
+            app
+            tests
+            render.yaml
+            requirements.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Enforce pytest result
         if: always()
