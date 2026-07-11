@@ -31,8 +31,27 @@ jobs:
         run: python -m compileall -q app src tests
 
       - name: Run tests
+        id: pytest
+        continue-on-error: true
         env:
           MOSSY_SAFE_DEMO_PROFILE: "false"
           MODE: simulation
           OANDA_ENV: practice
-        run: pytest -q --disable-warnings --maxfail=10
+        run: |
+          pytest -q --disable-warnings --maxfail=10 > pytest-output.txt 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload pytest output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: pytest-output.txt
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Enforce pytest result
+        if: always()
+        run: |
+          cat pytest-output.txt
+          test "${{ steps.pytest.outputs.exit_code }}" = "0"
