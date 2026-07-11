@@ -25,7 +25,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+        run: python -m pip install -q --upgrade pip && pip install -q -r requirements.txt
 
       - name: Compile source
         run: python -m compileall -q app src tests
@@ -35,4 +35,4 @@ jobs:
           MOSSY_SAFE_DEMO_PROFILE: "false"
           MODE: simulation
           OANDA_ENV: practice
-        run: pytest -q
+        run: pytest -q --disable-warnings --maxfail=10
