@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +24,12 @@ class AdaptiveSnapshot:
 
 
 class AdaptiveTuner:
-    """Read-only adaptive sizing helper based on recent closed-trade outcomes."""
+    """Conservative adaptive sizing based on verified closed-trade outcomes.
+
+    The tuner never increases risk above the configured base risk. It evaluates
+    loss streak, expectancy, profit factor and drawdown over a bounded recent
+    window. Setup-specific learning is handled separately by adaptive_policy.
+    """
 
     def __init__(
         self,
@@ -40,10 +46,15 @@ class AdaptiveTuner:
         self.run_tag = (run_tag or "").strip() or None
         self.window_start_utc = (window_start_utc or "").strip() or None
 
+    @staticmethod
+    def _trade_columns(conn: sqlite3.Connection) -> set[str]:
+        rows = conn.execute("PRAGMA table_info(trades)").fetchall()
+        return {str(row[1]) for row in rows if len(row) > 1}
+
     def _load_recent_pnl_from_trades(self, conn: sqlite3.Connection) -> list[float]:
         columns = self._trade_columns(conn)
         params: list[object] = []
-        predicates = ["exit_timestamp_utc IS NOT NULL"]
+        predicates = ["exit_timestamp_utc IS NOT NULL", "realized_pnl_ccy IS NOT NULL"]
         if self.run_tag and "run_tag" in columns:
             predicates.append("run_tag = ?")
             params.append(self.run_tag)
@@ -80,19 +91,22 @@ class AdaptiveTuner:
         if not self.db_path.exists():
             return [], "none"
 
-        conn = sqlite3.connect(self.db_path)
         try:
-            pnl_trades = self._load_recent_pnl_from_trades(conn)
-            if len(pnl_trades) >= self.min_sample:
+            conn = sqlite3.connect(self.db_path, timeout=2.0)
+            try:
+                pnl_trades = self._load_recent_pnl_from_trades(conn)
+                if len(pnl_trades) >= self.min_sample:
+                    return pnl_trades, "trades"
+
+                pnl_events = self._load_recent_pnl_from_events(conn)
+                if pnl_events:
+                    return pnl_events, "trade_events"
+
                 return pnl_trades, "trades"
-
-            pnl_events = self._load_recent_pnl_from_events(conn)
-            if pnl_events:
-                return pnl_events, "trade_events"
-
-            return pnl_trades, "trades"
-        finally:
-            conn.close()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return [], "none"
 
     def _count_trades(self, conn: sqlite3.Connection) -> tuple[int, int]:
         columns = self._trade_columns(conn)
@@ -117,11 +131,6 @@ class AdaptiveTuner:
         return lifetime, session
 
     @staticmethod
-    def _trade_columns(conn: sqlite3.Connection) -> set[str]:
-        rows = conn.execute("PRAGMA table_info(trades)").fetchall()
-        return {str(row[1]) for row in rows if len(row) > 1}
-
-    @staticmethod
     def _loss_streak(recent_desc: list[float]) -> int:
         streak = 0
         for pnl in recent_desc:
@@ -131,6 +140,41 @@ class AdaptiveTuner:
                 break
         return streak
 
+    @staticmethod
+    def _statistics(recent_desc: list[float]) -> dict[str, float]:
+        if not recent_desc:
+            return {
+                "win_rate": 0.0,
+                "expectancy": 0.0,
+                "profit_factor": 0.0,
+                "drawdown": 0.0,
+            }
+        wins = [pnl for pnl in recent_desc if pnl > 0]
+        losses = [pnl for pnl in recent_desc if pnl < 0]
+        win_rate = len(wins) / len(recent_desc)
+
+        weights = [math.exp(-idx / max(8.0, len(recent_desc) / 2.0)) for idx in range(len(recent_desc))]
+        weighted_total = sum(pnl * weight for pnl, weight in zip(recent_desc, weights))
+        expectancy = weighted_total / sum(weights)
+
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0)
+
+        equity = 0.0
+        peak = 0.0
+        drawdown = 0.0
+        for pnl in reversed(recent_desc):
+            equity += pnl
+            peak = max(peak, equity)
+            drawdown = max(drawdown, peak - equity)
+
+        return {
+            "win_rate": win_rate,
+            "expectancy": expectancy,
+            "profit_factor": profit_factor,
+            "drawdown": drawdown,
+        }
 
     @staticmethod
     def _build_snapshot(
@@ -146,11 +190,6 @@ class AdaptiveTuner:
         filter_window_start_utc: str,
         filter_window_end_utc: str,
     ) -> AdaptiveSnapshot:
-        """Build snapshot compatibly across mixed deployments.
-
-        Some environments may still have an older AdaptiveSnapshot signature
-        without the ``source`` field when stale bytecode is loaded.
-        """
         payload = {
             "lifetime_closed_trades": lifetime_closed_trades,
             "session_closed_trades": session_closed_trades,
@@ -176,31 +215,38 @@ class AdaptiveTuner:
         wins = sum(1 for pnl in recent if pnl > 0)
         losses = sum(1 for pnl in recent if pnl < 0)
         loss_streak = self._loss_streak(recent)
+        stats = self._statistics(recent)
         filter_window_end_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
         lifetime_closed = 0
         if self.db_path.exists():
-            conn = sqlite3.connect(self.db_path)
             try:
-                lifetime_closed, _ = self._count_trades(conn)
-            finally:
-                conn.close()
+                conn = sqlite3.connect(self.db_path, timeout=2.0)
+                try:
+                    lifetime_closed, _ = self._count_trades(conn)
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                lifetime_closed = 0
 
-        # Fast-start conservative mode until sufficient sample is available.
         if session_closed < self.min_sample:
             multiplier = 0.85
+        elif loss_streak >= 4:
+            multiplier = 0.5
+        elif loss_streak >= 3:
+            multiplier = 0.6
+        elif loss_streak >= 2:
+            multiplier = 0.75
+        elif stats["expectancy"] < 0 and stats["profit_factor"] < 0.8:
+            multiplier = 0.65
+        elif stats["expectancy"] < 0 or stats["profit_factor"] < 1.0:
+            multiplier = 0.8
+        elif stats["win_rate"] < 0.4:
+            multiplier = 0.8
+        elif stats["win_rate"] > 0.6 and stats["profit_factor"] >= 1.25:
+            multiplier = 1.0
         else:
-            win_rate = wins / session_closed if session_closed else 0.0
-            if loss_streak >= 3:
-                multiplier = 0.6
-            elif loss_streak >= 2:
-                multiplier = 0.75
-            elif win_rate < 0.4:
-                multiplier = 0.8
-            elif win_rate > 0.6:
-                multiplier = 1.0
-            else:
-                multiplier = 0.9
+            multiplier = 0.9
 
         return self._build_snapshot(
             lifetime_closed_trades=lifetime_closed,

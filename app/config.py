@@ -17,12 +17,10 @@ def _as_bool(value: object) -> bool:
 
 
 def _apply_render_safe_demo_profile() -> None:
-    """Force the approved demo profile before any runtime module reads env vars.
+    """Force the approved demo and self-learning profile before imports.
 
-    Render service-level environment variables can outlive changes to render.yaml.
-    This profile prevents stale aggressive/test settings from overriding the
-    approved OANDA practice configuration. It is enabled automatically on Render
-    and may be explicitly controlled with MOSSY_SAFE_DEMO_PROFILE.
+    The learner may only reduce or temporarily block the already-capped risk.
+    It cannot enable live trading, raise base risk, or rewrite deployed code.
     """
 
     running_on_render = bool(
@@ -54,13 +52,23 @@ def _apply_render_safe_demo_profile() -> None:
         "COOLDOWN_CANDLES": "9",
         "TP_ENABLED": "true",
         "ADAPTIVE_TUNING_ENABLED": "true",
+        "ADAPTIVE_WINDOW_START_UTC": "",
+        "ADAPTIVE_RUN_TAG": "",
+        "ADAPTIVE_LOOKBACK": "80",
+        "ADAPTIVE_MIN_SAMPLE": "8",
+        "ADAPTIVE_POLICY_ENABLED": "true",
+        "ADAPTIVE_POLICY_LOOKBACK": "200",
+        "ADAPTIVE_POLICY_MIN_EXACT": "6",
+        "ADAPTIVE_POLICY_MIN_PAIR_SIDE": "12",
+        "ADAPTIVE_POLICY_BLOCK_MINUTES": "240",
+        "ADAPTIVE_POLICY_FLOOR_SCALE": "0.25",
+        "ADAPTIVE_POLICY_CACHE_SECONDS": "30",
+        "ENABLE_PROJECTOR": "true",
         "VERBOSE_MARKET_LOGS": "false",
         "OPEN_TRADES_CACHE_TTL_SECONDS": "15",
     }
     os.environ.update(safe_values)
 
-    # Clear the pre-hardening max-drawdown latch once, while preserving all
-    # future drawdown halts. The marker is stored beside the persistent journal.
     state_root_value = os.getenv("MOSSY_STATE_PATH")
     if state_root_value:
         state_root = Path(state_root_value)
@@ -80,15 +88,14 @@ def _apply_render_safe_demo_profile() -> None:
         else:
             os.environ["RESET_MAX_DRAWDOWN_HALT"] = "false"
     except OSError as exc:
-        # If the marker cannot be written, do not repeatedly clear a genuine
-        # future halt. Operators can still request a reset explicitly in Render.
         os.environ["RESET_MAX_DRAWDOWN_HALT"] = "false"
         print(f"[SAFE-DEMO][WARN] unable to write migration marker: {exc}", flush=True)
 
     print(
         "[SAFE-DEMO] enforced mode=demo oanda_env=practice "
         "instruments=AUD_USD,GBP_USD session=SOFT aggressive=false "
-        "risk_cap_pct=0.5 one_time_drawdown_reset="
+        "risk_cap_pct=0.5 adaptive_policy=true lifetime_memory=true "
+        "one_time_drawdown_reset="
         f"{str(reset_requested).lower()}",
         flush=True,
     )
@@ -100,9 +107,6 @@ _apply_render_safe_demo_profile()
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables."""
 
-    # ------------------------------------------------------------------
-    # OANDA connectivity
-    # ------------------------------------------------------------------
     OANDA_API_KEY: str = Field(
         "",
         description="OANDA API key used for authenticated requests.",
@@ -125,10 +129,6 @@ class Settings(BaseSettings):
         "demo",
         description="Run mode for the bot: demo, live, or simulation.",
     )
-
-    # ------------------------------------------------------------------
-    # Logging & scheduling
-    # ------------------------------------------------------------------
     TZ: str = Field(
         "UTC",
         description="Timezone label shown in heartbeat logs.",
@@ -149,10 +149,6 @@ class Settings(BaseSettings):
         3,
         description="Errors within the rolling window that trigger alerts.",
     )
-
-    # ------------------------------------------------------------------
-    # Strategy inputs
-    # ------------------------------------------------------------------
     INSTRUMENT: str = Field(
         "EUR_USD",
         description="Primary instrument traded by the worker.",
@@ -217,10 +213,6 @@ class Settings(BaseSettings):
         10,
         description="Decision count between summary metric log lines.",
     )
-
-    # ------------------------------------------------------------------
-    # Alerting
-    # ------------------------------------------------------------------
     ALERT_EMAIL: str = Field(
         "",
         description="Email address to receive watchdog alerts.",
@@ -243,8 +235,6 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    # Trading parameters
     MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))
 
 
