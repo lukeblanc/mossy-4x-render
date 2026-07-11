@@ -18,21 +18,21 @@ services:
       - key: DECISION_SECONDS
         value: "60"
       - key: SESSION_MODE
-        value: "ALWAYS"
+        value: "SOFT"
       - key: AGGRESSIVE_MODE
-        value: "true"
+        value: "false"
       - key: AGGRESSIVE_RISK_PCT
-        value: "0.004"
+        value: "0.0025"
       - key: AGGRESSIVE_MAX_POSITIONS
         value: "3"
       - key: AGGRESSIVE_COOLDOWN_CANDLES
-        value: "2"
+        value: "9"
       - key: AGGRESSIVE_DAILY_LOSS_CAP_PCT
-        value: "0.02"
+        value: "0.01"
       - key: AGGRESSIVE_WEEKLY_LOSS_CAP_PCT
-        value: "0.05"
+        value: "0.03"
       - key: AGGRESSIVE_MAX_DRAWDOWN_CAP_PCT
-        value: "0.15"
+        value: "0.05"
       - key: OANDA_API_KEY
         sync: false
       - key: INSTRUMENTS
@@ -42,13 +42,24 @@ services:
       - key: ENABLE_RISK_CAP
         value: "true"
       - key: MAX_RISK_PER_TRADE_CAP_PCT
-        value: "1.0"
+        value: "0.5"
       - key: ALLOW_HIGH_RISK
         value: "false"
       - key: RESET_WEEKLY_LOSS_CAP
         value: "false"
+      - key: RESET_MAX_DRAWDOWN_HALT
+        value: "false"
+      - key: TP_ENABLED
+        value: "true"
+      - key: ADAPTIVE_TUNING_ENABLED
+        value: "true"
+      - key: VERBOSE_MARKET_LOGS
+        value: "false"
+      - key: OPEN_TRADES_CACHE_TTL_SECONDS
+        value: "15"
       - key: OANDA_ACCOUNT_ID
         sync: false
+
 # ---------- MCP SERVICES ----------
   - type: web
     name: mcp-web
@@ -64,7 +75,6 @@ services:
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
 
-  
   - type: cron
     name: mcp-optimiser
     env: docker
@@ -80,6 +90,3 @@ services:
         sync: false
       - key: RENDER_DEPLOY_HOOK_URL
         sync: false
-
-        
-  
