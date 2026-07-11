@@ -53,6 +53,30 @@ services:
         value: "true"
       - key: ADAPTIVE_TUNING_ENABLED
         value: "true"
+      - key: ADAPTIVE_WINDOW_START_UTC
+        value: ""
+      - key: ADAPTIVE_RUN_TAG
+        value: ""
+      - key: ADAPTIVE_LOOKBACK
+        value: "80"
+      - key: ADAPTIVE_MIN_SAMPLE
+        value: "8"
+      - key: ADAPTIVE_POLICY_ENABLED
+        value: "true"
+      - key: ADAPTIVE_POLICY_LOOKBACK
+        value: "200"
+      - key: ADAPTIVE_POLICY_MIN_EXACT
+        value: "6"
+      - key: ADAPTIVE_POLICY_MIN_PAIR_SIDE
+        value: "12"
+      - key: ADAPTIVE_POLICY_BLOCK_MINUTES
+        value: "240"
+      - key: ADAPTIVE_POLICY_FLOOR_SCALE
+        value: "0.25"
+      - key: ADAPTIVE_POLICY_CACHE_SECONDS
+        value: "30"
+      - key: ENABLE_PROJECTOR
+        value: "true"
       - key: VERBOSE_MARKET_LOGS
         value: "false"
       - key: OPEN_TRADES_CACHE_TTL_SECONDS
@@ -60,29 +84,15 @@ services:
       - key: OANDA_ACCOUNT_ID
         sync: false
 
-# ---------- MCP SERVICES ----------
+  # MCP remains available for manual inspection. The old nightly optimiser was
+  # removed because it used a separate empty database and could not safely apply
+  # validated strategy changes. Runtime learning now reads the real journal.
   - type: web
     name: mcp-web
     env: docker
     plan: free
     dockerfilePath: mcp/Dockerfile
     autoDeploy: true
-    envVars:
-      - key: MCP_API_KEY
-        sync: false
-      - key: GH_PAT
-        sync: false
-      - key: RENDER_DEPLOY_HOOK_URL
-        sync: false
-
-  - type: cron
-    name: mcp-optimiser
-    env: docker
-    plan: starter
-    dockerfilePath: mcp/Dockerfile
-    command: >
-      python optimiser.py && python patcher.py
-    schedule: "0 1 * * *"
     envVars:
       - key: MCP_API_KEY
         sync: false
