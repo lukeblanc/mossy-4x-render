@@ -34,8 +34,7 @@ class AdaptiveTuner:
     The tuner never increases risk above the configured base risk. It evaluates
     loss streak, expectancy, profit factor and drawdown over a bounded recent
     window. Setup-specific learning is handled separately by adaptive_policy.
-    Phase-two shadow learning evaluates candidate entry filters without changing
-    live demo decisions or risk settings.
+    Phase-two shadow learning evaluates candidates without changing orders.
     """
 
     def __init__(
@@ -53,7 +52,9 @@ class AdaptiveTuner:
         self.run_tag = (run_tag or "").strip() or None
         self.window_start_utc = (window_start_utc or "").strip() or None
         self._shadow_lock = threading.Lock()
-        self._last_shadow_run_monotonic = 0.0
+        # None means the analysis has never run. Using 0.0 can suppress the
+        # first run on a newly created container whose monotonic clock is young.
+        self._last_shadow_run_monotonic: Optional[float] = None
         self.shadow_report: Optional[ShadowReport] = None
 
     @staticmethod
@@ -69,15 +70,24 @@ class AdaptiveTuner:
             interval_seconds = max(300.0, float(os.getenv("SHADOW_INTERVAL_SECONDS", "3600")))
         except ValueError:
             interval_seconds = 3600.0
+
         now_monotonic = time.monotonic()
-        if now_monotonic - self._last_shadow_run_monotonic < interval_seconds:
+        if (
+            self._last_shadow_run_monotonic is not None
+            and now_monotonic - self._last_shadow_run_monotonic < interval_seconds
+        ):
             return
         if not self._shadow_lock.acquire(blocking=False):
             return
         try:
             now_monotonic = time.monotonic()
-            if now_monotonic - self._last_shadow_run_monotonic < interval_seconds:
+            if (
+                self._last_shadow_run_monotonic is not None
+                and now_monotonic - self._last_shadow_run_monotonic < interval_seconds
+            ):
                 return
+            # Set before running so a failed analysis cannot hammer the journal
+            # on every heartbeat. The next normal interval will retry.
             self._last_shadow_run_monotonic = now_monotonic
             self.shadow_report = run_shadow_analysis(self.db_path)
         except Exception as exc:
@@ -87,8 +97,11 @@ class AdaptiveTuner:
 
     @staticmethod
     def _trade_columns(conn: sqlite3.Connection) -> set[str]:
-        rows = conn.execute("PRAGMA table_info(trades)").fetchall()
-        return {str(row[1]) for row in rows if len(row) > 1}
+        return {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(trades)").fetchall()
+            if len(row) > 1
+        }
 
     def _load_recent_pnl_from_trades(self, conn: sqlite3.Connection) -> list[float]:
         columns = self._trade_columns(conn)
@@ -129,7 +142,6 @@ class AdaptiveTuner:
     def _load_recent_pnl(self) -> tuple[list[float], str]:
         if not self.db_path.exists():
             return [], "none"
-
         try:
             conn = sqlite3.connect(self.db_path, timeout=2.0)
             try:
@@ -137,10 +149,15 @@ class AdaptiveTuner:
                 if len(pnl_trades) >= self.min_sample:
                     return pnl_trades, "trades"
 
+                # A configured run tag or cohort start is a safety boundary.
+                # Never bypass it by falling back to the legacy unfiltered event
+                # table merely because the clean sample is still small.
+                if self.run_tag or self.window_start_utc:
+                    return pnl_trades, "trades"
+
                 pnl_events = self._load_recent_pnl_from_events(conn)
                 if pnl_events:
                     return pnl_events, "trade_events"
-
                 return pnl_trades, "trades"
             finally:
                 conn.close()
@@ -166,8 +183,7 @@ class AdaptiveTuner:
             f"SELECT COUNT(*) FROM trades WHERE {' AND '.join(predicates)}",
             params,
         ).fetchone()
-        session = int(session_row[0] if session_row else 0)
-        return lifetime, session
+        return lifetime, int(session_row[0] if session_row else 0)
 
     @staticmethod
     def _loss_streak(recent_desc: list[float]) -> int:
@@ -190,16 +206,12 @@ class AdaptiveTuner:
             }
         wins = [pnl for pnl in recent_desc if pnl > 0]
         losses = [pnl for pnl in recent_desc if pnl < 0]
-        win_rate = len(wins) / len(recent_desc)
-
-        weights = [math.exp(-idx / max(8.0, len(recent_desc) / 2.0)) for idx in range(len(recent_desc))]
-        weighted_total = sum(pnl * weight for pnl, weight in zip(recent_desc, weights))
-        expectancy = weighted_total / sum(weights)
-
+        weights = [
+            math.exp(-index / max(8.0, len(recent_desc) / 2.0))
+            for index in range(len(recent_desc))
+        ]
         gross_profit = sum(wins)
         gross_loss = abs(sum(losses))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0)
-
         equity = 0.0
         peak = 0.0
         drawdown = 0.0
@@ -207,46 +219,23 @@ class AdaptiveTuner:
             equity += pnl
             peak = max(peak, equity)
             drawdown = max(drawdown, peak - equity)
-
         return {
-            "win_rate": win_rate,
-            "expectancy": expectancy,
-            "profit_factor": profit_factor,
+            "win_rate": len(wins) / len(recent_desc),
+            "expectancy": sum(pnl * weight for pnl, weight in zip(recent_desc, weights))
+            / sum(weights),
+            "profit_factor": gross_profit / gross_loss
+            if gross_loss > 0
+            else (99.0 if gross_profit > 0 else 0.0),
             "drawdown": drawdown,
         }
 
     @staticmethod
-    def _build_snapshot(
-        *,
-        lifetime_closed_trades: int,
-        session_closed_trades: int,
-        wins: int,
-        losses: int,
-        loss_streak: int,
-        risk_multiplier: float,
-        source: str,
-        filter_run_tag: str,
-        filter_window_start_utc: str,
-        filter_window_end_utc: str,
-    ) -> AdaptiveSnapshot:
-        payload = {
-            "lifetime_closed_trades": lifetime_closed_trades,
-            "session_closed_trades": session_closed_trades,
-            "wins": wins,
-            "losses": losses,
-            "loss_streak": loss_streak,
-            "risk_multiplier": risk_multiplier,
-            "source": source,
-            "filter_run_tag": filter_run_tag,
-            "filter_window_start_utc": filter_window_start_utc,
-            "filter_window_end_utc": filter_window_end_utc,
-        }
+    def _build_snapshot(**payload) -> AdaptiveSnapshot:
         try:
             return AdaptiveSnapshot(**payload)
         except TypeError:
             params = inspect.signature(AdaptiveSnapshot).parameters
-            compatible_payload = {key: value for key, value in payload.items() if key in params}
-            return AdaptiveSnapshot(**compatible_payload)
+            return AdaptiveSnapshot(**{key: value for key, value in payload.items() if key in params})
 
     def snapshot(self) -> AdaptiveSnapshot:
         self._maybe_run_shadow_learning()
