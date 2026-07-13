@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -74,8 +74,13 @@ class ClosedTradeBroker:
         return 0.0001
 
 
-def _record_entry(journal: TradeJournal, trade_id: str) -> datetime:
-    opened = datetime(2026, 7, 13, 1, 0, tzinfo=timezone.utc)
+def _record_entry(
+    journal: TradeJournal,
+    trade_id: str,
+    *,
+    opened: datetime | None = None,
+) -> datetime:
+    opened = opened or datetime(2026, 7, 13, 1, 0, tzinfo=timezone.utc)
     journal.record_entry(
         trade_id=trade_id,
         timestamp_utc=opened,
@@ -150,9 +155,14 @@ def test_untracked_fast_close_is_recovered_from_journal(tmp_path):
     assert row[4] == 1
 
 
-def test_legacy_order_id_maps_to_broker_trade_before_recovery(tmp_path):
+def test_legacy_order_id_closes_exact_row_not_newer_same_instrument(tmp_path):
     journal = TradeJournal(tmp_path / "trade_journal.db")
-    _record_entry(journal, "order-1")
+    opened = _record_entry(journal, "order-1")
+    _record_entry(
+        journal,
+        "later-open",
+        opened=opened + timedelta(minutes=30),
+    )
     broker = ClosedTradeBroker(
         {
             "trade-99": {
@@ -182,11 +192,48 @@ def test_legacy_order_id_maps_to_broker_trade_before_recovery(tmp_path):
     assert row[1] == pytest.approx(0.661)
     assert row[2] == pytest.approx(0.85)
     assert row[3] == "BROKER_CLOSED"
+    later = _read_exit(journal, "later-open")
+    assert later is not None
+    assert later[0] is None
     with sqlite3.connect(journal.path) as conn:
         orphan = conn.execute(
             "SELECT COUNT(*) FROM trades WHERE trade_id = 'trade-99'"
         ).fetchone()[0]
     assert orphan == 0
+
+
+def test_impossible_misbound_exit_is_reopened_for_exact_reconciliation(tmp_path):
+    journal = TradeJournal(tmp_path / "trade_journal.db")
+    opened = datetime(2026, 7, 13, 2, 0, tzinfo=timezone.utc)
+    _record_entry(journal, "wrong-target", opened=opened)
+    journal.record_exit(
+        trade_id="wrong-target",
+        exit_timestamp_utc=opened - timedelta(minutes=30),
+        exit_price=0.659,
+        spread_at_exit=0.8,
+        max_profit_ccy=None,
+        realized_pnl_ccy=-1.0,
+        exit_reason="BROKER_CLOSED",
+        duration_seconds=60,
+        broker_confirmed=True,
+        instrument="AUD_USD",
+        direction="BUY",
+        entry_price=0.66,
+        equity_after=1499.0,
+    )
+    broker = ClosedTradeBroker({})
+    guard = JournalReconcilerProfitProtection(
+        broker,
+        arm_ccy=1.0,
+        giveback_ccy=0.5,
+        journal=journal,
+    )
+
+    guard.process_open_trades([])
+
+    row = _read_exit(journal, "wrong-target")
+    assert row is not None
+    assert row == (None, None, None, None, None)
 
 
 def test_state_dir_prefers_mounted_render_disk(tmp_path, monkeypatch):
