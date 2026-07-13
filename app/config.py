@@ -20,7 +20,7 @@ def _apply_render_safe_demo_profile() -> None:
     """Force the approved demo and self-learning profile before imports.
 
     The learner may only reduce or temporarily block the already-capped risk.
-    It cannot enable live trading, raise base risk, or rewrite deployed code.
+    Shadow learning may recommend strategy filters, but it cannot apply them.
     """
 
     running_on_render = bool(
@@ -52,8 +52,8 @@ def _apply_render_safe_demo_profile() -> None:
         "COOLDOWN_CANDLES": "9",
         "TP_ENABLED": "true",
         "ADAPTIVE_TUNING_ENABLED": "true",
-        "ADAPTIVE_WINDOW_START_UTC": "",
-        "ADAPTIVE_RUN_TAG": "",
+        "ADAPTIVE_WINDOW_START_UTC": "2026-07-13T12:47:00+00:00",
+        "ADAPTIVE_RUN_TAG": "MINI_RUN",
         "ADAPTIVE_LOOKBACK": "80",
         "ADAPTIVE_MIN_SAMPLE": "8",
         "ADAPTIVE_POLICY_ENABLED": "true",
@@ -63,6 +63,13 @@ def _apply_render_safe_demo_profile() -> None:
         "ADAPTIVE_POLICY_BLOCK_MINUTES": "240",
         "ADAPTIVE_POLICY_FLOOR_SCALE": "0.25",
         "ADAPTIVE_POLICY_CACHE_SECONDS": "30",
+        "SHADOW_LEARNING_ENABLED": "true",
+        "SHADOW_COHORT_START_UTC": "2026-07-13T12:47:00+00:00",
+        "SHADOW_INTERVAL_SECONDS": "3600",
+        "SHADOW_TRAIN_RATIO": "0.70",
+        "SHADOW_MIN_TRAIN": "20",
+        "SHADOW_MIN_VALIDATION": "10",
+        "SHADOW_MIN_COVERAGE": "0.35",
         "ENABLE_PROJECTOR": "true",
         "VERBOSE_MARKET_LOGS": "false",
         "OPEN_TRADES_CACHE_TTL_SECONDS": "15",
@@ -95,7 +102,7 @@ def _apply_render_safe_demo_profile() -> None:
         "[SAFE-DEMO] enforced mode=demo oanda_env=practice "
         "instruments=AUD_USD,GBP_USD session=SOFT aggressive=false "
         "risk_cap_pct=0.5 adaptive_policy=true lifetime_memory=true "
-        "one_time_drawdown_reset="
+        "shadow_learning=true shadow_auto_apply=false one_time_drawdown_reset="
         f"{str(reset_requested).lower()}",
         flush=True,
     )
@@ -215,7 +222,7 @@ class Settings(BaseSettings):
     )
     ALERT_EMAIL: str = Field(
         "",
-        description="Email address to receive watchdog alerts.",
+        description="Email address to receive watchdog alert emails.",
     )
     SMTP_HOST: str = Field(
         "",
