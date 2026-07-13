@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import inspect
 import math
+import os
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from src.shadow_learner import ShadowReport, run_shadow_analysis
 
 
 @dataclass
@@ -29,6 +34,8 @@ class AdaptiveTuner:
     The tuner never increases risk above the configured base risk. It evaluates
     loss streak, expectancy, profit factor and drawdown over a bounded recent
     window. Setup-specific learning is handled separately by adaptive_policy.
+    Phase-two shadow learning evaluates candidate entry filters without changing
+    live demo decisions or risk settings.
     """
 
     def __init__(
@@ -45,6 +52,38 @@ class AdaptiveTuner:
         self.min_sample = max(3, int(min_sample))
         self.run_tag = (run_tag or "").strip() or None
         self.window_start_utc = (window_start_utc or "").strip() or None
+        self._shadow_lock = threading.Lock()
+        self._last_shadow_run_monotonic = 0.0
+        self.shadow_report: Optional[ShadowReport] = None
+
+    @staticmethod
+    def _as_bool(value: object) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+        return bool(value)
+
+    def _maybe_run_shadow_learning(self) -> None:
+        if not self._as_bool(os.getenv("SHADOW_LEARNING_ENABLED", "true")):
+            return
+        try:
+            interval_seconds = max(300.0, float(os.getenv("SHADOW_INTERVAL_SECONDS", "3600")))
+        except ValueError:
+            interval_seconds = 3600.0
+        now_monotonic = time.monotonic()
+        if now_monotonic - self._last_shadow_run_monotonic < interval_seconds:
+            return
+        if not self._shadow_lock.acquire(blocking=False):
+            return
+        try:
+            now_monotonic = time.monotonic()
+            if now_monotonic - self._last_shadow_run_monotonic < interval_seconds:
+                return
+            self._last_shadow_run_monotonic = now_monotonic
+            self.shadow_report = run_shadow_analysis(self.db_path)
+        except Exception as exc:
+            print(f"[SHADOW][WARN] analysis failed error={exc}", flush=True)
+        finally:
+            self._shadow_lock.release()
 
     @staticmethod
     def _trade_columns(conn: sqlite3.Connection) -> set[str]:
@@ -210,6 +249,7 @@ class AdaptiveTuner:
             return AdaptiveSnapshot(**compatible_payload)
 
     def snapshot(self) -> AdaptiveSnapshot:
+        self._maybe_run_shadow_learning()
         recent, source = self._load_recent_pnl()
         session_closed = len(recent)
         wins = sum(1 for pnl in recent if pnl > 0)
