@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
-from src.learning_profit_protection import LearningProfitProtection
+from src.journal_reconciler import JournalReconcilerProfitProtection
 from src.risk_manager import RiskManager
 
 
@@ -28,10 +28,20 @@ DEFAULT_TIME_STOP = {
 
 
 def resolve_state_dir(fallback: Optional[Path] = None) -> Path:
-    """Return the state directory honoring MOSSY_STATE_PATH when set."""
+    """Return the persistent runtime state directory.
+
+    MOSSY_STATE_PATH remains authoritative. On Render, a mounted persistent disk
+    is conventionally exposed at /var/data; use it automatically so the runtime
+    journal and the adaptive learner always resolve the same database.
+    """
 
     root = os.getenv("MOSSY_STATE_PATH")
-    base = Path(root) if root else (fallback or Path("data"))
+    if root:
+        base = Path(root)
+    elif Path("/var/data").exists():
+        base = Path("/var/data")
+    else:
+        base = fallback or Path("data")
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -63,8 +73,8 @@ def build_profit_protection(
     trailing: Optional[Dict] = None,
     time_stop: Optional[Dict] = None,
     journal=None,
-) -> LearningProfitProtection:
-    """Create reliable profit protection with journal-backed close reconciliation."""
+) -> JournalReconcilerProfitProtection:
+    """Create profit protection with persistent broker/journal reconciliation."""
 
     trailing_cfg = DEFAULT_TRAILING_CONFIG | (trailing or {})
     ts_cfg = DEFAULT_TIME_STOP | (time_stop or {})
@@ -74,7 +84,7 @@ def build_profit_protection(
     arm_ccy = trailing_cfg.get("arm_ccy", trailing_cfg.get("arm_usd"))
     giveback_ccy = trailing_cfg.get("giveback_ccy", trailing_cfg.get("giveback_usd"))
 
-    return LearningProfitProtection(
+    return JournalReconcilerProfitProtection(
         broker,
         trigger=float(arm_ccy if arm_ccy is not None else DEFAULT_TRAILING_CONFIG["arm_ccy"]),
         trail=float(giveback_ccy if giveback_ccy is not None else DEFAULT_TRAILING_CONFIG["giveback_ccy"]),
