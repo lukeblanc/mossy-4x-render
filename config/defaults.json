@@ -33,7 +33,7 @@
     "USD_JPY",
     "XAU_USD"
   ],
-  "max_open_trades": 3,
+  "max_open_trades": 2,
   "risk_per_trade": 0.08,
   "cooldown_minutes": 2,
   "risk": {
@@ -42,12 +42,12 @@
     "allow_trading_above_target": true,
     "equity_floor": 1000.0,
     "risk_per_trade_pct": 0.0025,
-    "max_concurrent_positions": 3,
+    "max_concurrent_positions": 2,
     "cooldown_minutes": 45,
     "daily_loss_cap_pct": 0.01,
     "weekly_loss_cap_pct": 0.03,
     "loss_streak_limit": 3,
-    "loss_streak_pause_minutes": 45,
+    "loss_streak_pause_minutes": 60,
     "sl_atr_mult": 1.2,
     "tp_atr_mult": 1.0,
     "atr_period": 14,
@@ -72,7 +72,7 @@
       "start": "04:55",
       "end": "05:05"
     },
-    "max_trades_per_day": 100,
+    "max_trades_per_day": 8,
     "equity_adjustment_pct": 0.05,
     "equity_adjustment_abs": 20.0,
     "EQUITY_ADJUSTMENT_PCT": 0.05,
