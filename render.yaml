@@ -24,7 +24,11 @@ services:
       - key: AGGRESSIVE_RISK_PCT
         value: "0.0025"
       - key: AGGRESSIVE_MAX_POSITIONS
-        value: "3"
+        value: "2"
+      - key: MAX_CONCURRENT_POSITIONS
+        value: "2"
+      - key: MAX_TRADES_PER_DAY
+        value: "8"
       - key: AGGRESSIVE_COOLDOWN_CANDLES
         value: "9"
       - key: AGGRESSIVE_DAILY_LOSS_CAP_PCT
@@ -60,7 +64,7 @@ services:
       - key: ADAPTIVE_LOOKBACK
         value: "80"
       - key: ADAPTIVE_MIN_SAMPLE
-        value: "8"
+        value: "20"
       - key: ADAPTIVE_POLICY_ENABLED
         value: "true"
       - key: ADAPTIVE_POLICY_LOOKBACK
@@ -75,6 +79,20 @@ services:
         value: "0.25"
       - key: ADAPTIVE_POLICY_CACHE_SECONDS
         value: "30"
+      - key: SHADOW_LEARNING_ENABLED
+        value: "true"
+      - key: SHADOW_INTERVAL_SECONDS
+        value: "3600"
+      - key: SHADOW_TRAIN_RATIO
+        value: "0.70"
+      - key: SHADOW_MIN_TRAIN
+        value: "50"
+      - key: SHADOW_MIN_VALIDATION
+        value: "30"
+      - key: SHADOW_MIN_COVERAGE
+        value: "0.50"
+      - key: SHADOW_AUTO_APPLY
+        value: "false"
       - key: ENABLE_PROJECTOR
         value: "true"
       - key: VERBOSE_MARKET_LOGS
