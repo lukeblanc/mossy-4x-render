@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Tuple
 
 from src import adaptive_policy
 
 
 ACCOUNT_CURRENCY = "AUD"
+DEFAULT_MAX_RISK_PER_TRADE_CCY = 1.50
 
 
 def _pip_size(instrument: str) -> float:
@@ -34,6 +36,14 @@ def _pip_value_per_unit_in_account_ccy(
     return pip_size * conversion_rate
 
 
+def _max_risk_per_trade_ccy() -> float:
+    raw = os.getenv("MAX_RISK_PER_TRADE_CCY", str(DEFAULT_MAX_RISK_PER_TRADE_CCY))
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RISK_PER_TRADE_CCY
+
+
 def units_for_risk(
     equity: float,
     instrument: str,
@@ -44,11 +54,12 @@ def units_for_risk(
     account_currency: str = ACCOUNT_CURRENCY,
     min_trade_units: int = 1,
 ) -> tuple[int, dict]:
-    """Return units sized to risk_pct with journal-backed setup learning.
+    """Return units sized to percentage risk with an absolute cash-risk ceiling.
 
-    The existing account and strategy risk limits remain authoritative. The
-    adaptive policy may only reduce or block risk; it can never increase the
-    requested percentage above the caller's value.
+    The percentage risk remains the strategy request, but the final broker-side
+    stop exposure is capped by MAX_RISK_PER_TRADE_CCY (default 1.50 in account
+    currency). Adaptive learning may only reduce or block risk; it cannot raise
+    the requested percentage or bypass the absolute cash ceiling.
     """
 
     if equity <= 0 or stop_distance <= 0 or risk_pct <= 0:
@@ -72,7 +83,9 @@ def units_for_risk(
         diagnostics = {
             "equity": equity,
             "risk_pct": 0.0,
+            "requested_risk_amount": 0.0,
             "risk_amount": 0.0,
+            "max_risk_per_trade_ccy": _max_risk_per_trade_ccy(),
             "stop_pips": 0.0,
             "pip_value_per_unit": 0.0,
             "final_units": 0,
@@ -95,7 +108,13 @@ def units_for_risk(
     if stop_pips <= 0:
         return 0, {}
 
-    risk_amount = equity * effective_risk_pct
+    requested_risk_amount = equity * effective_risk_pct
+    max_risk_ccy = _max_risk_per_trade_ccy()
+    risk_amount = (
+        min(requested_risk_amount, max_risk_ccy)
+        if max_risk_ccy > 0
+        else requested_risk_amount
+    )
     pip_value_per_unit = _pip_value_per_unit_in_account_ccy(
         instrument,
         broker=broker,
@@ -113,7 +132,9 @@ def units_for_risk(
         "equity": equity,
         "risk_pct": effective_risk_pct,
         "requested_risk_pct": risk_pct,
+        "requested_risk_amount": requested_risk_amount,
         "risk_amount": risk_amount,
+        "max_risk_per_trade_ccy": max_risk_ccy,
         "stop_pips": stop_pips,
         "pip_value_per_unit": pip_value_per_unit,
         "final_units": final_units,
@@ -124,4 +145,11 @@ def units_for_risk(
         "learning_exact_samples": policy.exact_samples,
         "learning_pair_side_samples": policy.pair_side_samples,
     }
+    if max_risk_ccy > 0 and requested_risk_amount > risk_amount:
+        print(
+            f"[POSITION-SIZE][CASH-CAP] instrument={instrument} "
+            f"requested_risk={requested_risk_amount:.2f} capped_risk={risk_amount:.2f} "
+            f"currency={account_currency}",
+            flush=True,
+        )
     return final_units, diagnostics
