@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
-from src.journal_reconciler import JournalReconcilerProfitProtection
 from src.risk_manager import RiskManager
+from src.smart_exit_guard import SmartExitGuard
 
 
 DEFAULT_TRAILING_CONFIG = {
@@ -73,8 +73,8 @@ def build_profit_protection(
     trailing: Optional[Dict] = None,
     time_stop: Optional[Dict] = None,
     journal=None,
-) -> JournalReconcilerProfitProtection:
-    """Create profit protection with persistent broker/journal reconciliation."""
+) -> SmartExitGuard:
+    """Create always-on smart exits with persistent broker/journal reconciliation."""
 
     trailing_cfg = DEFAULT_TRAILING_CONFIG | (trailing or {})
     ts_cfg = DEFAULT_TIME_STOP | (time_stop or {})
@@ -84,7 +84,7 @@ def build_profit_protection(
     arm_ccy = trailing_cfg.get("arm_ccy", trailing_cfg.get("arm_usd"))
     giveback_ccy = trailing_cfg.get("giveback_ccy", trailing_cfg.get("giveback_usd"))
 
-    return JournalReconcilerProfitProtection(
+    return SmartExitGuard(
         broker,
         trigger=float(arm_ccy if arm_ccy is not None else DEFAULT_TRAILING_CONFIG["arm_ccy"]),
         trail=float(giveback_ccy if giveback_ccy is not None else DEFAULT_TRAILING_CONFIG["giveback_ccy"]),
