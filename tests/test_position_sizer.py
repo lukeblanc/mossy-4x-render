@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src import position_sizer
+from src import adaptive_policy, position_sizer
 
 
 class StubBroker:
@@ -11,7 +11,22 @@ class StubBroker:
         return self._rates.get((from_ccy.upper(), to_ccy.upper()))
 
 
+def _neutral_learning(monkeypatch):
+    monkeypatch.setattr(
+        adaptive_policy,
+        "evaluate_instrument_policy",
+        lambda instrument: adaptive_policy.PolicyDecision(
+            instrument=instrument,
+            setup_key="test-neutral",
+            risk_scale=1.0,
+            blocked=False,
+            reason="test-neutral",
+        ),
+    )
+
+
 def test_units_for_risk_non_jpy_applies_default_cash_cap(monkeypatch):
+    _neutral_learning(monkeypatch)
     monkeypatch.delenv("MAX_RISK_PER_TRADE_CCY", raising=False)
     broker = StubBroker({("USD", "AUD"): 1.5})
     units, diag = position_sizer.units_for_risk(
@@ -33,6 +48,7 @@ def test_units_for_risk_non_jpy_applies_default_cash_cap(monkeypatch):
 
 
 def test_units_for_risk_cash_cap_can_be_configured(monkeypatch):
+    _neutral_learning(monkeypatch)
     monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "2.25")
     broker = StubBroker({("USD", "AUD"): 1.5})
     units, diag = position_sizer.units_for_risk(
@@ -49,6 +65,7 @@ def test_units_for_risk_cash_cap_can_be_configured(monkeypatch):
 
 
 def test_units_for_risk_jpy_pair_uses_0_01_pip_size(monkeypatch):
+    _neutral_learning(monkeypatch)
     monkeypatch.delenv("MAX_RISK_PER_TRADE_CCY", raising=False)
     broker = StubBroker({("JPY", "AUD"): 0.01})
     units, diag = position_sizer.units_for_risk(
@@ -65,6 +82,7 @@ def test_units_for_risk_jpy_pair_uses_0_01_pip_size(monkeypatch):
 
 
 def test_units_for_risk_returns_zero_without_conversion_rate(monkeypatch):
+    _neutral_learning(monkeypatch)
     monkeypatch.delenv("MAX_RISK_PER_TRADE_CCY", raising=False)
     broker = StubBroker({})
     units, diag = position_sizer.units_for_risk(
