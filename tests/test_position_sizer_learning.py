@@ -12,6 +12,7 @@ class ConversionBroker:
 
 
 def test_learning_can_only_reduce_requested_risk(monkeypatch):
+    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0")
     monkeypatch.setattr(
         adaptive_policy,
         "evaluate_instrument_policy",
@@ -39,6 +40,7 @@ def test_learning_can_only_reduce_requested_risk(monkeypatch):
 
 
 def test_learning_block_returns_zero_units(monkeypatch):
+    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0")
     monkeypatch.setattr(
         adaptive_policy,
         "evaluate_instrument_policy",
