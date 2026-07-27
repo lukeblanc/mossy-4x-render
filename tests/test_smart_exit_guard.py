@@ -44,38 +44,51 @@ def _trade(profit: float):
 
 
 def test_hard_cash_loss_floor_is_active_without_aggressive_mode(monkeypatch):
-    monkeypatch.setenv("HARD_MAX_LOSS_CCY", "1.50")
-    broker = DummyBroker([-1.51])
+    monkeypatch.setenv("HARD_MAX_LOSS_CCY", "1.25")
+    broker = DummyBroker([-1.26])
     guard = SmartExitGuard(broker, aggressive=False)
 
-    open_trades = [_trade(-1.51)]
+    open_trades = [_trade(-1.26)]
     closed = guard.process_open_trades(open_trades)
 
     assert closed == ["T1"]
     assert broker.closed == ["AUD_USD"]
 
 
-def test_break_even_protection_after_early_profit(monkeypatch):
-    monkeypatch.setenv("PROFIT_PROTECT_TRIGGER_CCY", "1.50")
-    monkeypatch.setenv("PROFIT_PROTECT_FLOOR_CCY", "0.00")
+def test_winner_protection_retains_share_of_early_peak(monkeypatch):
+    monkeypatch.setenv("PROFIT_PROTECT_TRIGGER_CCY", "2.00")
+    monkeypatch.setenv("PROFIT_PROTECT_FLOOR_CCY", "0.25")
+    monkeypatch.setenv("PROFIT_PROTECT_CAPTURE_RATIO", "0.35")
     monkeypatch.setenv("PROFIT_TRAIL_ARM_CCY", "3.00")
-    broker = DummyBroker([1.50, -0.01])
+    broker = DummyBroker([2.00, 2.00, 0.69])
     guard = SmartExitGuard(broker, aggressive=False)
 
-    assert guard.process_open_trades([_trade(1.50)]) == []
-    closed = guard.process_open_trades([_trade(-0.01)])
+    assert guard.process_open_trades([_trade(2.00)]) == []
+    closed = guard.process_open_trades([_trade(0.69)])
 
     assert closed == ["T1"]
 
 
-def test_profit_trail_banks_after_fifty_cent_giveback(monkeypatch):
+def test_winner_protection_does_not_clip_trade_before_trigger(monkeypatch):
+    monkeypatch.setenv("PROFIT_PROTECT_TRIGGER_CCY", "2.00")
+    monkeypatch.setenv("PROFIT_PROTECT_CAPTURE_RATIO", "0.35")
+    broker = DummyBroker([1.90, 1.90, 0.20, 0.20])
+    guard = SmartExitGuard(broker, aggressive=False)
+
+    assert guard.process_open_trades([_trade(1.90)]) == []
+    assert guard.process_open_trades([_trade(0.20)]) == []
+    assert broker.closed == []
+
+
+def test_profit_trail_uses_fixed_and_percentage_capture_floors(monkeypatch):
     monkeypatch.setenv("PROFIT_TRAIL_ARM_CCY", "3.00")
-    monkeypatch.setenv("PROFIT_TRAIL_GIVEBACK_CCY", "0.50")
-    broker = DummyBroker([3.00, 4.00, 3.49])
+    monkeypatch.setenv("PROFIT_TRAIL_GIVEBACK_CCY", "0.75")
+    monkeypatch.setenv("PROFIT_TRAIL_MIN_CAPTURE_RATIO", "0.65")
+    broker = DummyBroker([3.00, 3.00, 4.00, 4.00, 3.24])
     guard = SmartExitGuard(broker, aggressive=False)
 
     assert guard.process_open_trades([_trade(3.00)]) == []
     assert guard.process_open_trades([_trade(4.00)]) == []
-    closed = guard.process_open_trades([_trade(3.49)])
+    closed = guard.process_open_trades([_trade(3.24)])
 
     assert closed == ["T1"]

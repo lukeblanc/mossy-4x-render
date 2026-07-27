@@ -16,28 +16,41 @@ def _env_float(name: str, default: float) -> float:
 
 
 class SmartExitGuard(JournalReconcilerProfitProtection):
-    """Always-on cash loss protection plus stepped profit locking.
+    """Always-on cash loss protection plus winner-quality profit locking.
 
     This layer is deliberately independent of AGGRESSIVE_MODE so disabling
     aggressive trading can never disable the emergency cash-loss guard.
     The inherited legacy trailing exit is disabled here; this class owns the
     production cash-based exit ladder while the parent still handles time stops,
     broker reconciliation, journal persistence, and close confirmation.
+
+    The ladder is designed to address the "good win rate, poor profit factor"
+    failure mode: losses are cut a little sooner, while a trade that has reached
+    a meaningful profit must retain a configurable share of its best open profit.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.hard_max_loss_ccy = max(0.0, _env_float("HARD_MAX_LOSS_CCY", 1.50))
+        legacy_trigger = self.trigger
+        legacy_trail = self.trail
+        self.hard_max_loss_ccy = max(0.0, _env_float("HARD_MAX_LOSS_CCY", 1.25))
         self.profit_protect_trigger_ccy = max(
-            0.0, _env_float("PROFIT_PROTECT_TRIGGER_CCY", 1.50)
+            0.0, _env_float("PROFIT_PROTECT_TRIGGER_CCY", 2.00)
         )
-        self.profit_protect_floor_ccy = _env_float("PROFIT_PROTECT_FLOOR_CCY", 0.0)
+        self.profit_protect_floor_ccy = _env_float("PROFIT_PROTECT_FLOOR_CCY", 0.25)
+        self.profit_protect_capture_ratio = max(
+            0.0, min(0.95, _env_float("PROFIT_PROTECT_CAPTURE_RATIO", 0.35))
+        )
         self.profit_trail_arm_ccy = max(
             self.profit_protect_trigger_ccy,
             _env_float("PROFIT_TRAIL_ARM_CCY", 3.00),
         )
         self.profit_trail_giveback_ccy = max(
-            0.01, _env_float("PROFIT_TRAIL_GIVEBACK_CCY", 0.50)
+            0.01, _env_float("PROFIT_TRAIL_GIVEBACK_CCY", 0.75)
+        )
+        self.profit_trail_min_capture_ratio = max(
+            self.profit_protect_capture_ratio,
+            min(0.95, _env_float("PROFIT_TRAIL_MIN_CAPTURE_RATIO", 0.65)),
         )
 
         # The base class has an older cash trailing rule that can fire before its
@@ -47,16 +60,20 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
         self.giveback_ccy = float("inf")
         self.arm_usd = self.arm_ccy
         self.giveback_usd = self.giveback_ccy
-        self.trigger = self.arm_ccy
-        self.trail = self.giveback_ccy
+        # Keep the old public attributes intact for callers and diagnostics while
+        # the inherited implementation remains disabled by the infinite arm.
+        self.trigger = legacy_trigger
+        self.trail = legacy_trail
 
         print(
             "[SMART-EXIT][CONFIG] "
             f"hard_loss={self.hard_max_loss_ccy:.2f} "
             f"protect_trigger={self.profit_protect_trigger_ccy:.2f} "
             f"protect_floor={self.profit_protect_floor_ccy:.2f} "
+            f"protect_capture={self.profit_protect_capture_ratio:.0%} "
             f"trail_arm={self.profit_trail_arm_ccy:.2f} "
-            f"trail_giveback={self.profit_trail_giveback_ccy:.2f}",
+            f"trail_giveback={self.profit_trail_giveback_ccy:.2f} "
+            f"trail_min_capture={self.profit_trail_min_capture_ratio:.0%}",
             flush=True,
         )
 
@@ -74,9 +91,11 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
         units: float,
         now_utc: datetime,
     ) -> bool:
+        captured = profit / peak if peak > 0 else 0.0
         print(
             f"[SMART-EXIT][INFO] close_requested ticket={trade_id} instrument={instrument} "
-            f"profit={profit:.2f} peak={peak:.2f} floor={floor:.2f} reason={reason}",
+            f"profit={profit:.2f} peak={peak:.2f} floor={floor:.2f} "
+            f"capture={captured:.0%} reason={reason}",
             flush=True,
         )
         return self._close_trade(
@@ -91,7 +110,7 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
             reason=reason,
             summary=(
                 f"Closing {instrument}: profit={profit:.2f}, peak={peak:.2f}, "
-                f"floor={floor:.2f}, reason={reason}"
+                f"floor={floor:.2f}, capture={captured:.0%}, reason={reason}"
             ),
             open_trades=open_trades,
             state=state,
@@ -136,24 +155,33 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
             close_reason: Optional[str] = None
             close_floor = 0.0
 
-            # Layer 1: absolute emergency loss floor, always active.
+            # Layer 1: a slightly tighter absolute loss floor improves average
+            # loss size without changing entry risk or increasing position size.
             if self.hard_max_loss_ccy > 0 and profit <= -self.hard_max_loss_ccy:
                 close_reason = "HARD_CASH_LOSS_FLOOR"
                 close_floor = -self.hard_max_loss_ccy
 
-            # Layer 2: once a trade reaches the main profit zone, follow its peak
-            # and bank it after a 50c (configurable) giveback.
+            # Layer 2: once the main profit zone is reached, retain both a fixed
+            # cash amount and a minimum percentage of the best open profit.
             elif peak >= self.profit_trail_arm_ccy:
-                trailing_floor = peak - self.profit_trail_giveback_ccy
+                trailing_floor = max(
+                    peak - self.profit_trail_giveback_ccy,
+                    peak * self.profit_trail_min_capture_ratio,
+                )
                 if profit <= trailing_floor:
-                    close_reason = "SMART_PROFIT_TRAIL"
+                    close_reason = "SMART_WINNER_QUALITY_TRAIL"
                     close_floor = trailing_floor
 
-            # Layer 3: after a meaningful early win, do not let the trade turn
-            # back into a loser. Default floor is break-even (0.00 account ccy).
-            elif peak >= self.profit_protect_trigger_ccy and profit <= self.profit_protect_floor_ccy:
-                close_reason = "SMART_BREAK_EVEN_PROTECT"
-                close_floor = self.profit_protect_floor_ccy
+            # Layer 3: after a meaningful early win, do not give nearly all of it
+            # back. The floor rises with the peak instead of remaining at zero.
+            elif peak >= self.profit_protect_trigger_ccy:
+                protection_floor = max(
+                    self.profit_protect_floor_ccy,
+                    peak * self.profit_protect_capture_ratio,
+                )
+                if profit <= protection_floor:
+                    close_reason = "SMART_WINNER_QUALITY_PROTECT"
+                    close_floor = protection_floor
 
             if close_reason and self._smart_close(
                 trade_id=trade_id,
