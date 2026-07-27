@@ -60,7 +60,7 @@ def test_winner_protection_retains_share_of_early_peak(monkeypatch):
     monkeypatch.setenv("PROFIT_PROTECT_FLOOR_CCY", "0.25")
     monkeypatch.setenv("PROFIT_PROTECT_CAPTURE_RATIO", "0.35")
     monkeypatch.setenv("PROFIT_TRAIL_ARM_CCY", "3.00")
-    broker = DummyBroker([2.00, 0.69])
+    broker = DummyBroker([2.00, 2.00, 0.69])
     guard = SmartExitGuard(broker, aggressive=False)
 
     assert guard.process_open_trades([_trade(2.00)]) == []
@@ -72,7 +72,7 @@ def test_winner_protection_retains_share_of_early_peak(monkeypatch):
 def test_winner_protection_does_not_clip_trade_before_trigger(monkeypatch):
     monkeypatch.setenv("PROFIT_PROTECT_TRIGGER_CCY", "2.00")
     monkeypatch.setenv("PROFIT_PROTECT_CAPTURE_RATIO", "0.35")
-    broker = DummyBroker([1.90, 0.20])
+    broker = DummyBroker([1.90, 1.90, 0.20, 0.20])
     guard = SmartExitGuard(broker, aggressive=False)
 
     assert guard.process_open_trades([_trade(1.90)]) == []
@@ -84,7 +84,7 @@ def test_profit_trail_uses_fixed_and_percentage_capture_floors(monkeypatch):
     monkeypatch.setenv("PROFIT_TRAIL_ARM_CCY", "3.00")
     monkeypatch.setenv("PROFIT_TRAIL_GIVEBACK_CCY", "0.75")
     monkeypatch.setenv("PROFIT_TRAIL_MIN_CAPTURE_RATIO", "0.65")
-    broker = DummyBroker([3.00, 4.00, 3.24])
+    broker = DummyBroker([3.00, 3.00, 4.00, 4.00, 3.24])
     guard = SmartExitGuard(broker, aggressive=False)
 
     assert guard.process_open_trades([_trade(3.00)]) == []
