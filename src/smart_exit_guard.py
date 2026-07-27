@@ -31,6 +31,8 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        legacy_trigger = self.trigger
+        legacy_trail = self.trail
         self.hard_max_loss_ccy = max(0.0, _env_float("HARD_MAX_LOSS_CCY", 1.25))
         self.profit_protect_trigger_ccy = max(
             0.0, _env_float("PROFIT_PROTECT_TRIGGER_CCY", 2.00)
@@ -58,8 +60,10 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
         self.giveback_ccy = float("inf")
         self.arm_usd = self.arm_ccy
         self.giveback_usd = self.giveback_ccy
-        self.trigger = self.arm_ccy
-        self.trail = self.giveback_ccy
+        # Keep the old public attributes intact for callers and diagnostics while
+        # the inherited implementation remains disabled by the infinite arm.
+        self.trigger = legacy_trigger
+        self.trail = legacy_trail
 
         print(
             "[SMART-EXIT][CONFIG] "
