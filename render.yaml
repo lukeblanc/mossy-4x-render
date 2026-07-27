@@ -50,15 +50,19 @@ services:
       - key: MAX_RISK_PER_TRADE_CCY
         value: "1.50"
       - key: HARD_MAX_LOSS_CCY
-        value: "1.50"
+        value: "1.25"
       - key: PROFIT_PROTECT_TRIGGER_CCY
-        value: "1.50"
+        value: "2.00"
       - key: PROFIT_PROTECT_FLOOR_CCY
-        value: "0.00"
+        value: "0.25"
+      - key: PROFIT_PROTECT_CAPTURE_RATIO
+        value: "0.35"
       - key: PROFIT_TRAIL_ARM_CCY
         value: "3.00"
       - key: PROFIT_TRAIL_GIVEBACK_CCY
-        value: "0.50"
+        value: "0.75"
+      - key: PROFIT_TRAIL_MIN_CAPTURE_RATIO
+        value: "0.65"
       - key: ALLOW_HIGH_RISK
         value: "false"
       - key: RESET_WEEKLY_LOSS_CAP
