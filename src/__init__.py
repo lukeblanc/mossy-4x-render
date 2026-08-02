@@ -53,5 +53,14 @@ def apply_runtime_safety_floors() -> None:
 
 apply_runtime_safety_floors()
 
+# Start only the independent reporting monitor. It reads the persistent journal
+# and never changes trading parameters, entries, exits, or position sizing.
+try:
+    from src.weekly_ops_report import start_weekly_ops_monitor
+
+    start_weekly_ops_monitor()
+except Exception as exc:  # pragma: no cover - reporting must never stop trading
+    print(f"[ALGO-REPORT][WARN] monitor bootstrap failed error={exc}", flush=True)
+
 
 __all__ = ["apply_runtime_safety_floors"]
