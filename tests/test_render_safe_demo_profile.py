@@ -64,4 +64,4 @@ def test_render_safe_demo_profile_overrides_stale_dashboard_values(tmp_path: Pat
 
     second = _run_config_import(tmp_path)
     assert second["RESET_MAX_DRAWDOWN_HALT"] == "false"
-    assert (tmp_path / ".safe_demo_profile_20260711_applied").exists()
+    assert (tmp_path / ".safe_demo_drawdown_recovery_20260805_applied").exists()
