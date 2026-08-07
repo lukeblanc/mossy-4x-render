@@ -84,13 +84,16 @@ def _apply_render_safe_demo_profile() -> None:
     else:
         state_root = Path("data")
 
-    marker = state_root / ".safe_demo_profile_20260711_applied"
+    # One-time demo migration: re-anchor the stale persistent max-drawdown
+    # baseline on the next deployment only. Live mode remains disabled and the
+    # max-drawdown guard itself is not weakened or removed.
+    marker = state_root / ".safe_demo_drawdown_recovery_20260805_applied"
     reset_requested = False
     try:
         state_root.mkdir(parents=True, exist_ok=True)
         if not marker.exists():
             os.environ["RESET_MAX_DRAWDOWN_HALT"] = "true"
-            marker.write_text("safe demo profile applied\n", encoding="utf-8")
+            marker.write_text("safe demo drawdown recovery applied\n", encoding="utf-8")
             reset_requested = True
         else:
             os.environ["RESET_MAX_DRAWDOWN_HALT"] = "false"
@@ -130,7 +133,7 @@ class Settings(BaseSettings):
     )
     BASE_URL: str = Field(
         "https://api-fxpractice.oanda.com/v3",
-        description="Base REST API URL for OANDA requests.",
+        description="Base REST API URL for OANDA.",
     )
     MODE: str = Field(
         "demo",
