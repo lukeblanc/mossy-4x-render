@@ -1,6 +1,6 @@
 """Gate the legacy one-time demo drawdown recovery on an actual active halt.
 
-Python imports ``sitecustomize`` before the application starts.  The merged
+Python imports ``sitecustomize`` before the application starts. The merged
 PR #155 recovery marker is therefore prepared before ``app.config`` applies
 its safe-demo profile:
 
@@ -23,8 +23,15 @@ def _enabled_demo_practice() -> bool:
 
 
 def _state_root() -> Path:
+    """Resolve the same persistent state directory as the trading runtime."""
+
     configured = os.getenv("MOSSY_STATE_PATH")
-    return Path(configured) if configured else Path("data")
+    if configured:
+        return Path(configured)
+    render_disk = Path("/var/data")
+    if render_disk.exists():
+        return render_disk
+    return Path("data")
 
 
 def _persisted_halt_active(state_file: Path) -> bool:
@@ -48,7 +55,7 @@ def _gate_demo_drawdown_recovery() -> None:
         if _persisted_halt_active(state_file):
             # Allow app.config to request the existing one-time reset.
             marker.unlink(missing_ok=True)
-            print("[DRAWdown-RECOVERY-GATE] active halt detected; reset armed", flush=True)
+            print("[DRAWDOWN-RECOVERY-GATE] active halt detected; reset armed", flush=True)
         else:
             # Prevent the legacy migration from moving a healthy peak baseline.
             marker.touch(exist_ok=True)
