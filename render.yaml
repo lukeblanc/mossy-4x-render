@@ -28,7 +28,7 @@ services:
       - key: MAX_CONCURRENT_POSITIONS
         value: "2"
       - key: MAX_TRADES_PER_DAY
-        value: "8"
+        value: "12"
       - key: AGGRESSIVE_COOLDOWN_CANDLES
         value: "9"
       - key: AGGRESSIVE_DAILY_LOSS_CAP_PCT
