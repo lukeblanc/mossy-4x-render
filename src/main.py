@@ -1443,17 +1443,16 @@ async def decision_cycle() -> None:
             xau_scale_active = (
                 evaluation.instrument == "XAU_USD" and xau_guard_reason == "scale" and xau_risk_scale > 0.0
             )
-            effective_risk_pct = adaptive_risk_pct
+            session_risk_scale = max(0.0, min(1.0, float(session_decision.risk_scale)))
+            effective_risk_pct = adaptive_risk_pct * session_risk_scale
             if xau_scale_active:
-                effective_risk_pct = max(
-                    0.001,
-                    min(0.025, adaptive_risk_pct * xau_risk_scale),
-                )
+                effective_risk_pct *= xau_risk_scale
+            effective_risk_pct = max(0.0, min(0.025, effective_risk_pct))
 
             print(
                 f"[RISK] {evaluation.instrument} base_pct={base_risk_pct:.6f} "
                 f"adaptive_pct={adaptive_risk_pct:.6f} "
-                f"xau_final_pct={effective_risk_pct:.6f} "
+                f"session_scale={session_risk_scale:.3f} final_pct={effective_risk_pct:.6f} "
                 f"xau_guard={xau_guard_reason} xau_scale={xau_risk_scale:.3f}",
                 flush=True,
             )
@@ -1539,6 +1538,7 @@ async def decision_cycle() -> None:
                 }
                 gating_flags = {
                     "session_ok": session_decision.allowed,
+                    "session_risk_scale": session_risk_scale,
                     "spread_ok": risk_reason != "spread-too-wide",
                     "risk_ok": ok_to_open,
                     "trend_ok": trend_ok,
@@ -1736,3 +1736,4 @@ if __name__ == "__main__":
 
     launch_status_server_thread()
     asyncio.run(runner())
+
