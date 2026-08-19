@@ -198,6 +198,9 @@ def session_decision(
             reason = "off-session-conditional" if not allowed else None
             if normalized_mode == SOFT and not near_window:
                 reason = "soft-boundary-only"
+            if allowed:
+                risk_scale = max(0.1, min(1.0, float(off_session_risk_scale)))
+                reason = "off-session-risk-reduced"
         return SessionDecision(
             allowed=allowed,
             in_session=in_session,
@@ -236,3 +239,4 @@ __all__ = [
     "ALWAYS",
     "SOFT",
 ]
+
