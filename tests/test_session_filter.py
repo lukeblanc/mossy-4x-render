@@ -56,9 +56,12 @@ def test_session_decision_extended_allows_when_trend_and_low_vol():
         atr_baseline=1.0,
         trend_aligned=True,
         max_off_session_vol_ratio=1.2,
+        off_session_risk_scale=0.4,
     )
     assert decision.allowed is True
     assert decision.off_session is True
+    assert decision.risk_scale == 0.4
+    assert decision.reason == "off-session-risk-reduced"
 
 
 def test_session_decision_extended_blocks_on_high_vol():
@@ -79,3 +82,18 @@ def test_session_decision_always_reduces_risk_off_session():
     assert decision.allowed is True
     assert decision.risk_scale < 1.0
     assert decision.off_session is True
+
+
+def test_session_decision_does_not_reduce_in_session_risk():
+    decision = session_decision(
+        _utc(7, 30),
+        mode=EXTENDED,
+        atr=1.0,
+        atr_baseline=1.0,
+        trend_aligned=True,
+        off_session_risk_scale=0.4,
+    )
+    assert decision.allowed is True
+    assert decision.in_session is True
+    assert decision.risk_scale == 1.0
+
