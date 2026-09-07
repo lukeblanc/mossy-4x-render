@@ -20,7 +20,8 @@ jobs:
       - name: Package tracked source only for offline audit
         run: git archive --format=zip -o /tmp/mossy-source.zip HEAD
       - name: Download runtime wheels for offline tests
-        run: python -m pip download --only-binary=:all: -r requirements.txt -d /tmp/mossy-wheels
+        run: |
+          python -m pip download --only-binary=:all: -r requirements.txt -d /tmp/mossy-wheels
       - uses: actions/upload-artifact@v4
         with:
           name: mossy-audit-source
