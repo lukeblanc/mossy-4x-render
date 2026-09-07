@@ -1,0 +1,24 @@
+name: Audit source bundle
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/audit-source-bundle.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Package tracked source only for offline audit
+        run: git archive --format=zip -o /tmp/mossy-source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mossy-audit-source
+          path: /tmp/mossy-source.zip
+          retention-days: 1
+          if-no-files-found: error
