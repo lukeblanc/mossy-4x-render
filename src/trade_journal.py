@@ -129,6 +129,9 @@ class TradeJournal:
                 snapshot_json TEXT NOT NULL, outcomes_json TEXT NOT NULL,
                 backup_path TEXT NOT NULL
             )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS journal_close_evidence (
+                trade_id TEXT PRIMARY KEY, recorded_at TEXT NOT NULL, evidence_json TEXT NOT NULL
+            )""")
 
     def record_entry(
         self,
@@ -261,6 +264,7 @@ class TradeJournal:
         direction: Optional[str] = None,
         entry_price: Optional[float] = None,
         equity_after: Optional[float] = None,
+        broker_evidence: Optional[dict] = None,
     ) -> None:
         if not trade_id:
             return
@@ -279,6 +283,11 @@ class TradeJournal:
         }
 
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if broker_evidence is not None:
+                conn.execute("INSERT OR REPLACE INTO journal_close_evidence VALUES (?,?,?)",
+                             (str(trade_id), _iso(datetime.now(timezone.utc)),
+                              json.dumps(broker_evidence, sort_keys=True, allow_nan=False)))
             conn.execute(
                 """
                 INSERT INTO trades (
