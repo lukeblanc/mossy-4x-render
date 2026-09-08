@@ -52,3 +52,20 @@ trade endpoint during the first cleanup. A bounded fallback requests
 then applies the same instrument, closed-state, price, PnL and chronology checks.
 The fallback is shared by ordinary reconciliation and maintenance. It never
 scans all transactions or substitutes another trade from the same instrument.
+
+If that exact list is empty, the reader checks the opening transaction and one
+transaction ID range, capped at 1,000 IDs. A recovered result requires an explicit
+opening trade link and exactly one full `tradesClosed` fill for that ID, with
+matching account, instrument and quantity, valid chronology, and finite official
+per-trade price and realized PnL. Partial reductions and incomplete histories
+remain unresolved. Order-level PnL is not substituted for a trade's PnL.
+
+The original opening and closing transactions are saved in
+`journal_close_evidence`. The close row, close event and evidence are written in
+one database transaction; a failure rolls back all three. Both ordinary runtime
+reconciliation and an explicit cleanup can use this recovery path.
+
+Broker endpoint and field contracts:
+- https://developer.oanda.com/rest-live-v20/trade-ep/
+- https://developer.oanda.com/rest-live-v20/transaction-ep/
+- https://developer.oanda.com/rest-live-v20/transaction-df/#TradeReduce

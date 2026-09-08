@@ -265,6 +265,7 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                 direction=row["side"],
                 entry_price=row["entry_price"],
                 equity_after=None,  # Historical account balance is unknown here.
+                broker_evidence=fill.get("broker_evidence"),
             )
         except Exception as exc:
             print(

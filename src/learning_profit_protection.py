@@ -155,6 +155,7 @@ class LearningProfitProtection(ProfitProtection):
             "exit_price": exit_price,
             "closed_at": closed_at,
             "reason": "BROKER_CLOSED",
+            "broker_evidence": details.get("_close_evidence"),
         }
 
     def process_open_trades(
@@ -367,6 +368,7 @@ class LearningProfitProtection(ProfitProtection):
                 direction=side,
                 entry_price=entry_price,
                 equity_after=equity_after,
+                broker_evidence=fill.get("broker_evidence"),
             )
             print(
                 f"[TRADE_CLOSED] ticket={journal_trade_id} broker_ticket={trade_id or 'n/a'} "

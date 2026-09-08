@@ -28,7 +28,7 @@ def test_detail_404_recovers_only_requested_closed_trade_without_history_scan():
     {"trades": [None]}])
 def test_list_fallback_rejects_missing_conflicting_or_ambiguous_identity(payload):
     requests = []
-    with client_for([(404, {}), (200, payload)], requests) as client:
+    with client_for([(404, {}), (200, payload), (404, {})], requests) as client:
         assert read_trade_details(client, "account", "6515") is None
 
 

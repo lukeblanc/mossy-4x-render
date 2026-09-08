@@ -27,6 +27,9 @@ def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
             raise RuntimeError(f"broker trade list unavailable: HTTP {response.status_code}")
         payload = response.json()
         candidates = payload.get("trades") if isinstance(payload, dict) else None
+        if candidates == []:
+            from app.trade_transactions import read_full_close
+            return read_full_close(client, account, ticket)
         if not isinstance(candidates, list) or len(candidates) != 1:
             print(f"[JOURNAL][LOOKUP] trade_id={ticket} exact_list_match=False", flush=True)
             return None
