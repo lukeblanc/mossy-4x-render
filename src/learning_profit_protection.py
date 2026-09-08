@@ -264,7 +264,9 @@ class LearningProfitProtection(ProfitProtection):
             try:
                 row = conn.execute(
                     "SELECT trade_id FROM trades WHERE trade_id = ? AND instrument = ? "
-                    "AND exit_timestamp_utc IS NULL LIMIT 1",
+                    "AND exit_timestamp_utc IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM journal_entry_resolutions r "
+                    "WHERE r.trade_id = trades.trade_id) LIMIT 1",
                     (str(broker_trade_id), instrument),
                 ).fetchone()
                 if row:

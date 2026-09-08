@@ -793,6 +793,16 @@ def _startup_checks() -> None:
             f"audit={risk._state_file}#demo_runs; daily/weekly limits and journal preserved.",
             flush=True,
         )
+    cleanup_id = os.getenv("MOSSY_JOURNAL_CLEANUP_ID", "").strip()
+    if cleanup_id:
+        try:
+            from src.journal_cleanup import run_cleanup
+            cleanup = run_cleanup(journal, broker, profit_guard, cleanup_id,
+                                  demo_mode=mode_env == "demo", oanda_env=oanda_env,
+                                  open_positions_count=open_count)
+            print(f"[JOURNAL-CLEANUP][STATUS] {json.dumps(cleanup, sort_keys=True)}", flush=True)
+        except Exception as exc:
+            print(f"[JOURNAL-CLEANUP][ERROR] cleanup deferred: {exc}", flush=True)
     snap = _safe_adaptive_snapshot("startup")
     if snap is not None:
         print(
@@ -1685,7 +1695,9 @@ async def runner() -> None:
             f"closed_trades={report.total.trades} wins={report.total.wins} losses={report.total.losses} "
             f"net={report.total.net_pnl:.2f} expectancy={report.total.expectancy:.4f} "
             f"profit_factor={report.total.profit_factor} "
-            f"open_journal_rows={report.open_trades} alerts={report.alerts}",
+            f"open_journal_rows={report.open_trades} "
+            f"cancelled_order_rows={report.cancelled_order_rows} duplicate_alias_rows={report.duplicate_alias_rows} "
+            f"unconfirmed_closed_rows={report.unconfirmed_closed_rows} alerts={report.alerts}",
             flush=True,
         )
         start_weekly_ops_monitor()
