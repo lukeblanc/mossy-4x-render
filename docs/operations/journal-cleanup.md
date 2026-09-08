@@ -42,6 +42,13 @@ exclude the audited classifications. Reports display their separate audit counts
 and exclude unconfirmed closes from verified performance figures.
 
 Verify `[JOURNAL-CLEANUP][COMPLETE]`, including any `unresolved_ids`, and the next
-`[WEEKLY-OPS]` report. After clearing the request, verify that the classifications
+`[ALGO-REPORT][STARTUP]` report. After clearing the request, verify that the classifications
 survive restart, broker/risk checks succeed, and ordinary decision cycles resume.
 Preserve the backup and audit tables for later inspection.
+
+Some recent, confirmed opening trade IDs returned 404 from OANDA's individual
+trade endpoint during the first cleanup. A bounded fallback requests
+`GET /trades?ids=<exact-id>&state=ALL&count=1`. It accepts exactly one matching ID,
+then applies the same instrument, closed-state, price, PnL and chronology checks.
+The fallback is shared by ordinary reconciliation and maintenance. It never
+scans all transactions or substitutes another trade from the same instrument.

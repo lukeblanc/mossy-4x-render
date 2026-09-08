@@ -9,6 +9,8 @@ import re
 import sqlite3
 import tempfile
 
+from app.broker import read_trade_details
+
 
 def _utc():
     return datetime.now(timezone.utc).isoformat()
@@ -113,7 +115,7 @@ def _inspect(journal, client, broker, guard, row, run_id):
             broker_id = guard._extract_trade_id(fill)
         if not broker_id:
             return "UNRESOLVED_NO_OPENING_FILL"
-    details = _get(client, broker.account, "trades", broker_id)
+    details = read_trade_details(client, broker.account, broker_id)
     if not details or details.get("instrument") != row["instrument"]:
         return "UNRESOLVED_TRADE_EVIDENCE"
     evidence["trade"] = details
