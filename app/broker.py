@@ -13,6 +13,38 @@ PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
 
 
+def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
+    """Read one exact trade, with a bounded list fallback for detail 404s."""
+    ticket = str(trade_id)
+    if not ticket.isascii() or not ticket.isdigit() or int(ticket) <= 0:
+        return None
+    response = client.get(f"/v3/accounts/{account}/trades/{ticket}")
+    if response.status_code == 404:
+        # Explicit IDs and ALL include closed trades without scanning history.
+        response = client.get(f"/v3/accounts/{account}/trades",
+                              params={"ids": ticket, "state": "ALL", "count": 1})
+        if response.status_code != 200:
+            raise RuntimeError(f"broker trade list unavailable: HTTP {response.status_code}")
+        payload = response.json()
+        candidates = payload.get("trades") if isinstance(payload, dict) else None
+        if not isinstance(candidates, list) or len(candidates) != 1:
+            print(f"[JOURNAL][LOOKUP] trade_id={ticket} exact_list_match=False", flush=True)
+            return None
+        trade = candidates[0]
+        source = "exact-list"
+    else:
+        if response.status_code != 200:
+            raise RuntimeError(f"broker trade details unavailable: HTTP {response.status_code}")
+        payload = response.json()
+        trade = payload.get("trade") if isinstance(payload, dict) else None
+        source = "detail"
+    if not isinstance(trade, dict) or str(trade.get("id")) != ticket:
+        return None
+    if source == "exact-list":
+        print(f"[JOURNAL][LOOKUP] trade_id={ticket} source={source} state={trade.get('state')}", flush=True)
+    return trade
+
+
 def opened_trade_fill(payload: object) -> Optional[Dict]:
     """Return only a verified new trade, never an order or a reduced/closed trade."""
     if not isinstance(payload, dict):
@@ -89,6 +121,12 @@ class Broker:
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=15.0)
+
+    def trade_details(self, trade_id: str) -> Optional[Dict]:
+        if not self.key or not self.account:
+            raise RuntimeError("broker credentials unavailable")
+        with self._client() as client:
+            return read_trade_details(client, self.account, trade_id)
 
     def connectivity_check(self) -> dict:
         """Log a quick read-only call to prove creds (demo or live)."""

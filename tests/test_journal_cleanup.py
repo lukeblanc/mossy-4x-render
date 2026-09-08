@@ -31,10 +31,12 @@ class ReadOnlyBroker:
                 return self
             def __exit__(self, *args):
                 return False
-            def get(self, path):
+            def get(self, path, params=None):
                 key = path.split("/", 4)[-1]
+                if params:
+                    key += "?ids=" + params["ids"]
                 broker.calls.append(key)
-                value = broker.resources.get(key)
+                value = broker.resources.get(key, {"trades": []} if params else None)
                 status = broker.statuses.get(key, 200 if value is not None else 404)
                 return SimpleNamespace(status_code=status, json=lambda: deepcopy(value))
         return Client()
@@ -197,3 +199,23 @@ def test_unconfirmed_results_do_not_inflate_verified_report(tmp_path):
     assert report.total.trades == 0 and report.total.net_pnl == 0
     assert report.unconfirmed_closed_rows == 1
     assert any("not broker-confirmed" in alert for alert in report.alerts)
+
+
+@pytest.mark.parametrize("maintenance", [False, True])
+def test_exact_list_recovers_recent_close_for_cleanup_and_ordinary_reconciliation(tmp_path, maintenance):
+    from app.broker import Broker
+    resources = {"trades?ids=101": {"trades": [{"id": "101", "instrument": "AUD_USD",
+        "state": "CLOSED", "currentUnits": "0", "realizedPL": "-0.75",
+        "averageClosePrice": "0.659", "closeTime": "2026-07-13T01:00:20Z"}]}}
+    journal, stub, _ = setup(tmp_path, resources)
+    broker = Broker.__new__(Broker)
+    broker.account, broker.key, broker.mode = "test-account", "test-key", "demo"
+    broker._client = stub._client
+    guard = JournalReconcilerProfitProtection(broker, arm_ccy=1, giveback_ccy=0.5, journal=journal)
+    if maintenance:
+        assert run(journal, broker, guard)["counts"] == {"RECOVERED_CLOSE": 1}
+    else:
+        assert guard._reconcile_untracked_journal_rows([], now_utc=datetime(2026, 7, 14, tzinfo=timezone.utc)) == ["101"]
+    report = build_weekly_report(journal.path, now_utc=datetime(2026, 7, 14, tzinfo=timezone.utc))
+    assert report.open_trades == 0 and report.total.trades == 1 and report.total.net_pnl == -0.75
+    assert guard._reconcile_untracked_journal_rows([], now_utc=datetime(2026, 7, 14, tzinfo=timezone.utc)) == []
