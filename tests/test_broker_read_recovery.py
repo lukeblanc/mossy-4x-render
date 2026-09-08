@@ -101,12 +101,28 @@ def test_startup_does_not_reset_risk_with_unknown_broker_state(runtime, monkeypa
     monkeypatch.setenv("RESET_MAX_DRAWDOWN_HALT", "true")
     monkeypatch.setenv("RESET_WEEKLY_LOSS_CAP", "true")
     monkeypatch.setenv("MOSSY_DEMO_RUN_ID", "explicit-demo-test")
+    monkeypatch.setenv("MOSSY_JOURNAL_CLEANUP_ID", "explicit-cleanup")
+    cleanup = Mock()
+    monkeypatch.setattr("src.journal_cleanup.run_cleanup", cleanup)
     getattr(broker, failed_read).return_value = None
     main._startup_checks()
     risk.startup_daily_reset.assert_not_called()
     risk.clear_max_drawdown_halt.assert_not_called()
     risk.clear_weekly_loss_cap.assert_not_called()
     risk.start_demo_run.assert_not_called()
+    cleanup.assert_not_called()
+
+
+def test_startup_cleanup_receives_verified_broker_snapshot(runtime, monkeypatch):
+    broker, risk, guard, _ = runtime
+    monkeypatch.setenv("MOSSY_JOURNAL_CLEANUP_ID", "explicit-cleanup")
+    monkeypatch.setattr(main, "mode_env", "demo")
+    monkeypatch.setattr(main, "oanda_env", "practice")
+    cleanup = Mock(return_value={"status": "completed"})
+    monkeypatch.setattr("src.journal_cleanup.run_cleanup", cleanup)
+    main._startup_checks()
+    cleanup.assert_called_once_with(main.journal, broker, guard, "explicit-cleanup",
+                                   demo_mode=True, oanda_env="practice", open_positions_count=0)
 
 
 def test_startup_applies_explicit_demo_run_after_broker_reads(runtime, monkeypatch):

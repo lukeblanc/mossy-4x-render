@@ -32,6 +32,8 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                     SELECT trade_id, timestamp_utc, instrument, side, entry_price
                     FROM trades
                     WHERE exit_timestamp_utc IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM journal_entry_resolutions r
+                                      WHERE r.trade_id = trades.trade_id)
                     ORDER BY timestamp_utc ASC, trade_id ASC
                     """
                 ).fetchall()

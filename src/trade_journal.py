@@ -118,6 +118,17 @@ class TradeJournal:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(trades);").fetchall()}
             if "run_tag" not in columns:
                 conn.execute("ALTER TABLE trades ADD COLUMN run_tag TEXT;")
+            conn.execute("""CREATE TABLE IF NOT EXISTS journal_entry_resolutions (
+                trade_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK(kind IN ('CANCELLED_ORDER', 'DUPLICATE_ALIAS')),
+                broker_id TEXT NOT NULL, resolved_at TEXT NOT NULL, run_id TEXT NOT NULL,
+                original_row_json TEXT NOT NULL, evidence_json TEXT NOT NULL
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS journal_cleanup_runs (
+                run_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, completed_at TEXT,
+                snapshot_json TEXT NOT NULL, outcomes_json TEXT NOT NULL,
+                backup_path TEXT NOT NULL
+            )""")
 
     def record_entry(
         self,

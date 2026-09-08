@@ -54,6 +54,9 @@ class WeeklyOpsReport:
     by_session: dict[str, SegmentMetrics]
     by_exit_reason: dict[str, SegmentMetrics]
     alerts: tuple[str, ...]
+    cancelled_order_rows: int = 0
+    duplicate_alias_rows: int = 0
+    unconfirmed_closed_rows: int = 0
 
 
 def _safe_float(value: object) -> float | None:
@@ -182,12 +185,26 @@ def _count_open_trades(db_path: Path) -> int:
         return 0
     try:
         with sqlite3.connect(db_path, timeout=3.0) as conn:
+            has_resolutions = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                           "AND name='journal_entry_resolutions'").fetchone()
+            exclusions = (" AND NOT EXISTS (SELECT 1 FROM journal_entry_resolutions r "
+                          "WHERE r.trade_id=trades.trade_id)" if has_resolutions else "")
             row = conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE exit_timestamp_utc IS NULL"
+                "SELECT COUNT(*) FROM trades WHERE exit_timestamp_utc IS NULL" + exclusions
             ).fetchone()
             return int(row[0] if row else 0)
     except sqlite3.Error:
         return 0
+
+
+def _resolution_counts(db_path: Path) -> dict[str, int]:
+    if not db_path.exists():
+        return {}
+    try:
+        with sqlite3.connect(db_path, timeout=3.0) as conn:
+            return dict(conn.execute("SELECT kind, COUNT(*) FROM journal_entry_resolutions GROUP BY kind").fetchall())
+    except sqlite3.Error:
+        return {}
 
 
 def _metrics(trades: list[dict[str, Any]]) -> SegmentMetrics:
@@ -266,7 +283,11 @@ def build_weekly_report(
 ) -> WeeklyOpsReport:
     path = Path(db_path) if db_path is not None else _journal_path()
     start_utc, end_utc = _week_bounds(now_utc)
-    trades = _load_closed_trades(path, start_utc, end_utc)
+    all_trades = _load_closed_trades(path, start_utc, end_utc)
+    trades = [trade for trade in all_trades
+              if trade.get("broker_confirmed") in (1, True, "1", "true", "True")]
+    unconfirmed = len(all_trades) - len(trades)
+    resolutions = _resolution_counts(path)
     total = _metrics(trades)
     max_drawdown, longest_streak = _drawdown_and_streak(trades)
     by_instrument = _segments(trades, "instrument")
@@ -286,11 +307,6 @@ def build_weekly_report(
         alerts.append("weekly expectancy is negative")
     if longest_streak >= 3:
         alerts.append(f"losing streak reached {longest_streak}")
-    unconfirmed = sum(
-        1
-        for trade in trades
-        if trade.get("broker_confirmed") not in (1, True, "1", "true", "True")
-    )
     if unconfirmed:
         alerts.append(f"{unconfirmed} closed trade rows are not broker-confirmed")
 
@@ -321,6 +337,9 @@ def build_weekly_report(
         by_session=by_session,
         by_exit_reason=by_exit_reason,
         alerts=tuple(alerts),
+        cancelled_order_rows=resolutions.get("CANCELLED_ORDER", 0),
+        duplicate_alias_rows=resolutions.get("DUPLICATE_ALIAS", 0),
+        unconfirmed_closed_rows=unconfirmed,
     )
 
 
@@ -346,6 +365,9 @@ def render_markdown(report: WeeklyOpsReport) -> str:
         f"- **Maximum reconstructed drawdown:** {report.max_drawdown:.2f}",
         f"- **Longest losing streak:** {report.longest_losing_streak}",
         f"- **Open journal rows:** {report.open_trades}",
+        f"- **Cancelled orders retained for audit:** {report.cancelled_order_rows}",
+        f"- **Duplicate aliases retained for audit:** {report.duplicate_alias_rows}",
+        f"- **Unconfirmed closes excluded from performance:** {report.unconfirmed_closed_rows}",
         f"- **Best instrument:** {report.best_instrument or 'not enough data'}",
         f"- **Worst instrument:** {report.worst_instrument or 'not enough data'}",
         "",
