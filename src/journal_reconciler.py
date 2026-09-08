@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -14,6 +16,7 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._reconcile_cursor = 0
+        self._retry_after: dict[str, float] = {}
 
     def _unclosed_journal_rows(self) -> list[sqlite3.Row]:
         journal = self._journal
@@ -29,8 +32,7 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                     SELECT trade_id, timestamp_utc, instrument, side, entry_price
                     FROM trades
                     WHERE exit_timestamp_utc IS NULL
-                    ORDER BY timestamp_utc ASC
-                    LIMIT 500
+                    ORDER BY timestamp_utc ASC, trade_id ASC
                     """
                 ).fetchall()
             finally:
@@ -45,14 +47,21 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
             self._reconcile_cursor = 0
             return []
         try:
-            attempt_limit = int(os.getenv("JOURNAL_RECONCILE_ATTEMPTS_PER_CYCLE", "25"))
+            attempt_limit = int(os.getenv("JOURNAL_RECONCILE_ATTEMPTS_PER_CYCLE", "3"))
         except ValueError:
-            attempt_limit = 25
-        attempt_limit = max(1, min(100, attempt_limit))
+            attempt_limit = 3
+        attempt_limit = max(1, min(5, attempt_limit))
         start = self._reconcile_cursor % len(rows)
         ordered = rows[start:] + rows[:start]
-        selected = ordered[:attempt_limit]
-        self._reconcile_cursor = (start + len(selected)) % len(rows)
+        now = time.monotonic()
+        selected = []
+        for offset, row in enumerate(ordered):
+            if self._retry_after.get(str(row["trade_id"]), 0) > now:
+                continue
+            selected.append(row)
+            self._reconcile_cursor = (start + offset + 1) % len(rows)
+            if len(selected) >= attempt_limit:
+                break
         return selected
 
     def _repair_impossible_exit_rows(self) -> int:
@@ -137,25 +146,14 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
     def _extract_trade_id(payload: object) -> Optional[str]:
         if not isinstance(payload, dict):
             return None
-        for key in ("tradeID", "tradeId", "tradeOpenedID"):
-            value = payload.get(key)
-            if value is not None:
-                return str(value)
+        value = payload.get("tradeOpenedID")
+        if value is not None:
+            return str(value)
         trade_opened = payload.get("tradeOpened")
         if isinstance(trade_opened, dict):
-            for key in ("tradeID", "tradeId", "id"):
-                value = trade_opened.get(key)
-                if value is not None:
-                    return str(value)
-        trades_closed = payload.get("tradesClosed")
-        if isinstance(trades_closed, list):
-            for trade in trades_closed:
-                if not isinstance(trade, dict):
-                    continue
-                for key in ("tradeID", "tradeId", "id"):
-                    value = trade.get(key)
-                    if value is not None:
-                        return str(value)
+            value = trade_opened.get("tradeID")
+            if value is not None:
+                return str(value)
         return None
 
     def _resolve_trade_id_from_order(self, journal_trade_id: str) -> Optional[str]:
@@ -166,6 +164,8 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
         try:
             with client_factory() as client:
                 response = client.get(f"/v3/accounts/{account}/orders/{journal_trade_id}")
+                if response.status_code != 200:
+                    print(f"[JOURNAL][LOOKUP] order_id={journal_trade_id} status={response.status_code}", flush=True)
                 if response.status_code == 200:
                     payload = response.json()
                     order = payload.get("order") if isinstance(payload, dict) else None
@@ -188,27 +188,8 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                                 trade_id = self._extract_trade_id(transaction)
                                 if trade_id:
                                     return trade_id
-                since_response = client.get(
-                    f"/v3/accounts/{account}/transactions/sinceid",
-                    params={"id": journal_trade_id},
-                )
-                if since_response.status_code != 200:
-                    return None
-                since_payload = since_response.json()
-                transactions = (
-                    since_payload.get("transactions", [])
-                    if isinstance(since_payload, dict)
-                    else []
-                )
-                for transaction in transactions:
-                    if not isinstance(transaction, dict):
-                        continue
-                    linked_order = transaction.get("orderID") or transaction.get("batchID")
-                    if linked_order is None or str(linked_order) != str(journal_trade_id):
-                        continue
-                    trade_id = self._extract_trade_id(transaction)
-                    if trade_id:
-                        return trade_id
+                        print(f"[JOURNAL][LOOKUP] order_id={journal_trade_id} "
+                              f"state={order.get('state', 'UNKNOWN')} no_trade_opened=True", flush=True)
         except Exception as exc:
             print(
                 f"[JOURNAL][WARN] order-to-trade lookup failed order_id={journal_trade_id} "
@@ -218,6 +199,8 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
         return None
 
     def _details_for_journal_id(self, journal_trade_id: str) -> tuple[str, Optional[Dict]]:
+        if not journal_trade_id.isascii() or not journal_trade_id.isdigit():
+            return journal_trade_id, None
         direct = self._broker_trade_details(journal_trade_id)
         if direct:
             return journal_trade_id, direct
@@ -225,50 +208,6 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
         if not broker_trade_id:
             return journal_trade_id, None
         return broker_trade_id, self._broker_trade_details(broker_trade_id)
-
-    @classmethod
-    def _closed_fill_from_details(cls, details: Optional[Dict]) -> Optional[dict[str, object]]:
-        if not details:
-            return None
-        state = str(details.get("state") or "").upper()
-        closed = state == "CLOSED"
-        current_units = details.get("currentUnits")
-        if not closed and current_units is not None:
-            try:
-                closed = float(current_units) == 0.0
-            except (TypeError, ValueError):
-                closed = False
-        if not closed:
-            return None
-
-        pnl: Optional[float] = None
-        for key in ("realizedPL", "pl"):
-            raw = details.get(key)
-            if raw is None:
-                continue
-            try:
-                pnl = float(raw)
-                break
-            except (TypeError, ValueError):
-                continue
-
-        exit_price: Optional[float] = None
-        for key in ("averageClosePrice", "closePrice"):
-            raw = details.get(key)
-            if raw is None:
-                continue
-            try:
-                exit_price = float(raw)
-                break
-            except (TypeError, ValueError):
-                continue
-
-        return {
-            "pnl": pnl,
-            "exit_price": exit_price,
-            "closed_at": cls._parse_datetime(details.get("closeTime")),
-            "reason": "BROKER_CLOSED",
-        }
 
     def _record_exact_fast_close(
         self,
@@ -284,26 +223,36 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
         journal_trade_id = str(row["trade_id"] or "")
         instrument = str(row["instrument"] or "")
         closed_at = fill.get("closed_at")
-        exit_ts = closed_at if isinstance(closed_at, datetime) else now_utc
+        if not isinstance(closed_at, datetime):
+            return False
+        exit_ts = closed_at
         opened_at = self._parse_datetime(row["timestamp_utc"])
+        if opened_at is None or exit_ts < opened_at:
+            print(f"[JOURNAL][DEFER] invalid entry/exit chronology ticket={journal_trade_id}", flush=True)
+            return False
+        if broker_trade_id != journal_trade_id:
+            try:
+                with sqlite3.connect(journal.path, timeout=2.0) as conn:
+                    canonical = conn.execute("SELECT 1 FROM trades WHERE trade_id = ?",
+                                             (broker_trade_id,)).fetchone()
+            except sqlite3.Error:
+                return False
+            if canonical:
+                print(f"[JOURNAL][DEFER] legacy_ticket={journal_trade_id} duplicates "
+                      f"broker_ticket={broker_trade_id}; preserved for audit.", flush=True)
+                return False
         duration_seconds = 0
         if isinstance(opened_at, datetime):
             duration_seconds = max(0, int((exit_ts - opened_at).total_seconds()))
         pnl = float(fill["pnl"]) if fill.get("pnl") is not None else None
         exit_price = float(fill["exit_price"]) if fill.get("exit_price") is not None else None
-        spread = self._current_spread(instrument)
-        equity_after = None
-        try:
-            equity_after = float(self.broker.account_equity())
-        except Exception:
-            pass
         reason = str(fill.get("reason") or "BROKER_CLOSED")
         try:
             journal.record_exit(
                 trade_id=journal_trade_id,
                 exit_timestamp_utc=exit_ts,
                 exit_price=exit_price,
-                spread_at_exit=spread,
+                spread_at_exit=None,  # Today's spread is not the historical exit spread.
                 max_profit_ccy=None,
                 realized_pnl_ccy=pnl,
                 exit_reason=reason,
@@ -313,7 +262,7 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                 instrument=instrument,
                 direction=row["side"],
                 entry_price=row["entry_price"],
-                equity_after=equity_after,
+                equity_after=None,  # Historical account balance is unknown here.
             )
         except Exception as exc:
             print(
@@ -349,6 +298,7 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
             if trade_id
         }
         recovered: list[str] = []
+        outcomes: Counter = Counter()
         for row in self._candidate_rows():
             journal_trade_id = str(row["trade_id"] or "")
             instrument = str(row["instrument"] or "")
@@ -356,11 +306,21 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                 continue
             if journal_trade_id in current_ids or journal_trade_id in self._state:
                 continue
+            # Repeated failures must not hold up every trading decision.
+            self._retry_after[journal_trade_id] = time.monotonic() + 900.0
+            outcomes["attempted"] += 1
             broker_trade_id, details = self._details_for_journal_id(journal_trade_id)
             if broker_trade_id in current_ids or broker_trade_id in self._state:
                 continue
+            if not details:
+                outcomes["unresolved_id"] += 1
+                continue
+            if str(details.get("id")) != broker_trade_id or details.get("instrument") != instrument:
+                outcomes["identity_mismatch"] += 1
+                continue
             fill = self._closed_fill_from_details(details)
             if fill is None:
+                outcomes["unconfirmed_close"] += 1
                 continue
             if self._record_exact_fast_close(
                 row,
@@ -369,6 +329,13 @@ class JournalReconcilerProfitProtection(LearningProfitProtection):
                 now_utc=now_utc,
             ):
                 recovered.append(broker_trade_id)
+                self._retry_after.pop(journal_trade_id, None)
+                outcomes["recovered"] += 1
+            else:
+                outcomes["save_or_chronology_rejected"] += 1
+        if outcomes:
+            print("[JOURNAL][RECONCILE] " + " ".join(f"{key}={value}" for key, value in sorted(outcomes.items()))
+                  + " retry_seconds=900 max_attempts=5", flush=True)
         return recovered
 
     def process_open_trades(

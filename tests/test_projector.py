@@ -1,3 +1,4 @@
+from order_fakes import confirmed_order_result
 import asyncio
 import sys
 from datetime import datetime, timezone
@@ -118,7 +119,7 @@ def test_projector_called_when_enabled(monkeypatch, capfd):
                     "entry_price": entry_price,
                 }
             )
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -240,7 +241,7 @@ def test_projector_not_called_when_disabled(monkeypatch, capfd):
                     "entry_price": entry_price,
                 }
             )
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0

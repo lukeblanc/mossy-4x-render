@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from order_fakes import confirmed_order_result
+
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
@@ -92,7 +94,7 @@ def test_xau_falling_knife_block(monkeypatch, capsys):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -204,7 +206,7 @@ def test_off_session_blocks_entries_but_trailing_runs(monkeypatch, capsys):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -319,7 +321,7 @@ def test_xau_guard_scale_reduces_position_units(monkeypatch):
 
         def place_order(self, instrument: str, signal: str, units: int, *args, **kwargs):
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0

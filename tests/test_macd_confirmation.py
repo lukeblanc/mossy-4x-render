@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from order_fakes import confirmed_order_result
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
@@ -92,7 +94,7 @@ def test_macd_veto_blocks_trade(monkeypatch, capsys):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -192,7 +194,7 @@ def test_macd_confirmation_allows_trade(monkeypatch):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -289,7 +291,7 @@ def test_macd_missing_values_do_not_block_trade(monkeypatch):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -430,7 +432,7 @@ def test_macd_does_not_create_new_signals(monkeypatch):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -552,7 +554,7 @@ def test_macd_confirms_fx_and_xau(monkeypatch):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0

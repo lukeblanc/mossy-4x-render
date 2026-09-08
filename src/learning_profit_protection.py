@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -10,10 +11,8 @@ from src.profit_protection import ProfitProtection, TrailingState
 class LearningProfitProtection(ProfitProtection):
     """ProfitProtection with reliable journal reconciliation.
 
-    OANDA can expose an order transaction id at entry and a different trade id
-    in openTrades. This class links a broker close back to the latest matching
-    open journal row, captures broker-reported realised P/L when available, and
-    avoids relying on undeclared TrailingState attributes.
+    Close only the exact trade's journal row. Legacy order IDs are resolved by
+    JournalReconcilerProfitProtection using broker evidence, never by instrument.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -98,6 +97,7 @@ class LearningProfitProtection(ProfitProtection):
             with client_factory() as client:
                 response = client.get(f"/v3/accounts/{account}/trades/{trade_id}")
                 if response.status_code != 200:
+                    print(f"[JOURNAL][LOOKUP] trade_id={trade_id} status={response.status_code}", flush=True)
                     return None
                 payload = response.json()
                 trade = payload.get("trade") if isinstance(payload, dict) else None
@@ -107,18 +107,24 @@ class LearningProfitProtection(ProfitProtection):
 
     def _closed_trade_fill(self, trade_id: str) -> Optional[dict[str, object]]:
         details = self._broker_trade_details(trade_id)
+        if details and str(details.get("id")) != str(trade_id):
+            return None
+        return self._closed_fill_from_details(details)
+
+    @classmethod
+    def _closed_fill_from_details(cls, details: Optional[Dict]) -> Optional[dict[str, object]]:
         if not details:
             return None
         state = str(details.get("state") or "").upper()
         current_units = details.get("currentUnits")
-        closed = state == "CLOSED"
-        if not closed and current_units is not None:
-            try:
-                closed = float(current_units) == 0.0
-            except (TypeError, ValueError):
-                closed = False
-        if not closed:
+        if state != "CLOSED":
             return None
+        if current_units is not None:
+            try:
+                if float(current_units) != 0.0:
+                    return None
+            except (TypeError, ValueError):
+                return None
 
         pnl = None
         for key in ("realizedPL", "pl"):
@@ -140,10 +146,14 @@ class LearningProfitProtection(ProfitProtection):
             except (TypeError, ValueError):
                 continue
 
+        closed_at = cls._parse_datetime(details.get("closeTime"))
+        if (pnl is None or not math.isfinite(pnl) or exit_price is None
+                or not math.isfinite(exit_price) or exit_price <= 0 or closed_at is None):
+            return None
         return {
             "pnl": pnl,
             "exit_price": exit_price,
-            "closed_at": self._parse_datetime(details.get("closeTime")),
+            "closed_at": closed_at,
             "reason": "BROKER_CLOSED",
         }
 
@@ -177,7 +187,6 @@ class LearningProfitProtection(ProfitProtection):
                 unresolved[tracked_id] = state
                 continue
             self._close_fills[tracked_id] = fill
-            self._close_fills[f"instrument:{instrument}"] = fill
             self._reconcile_closed(
                 tracked_id,
                 instrument,
@@ -243,45 +252,28 @@ class LearningProfitProtection(ProfitProtection):
         fill = self._extract_close_fill(result)
         if fill.get("pnl") is not None or fill.get("exit_price") is not None:
             self._close_fills[str(trade_id)] = fill
-            self._close_fills[f"instrument:{instrument}"] = fill
         return result
 
-    def _resolve_journal_trade_id(self, broker_trade_id: str, instrument: str) -> str:
+    def _resolve_journal_trade_id(self, broker_trade_id: str, instrument: str) -> Optional[str]:
         journal = self._journal
         path = getattr(journal, "path", None)
         if path is None:
-            return broker_trade_id
+            return None
         try:
             conn = sqlite3.connect(path, timeout=2.0)
             try:
                 row = conn.execute(
-                    "SELECT trade_id FROM trades WHERE trade_id = ? LIMIT 1",
-                    (str(broker_trade_id),),
+                    "SELECT trade_id FROM trades WHERE trade_id = ? AND instrument = ? "
+                    "AND exit_timestamp_utc IS NULL LIMIT 1",
+                    (str(broker_trade_id), instrument),
                 ).fetchone()
                 if row:
-                    return str(row[0])
-                row = conn.execute(
-                    """
-                    SELECT trade_id
-                    FROM trades
-                    WHERE instrument = ? AND exit_timestamp_utc IS NULL
-                    ORDER BY timestamp_utc DESC
-                    LIMIT 1
-                    """,
-                    (instrument,),
-                ).fetchone()
-                if row:
-                    print(
-                        f"[JOURNAL][RECONCILE] broker_trade_id={broker_trade_id} "
-                        f"journal_trade_id={row[0]} instrument={instrument}",
-                        flush=True,
-                    )
                     return str(row[0])
             finally:
                 conn.close()
         except (OSError, sqlite3.Error):
             pass
-        return broker_trade_id
+        return None
 
     def _reconcile_closed(
         self,
@@ -307,8 +299,6 @@ class LearningProfitProtection(ProfitProtection):
             duration_seconds = max(0, int((now_val - open_time).total_seconds()))
 
         fill = self._close_fills.pop(str(trade_id or ""), None)
-        if fill is None:
-            fill = self._close_fills.pop(f"instrument:{instrument}", None)
         resolved_pnl = final_profit
         exit_price = None
         if fill:
@@ -343,7 +333,17 @@ class LearningProfitProtection(ProfitProtection):
 
         if journal is None:
             return
+        if (not fill or fill.get("pnl") is None or fill.get("exit_price") is None
+                or not math.isfinite(float(fill["pnl"]))
+                or not math.isfinite(float(fill["exit_price"])) or float(fill["exit_price"]) <= 0
+                or not isinstance(fill.get("closed_at"), datetime)):
+            print(f"[JOURNAL][DEFER] awaiting confirmed close fill for trade_id={trade_id}", flush=True)
+            return
         journal_trade_id = self._resolve_journal_trade_id(str(trade_id or instrument), instrument)
+        if journal_trade_id is None:
+            print(f"[JOURNAL][DEFER] no exact open entry for broker_trade_id={trade_id}; "
+                  "legacy rows await broker-linked reconciliation.", flush=True)
+            return
         try:
             equity_after = None
             try:

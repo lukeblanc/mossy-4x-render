@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from datetime import datetime, timezone
 import math
 from typing import Dict, Optional
 
@@ -10,6 +11,31 @@ from app.config import settings
 
 PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
+
+
+def opened_trade_fill(payload: object) -> Optional[Dict]:
+    """Return only a verified new trade, never an order or a reduced/closed trade."""
+    if not isinstance(payload, dict):
+        return None
+    fill = payload.get("orderFillTransaction")
+    if not isinstance(fill, dict):
+        return None
+    opened = fill.get("tradeOpened")
+    if not isinstance(opened, dict):
+        return None
+    trade_id = str(opened.get("tradeID") or "")
+    try:
+        price = float(opened["price"])
+        units = float(opened["units"])
+        timestamp = datetime.fromisoformat(str(fill["time"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if (not trade_id.isascii() or not trade_id.isdigit() or int(trade_id) <= 0
+            or not math.isfinite(price) or price <= 0
+            or not math.isfinite(units) or units == 0 or timestamp.tzinfo is None):
+        return None
+    return {"trade_id": trade_id, "price": price, "units": units,
+            "timestamp": timestamp.astimezone(timezone.utc)}
 
 
 def _precision_for(instrument: str) -> Decimal:
@@ -169,18 +195,20 @@ class Broker:
                 resp = client.post(f"/v3/accounts/{self.account}/orders", json=payload)
                 if resp.status_code in (200, 201):
                     data = resp.json()
-                    if self.mode == "demo":
-                        order_id = (
-                            data.get("orderCreateTransaction", {}).get("id")
-                            or data.get("orderFillTransaction", {}).get("id")
-                            or data.get("lastTransactionID")
-                        )
-                        print(f"[OANDA] DEMO ORDER SENT id={order_id}", flush=True)
-                    else:
-                        print(
-                            f"[BROKER] LIVE {side} sent order for {instrument} size={units} resp={resp.status_code}",
-                            flush=True,
-                        )
+                    if not isinstance(data, dict):
+                        return {"status": "UNKNOWN", "reason": "invalid-order-response"}
+                    if data.get("orderCancelTransaction"):
+                        return {"status": "CANCELLED", "response": data}
+                    if data.get("orderRejectTransaction"):
+                        return {"status": "REJECTED", "response": data}
+                    filled = opened_trade_fill(data)
+                    if filled is None:
+                        return {"status": "UNKNOWN", "reason": "no-confirmed-trade-opening", "response": data}
+                    if (data["orderFillTransaction"].get("instrument") != instrument
+                            or filled["units"] * trade_units <= 0):
+                        return {"status": "UNKNOWN", "reason": "fill-does-not-match-request", "response": data}
+                    print(f"[OANDA] DEMO TRADE OPENED trade_id={filled['trade_id']} "
+                          f"price={filled['price']} units={filled['units']}", flush=True)
                     return {"status": "SENT", "response": data}
                 if self.mode == "demo":
                     print(f"[OANDA] DEMO ORDER FAILED {resp.text}", flush=True)
@@ -189,13 +217,14 @@ class Broker:
                         f"[BROKER] LIVE order error {resp.status_code}: {resp.text}",
                         flush=True,
                     )
-                return {"status": "ERROR", "code": resp.status_code, "text": resp.text}
+                return {"status": "UNKNOWN" if resp.status_code >= 500 else "ERROR",
+                        "code": resp.status_code, "text": resp.text}
         except Exception as exc:
             if self.mode == "demo":
                 print(f"[OANDA] DEMO ORDER FAILED {exc}", flush=True)
             else:
                 print(f"[BROKER] LIVE order exception: {exc}", flush=True)
-            return {"status": "ERROR", "error": str(exc)}
+            return {"status": "UNKNOWN", "error": str(exc)}
 
     def list_open_trades(self) -> Optional[list]:
         """Return currently open trades, or ``None`` when the broker cannot be read.

@@ -27,15 +27,15 @@ class FakeClient:
         return False
 
     def get(self, path: str, params=None):
-        if path.endswith("/orders/order-1"):
+        if path.endswith("/orders/101"):
             return FakeResponse(
                 200,
-                {"order": {"id": "order-1", "fillingTransactionID": "fill-1"}},
+                {"order": {"id": "101", "fillingTransactionID": "102"}},
             )
-        if path.endswith("/transactions/fill-1"):
+        if path.endswith("/transactions/102"):
             return FakeResponse(
                 200,
-                {"transaction": {"id": "fill-1", "tradeOpened": {"tradeID": "trade-99"}}},
+                {"transaction": {"id": "102", "tradeOpened": {"tradeID": "102"}}},
             )
         if path.endswith("/transactions/sinceid"):
             return FakeResponse(200, {"transactions": []})
@@ -122,11 +122,11 @@ def _read_exit(journal: TradeJournal, trade_id: str):
 
 def test_untracked_fast_close_is_recovered_from_journal(tmp_path):
     journal = TradeJournal(tmp_path / "trade_journal.db")
-    _record_entry(journal, "trade-42")
+    _record_entry(journal, "42")
     broker = ClosedTradeBroker(
         {
-            "trade-42": {
-                "id": "trade-42",
+            "42": {
+                "id": "42",
                 "instrument": "AUD_USD",
                 "state": "CLOSED",
                 "currentUnits": "0",
@@ -145,8 +145,8 @@ def test_untracked_fast_close_is_recovered_from_journal(tmp_path):
 
     closed = guard.process_open_trades([])
 
-    assert closed == ["trade-42"]
-    row = _read_exit(journal, "trade-42")
+    assert closed == ["42"]
+    row = _read_exit(journal, "42")
     assert row is not None
     assert row[0] == "2026-07-13T01:00:20+00:00"
     assert row[1] == pytest.approx(0.659)
@@ -157,16 +157,16 @@ def test_untracked_fast_close_is_recovered_from_journal(tmp_path):
 
 def test_legacy_order_id_closes_exact_row_not_newer_same_instrument(tmp_path):
     journal = TradeJournal(tmp_path / "trade_journal.db")
-    opened = _record_entry(journal, "order-1")
+    opened = _record_entry(journal, "101")
     _record_entry(
         journal,
-        "later-open",
+        "201",
         opened=opened + timedelta(minutes=30),
     )
     broker = ClosedTradeBroker(
         {
-            "trade-99": {
-                "id": "trade-99",
+            "102": {
+                "id": "102",
                 "instrument": "AUD_USD",
                 "state": "CLOSED",
                 "currentUnits": "0",
@@ -185,19 +185,19 @@ def test_legacy_order_id_closes_exact_row_not_newer_same_instrument(tmp_path):
 
     closed = guard.process_open_trades([])
 
-    assert closed == ["trade-99"]
-    row = _read_exit(journal, "order-1")
+    assert closed == ["102"]
+    row = _read_exit(journal, "101")
     assert row is not None
     assert row[0] == "2026-07-13T01:00:15+00:00"
     assert row[1] == pytest.approx(0.661)
     assert row[2] == pytest.approx(0.85)
     assert row[3] == "BROKER_CLOSED"
-    later = _read_exit(journal, "later-open")
+    later = _read_exit(journal, "201")
     assert later is not None
     assert later[0] is None
     with sqlite3.connect(journal.path) as conn:
         orphan = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE trade_id = 'trade-99'"
+            "SELECT COUNT(*) FROM trades WHERE trade_id = '102'"
         ).fetchone()[0]
     assert orphan == 0
 
@@ -205,9 +205,9 @@ def test_legacy_order_id_closes_exact_row_not_newer_same_instrument(tmp_path):
 def test_impossible_misbound_exit_is_reopened_for_exact_reconciliation(tmp_path):
     journal = TradeJournal(tmp_path / "trade_journal.db")
     opened = datetime(2026, 7, 13, 2, 0, tzinfo=timezone.utc)
-    _record_entry(journal, "wrong-target", opened=opened)
+    _record_entry(journal, "301", opened=opened)
     journal.record_exit(
-        trade_id="wrong-target",
+        trade_id="301",
         exit_timestamp_utc=opened - timedelta(minutes=30),
         exit_price=0.659,
         spread_at_exit=0.8,
@@ -231,7 +231,7 @@ def test_impossible_misbound_exit_is_reopened_for_exact_reconciliation(tmp_path)
 
     guard.process_open_trades([])
 
-    row = _read_exit(journal, "wrong-target")
+    row = _read_exit(journal, "301")
     assert row is not None
     assert row == (None, None, None, None, None)
 
