@@ -1,3 +1,4 @@
+from order_fakes import confirmed_order_result
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -220,7 +221,7 @@ def test_decision_cycle_updates_watchdog_on_success(monkeypatch):
                     "entry_price": entry_price,
                 }
             )
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -342,7 +343,7 @@ def test_decision_cycle_keeps_tp_disabled_when_configured(monkeypatch):
             entry_price: float | None = None,
         ) -> Dict[str, str]:
             self.calls.append({"tp_distance": tp_distance})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -487,7 +488,7 @@ def test_decision_cycle_blocks_entries_outside_session(monkeypatch, capsys):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -634,7 +635,7 @@ def test_decision_cycle_blocks_entries_on_weekend(monkeypatch, capsys):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -795,7 +796,7 @@ def test_decision_cycle_allows_entries_inside_session(monkeypatch):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -917,7 +918,7 @@ def test_live_mode_ignores_weekend_lock(monkeypatch, capsys):
             **kwargs,
         ) -> Dict[str, str]:
             self.calls.append({"instrument": instrument, "signal": signal, "units": units})
-            return {"status": "SENT"}
+            return confirmed_order_result(instrument, signal, units)
 
         def account_equity(self) -> float:
             return 10_000.0
@@ -1138,7 +1139,7 @@ def test_decision_cycle_fetches_open_trades_once_for_duplicate_checks(monkeypatc
 
         def place_order(self, *args, **kwargs):
             self.place_calls += 1
-            return {"status": "SENT"}
+            return confirmed_order_result(*args[:3])
 
     dummy_broker = DummyBroker()
     monkeypatch.setattr(main, "engine", DummyEngine())

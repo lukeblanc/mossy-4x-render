@@ -5,17 +5,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from order_fakes import confirmed_order_result
+
 from app.broker import Broker
 from app.config import settings
 
 
 class DummyResponse:
-    def __init__(self, status_code: int = 201):
+    def __init__(self, status_code: int = 201, payload=None):
         self.status_code = status_code
+        self.payload = payload or {}
 
-    @staticmethod
-    def json():
-        return {"orderCreateTransaction": {"id": "1"}}
+    def json(self):
+        return self.payload
 
 
 class DummyClient:
@@ -32,7 +34,10 @@ class DummyClient:
         self.recorder["path"] = path
         self.recorder["payload"] = json
         self.recorder["method"] = "post"
-        return DummyResponse()
+        order = json["order"]
+        units = int(order["units"])
+        result = confirmed_order_result(order["instrument"], "BUY" if units > 0 else "SELL", abs(units))
+        return DummyResponse(payload=result["response"])
 
     def put(self, path: str, json):
         self.recorder["path"] = path

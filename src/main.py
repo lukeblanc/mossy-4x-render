@@ -50,7 +50,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.broker import Broker
+from app.broker import Broker, opened_trade_fill
 from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
@@ -357,22 +357,8 @@ def _calc_exit_prices(signal: str, entry_price: float | None, sl_distance: float
 
 
 def _order_ticket(result: Dict) -> str | None:
-    if not isinstance(result, dict):
-        return None
-    resp = result.get("response", {}) or {}
-    tx_keys = (
-        "orderCreateTransaction",
-        "orderFillTransaction",
-        "takeProfitOrderTransaction",
-        "stopLossOrderTransaction",
-    )
-    for key in tx_keys:
-        tx = resp.get(key) or {}
-        for id_key in ("tradeOpenedID", "id", "orderID", "orderFillTransactionID"):
-            if tx.get(id_key) is not None:
-                return str(tx[id_key])
-    last_id = resp.get("lastTransactionID") or result.get("order_id") or result.get("id")
-    return str(last_id) if last_id is not None else None
+    fill = opened_trade_fill(result.get("response")) if isinstance(result, dict) else None
+    return fill["trade_id"] if fill else None
 
 
 config = load_config()
@@ -1559,8 +1545,14 @@ async def decision_cycle() -> None:
                 f"instrument={evaluation.instrument} action={evaluation.signal} status={result.get('status', 'UNKNOWN')}",
             )
             if result.get("status") == "SENT":
-                sl_price, tp_price = _calc_exit_prices(evaluation.signal, entry_price, sl_distance, tp_distance)
-                ticket = _order_ticket(result) or f"local-{uuid.uuid4().hex}"
+                fill = opened_trade_fill(result.get("response"))
+                if fill is None:
+                    cycle_stats["skipped"] += 1
+                    print("[ORDER][WARN] Unverified trade opening; remaining entries skipped until broker refresh.", flush=True)
+                    break
+                ticket = fill["trade_id"]
+                sl_price, _ = _calc_exit_prices(evaluation.signal, fill["price"], sl_distance, None)
+                _, tp_price = _calc_exit_prices(evaluation.signal, entry_price, None, tp_distance)
                 session_id_label = "OFF_SESSION"
                 if active_session:
                     session_id_label = (active_session.name or "SESSION").upper()
@@ -1581,15 +1573,17 @@ async def decision_cycle() -> None:
                     "risk_ok": ok_to_open,
                     "trend_ok": trend_ok,
                     "xau_guard_ok": not (xau_blocked or xau_guard_block),
+                    "entry_source": "broker_fill",
+                    "signal_price": entry_price,
                 }
                 try:
                     journal.record_entry(
                         trade_id=ticket,
-                        timestamp_utc=now_utc,
+                        timestamp_utc=fill["timestamp"],
                         instrument=evaluation.instrument,
                         side=evaluation.signal,
-                        units=units,
-                        entry_price=entry_price,
+                        units=abs(fill["units"]),
+                        entry_price=fill["price"],
                         stop_loss_price=sl_price,
                         take_profit_price=tp_price,
                         spread_at_entry=spread_pips,
@@ -1600,9 +1594,8 @@ async def decision_cycle() -> None:
                         indicators_snapshot=indicators_snapshot,
                         equity_after=equity,
                     )
-                except Exception:
-                    # Journal failures must not block live execution.
-                    pass
+                except Exception as exc:
+                    print(f"[JOURNAL][ERROR] entry save failed trade_id={ticket} error={exc}", flush=True)
                 engine.mark_trade(evaluation.instrument)
                 open_trades.append({"instrument": evaluation.instrument, "id": ticket})
                 risk.register_entry(now_utc, evaluation.instrument)
@@ -1624,6 +1617,10 @@ async def decision_cycle() -> None:
                     f" response={result}",
                     flush=True,
                 )
+                if result.get("status") == "UNKNOWN":
+                    # A timed-out request may already have filled. Read the broker
+                    # again next cycle before making another exposure decision.
+                    break
     finally:
         finished_utc = _utc_now()
         cycle_duration = max(0.0, time.monotonic() - started_monotonic)

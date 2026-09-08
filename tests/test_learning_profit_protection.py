@@ -68,7 +68,7 @@ class BrokerWithExternalClose(BrokerWithCloseFill):
 
 def _record_entry(journal: TradeJournal, opened: datetime) -> None:
     journal.record_entry(
-        trade_id="order-1",
+        trade_id="broker-trade-99",
         timestamp_utc=opened,
         instrument="AUD_USD",
         side="BUY",
@@ -93,11 +93,11 @@ def _read_result(journal: TradeJournal):
             SELECT exit_timestamp_utc, exit_price, realized_pnl_ccy,
                    exit_reason, broker_confirmed, side, entry_price
             FROM trades
-            WHERE trade_id = 'order-1'
+            WHERE trade_id = 'broker-trade-99'
             """
         ).fetchone()
         orphan = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE trade_id = 'broker-trade-99'"
+            "SELECT COUNT(*) FROM trades WHERE timestamp_utc IS NULL"
         ).fetchone()[0]
     return row, orphan
 
