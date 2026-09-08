@@ -127,7 +127,11 @@ def units_for_risk(
     if not math.isfinite(raw_units) or raw_units <= 0:
         return 0, {}
 
-    final_units = max(int(min_trade_units), int(raw_units))
+    # Rounding up to the broker minimum must never exceed the cash-risk budget.
+    final_units = int(raw_units)
+    if final_units < max(1, int(min_trade_units)):
+        return 0, {"risk_amount": risk_amount, "final_units": 0,
+                   "reason": "minimum-units-exceed-risk-budget"}
     diagnostics = {
         "equity": equity,
         "risk_pct": effective_risk_pct,

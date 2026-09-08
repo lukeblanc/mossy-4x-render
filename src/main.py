@@ -430,7 +430,7 @@ config["time_stop"] = {
 }
 
 # Baseline risk defaults
-risk_config.setdefault("risk_per_trade_pct", float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005))))
+risk_config["risk_per_trade_pct"] = float(os.getenv("MAX_RISK_PER_TRADE", risk_config.get("risk_per_trade_pct", 0.005)))
 sl_default = risk_config.get("sl_atr_mult", risk_config.get("atr_stop_mult", config.get("sl_atr_mult", 1.2)))
 tp_default = risk_config.get("tp_atr_mult", risk_config.get("tp_rr_multiple", config.get("tp_atr_mult", 1.0)))
 risk_config["sl_atr_mult"] = float(os.getenv("SL_ATR_MULT", os.getenv("ATR_STOP_MULT", sl_default)))
@@ -442,9 +442,9 @@ risk_config.setdefault("cooldown_candles", int(os.getenv("COOLDOWN_CANDLES", ris
 env_max_positions = os.getenv("MAX_CONCURRENT_POSITIONS") or os.getenv("MAX_OPEN_TRADES")
 max_positions_default = risk_config.get("max_concurrent_positions", config.get("max_open_trades", 3))
 risk_config["max_concurrent_positions"] = int(env_max_positions or max_positions_default or 3)
-risk_config.setdefault("daily_loss_cap_pct", float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02))))
-risk_config.setdefault("weekly_loss_cap_pct", float(os.getenv("WEEKLY_LOSS_CAP_PCT", risk_config.get("weekly_loss_cap_pct", 0.03))))
-risk_config.setdefault("max_drawdown_cap_pct", float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10))))
+risk_config["daily_loss_cap_pct"] = float(os.getenv("DAILY_LOSS_CAP_PCT", risk_config.get("daily_loss_cap_pct", 0.02)))
+risk_config["weekly_loss_cap_pct"] = float(os.getenv("WEEKLY_LOSS_CAP_PCT", risk_config.get("weekly_loss_cap_pct", 0.03)))
+risk_config["max_drawdown_cap_pct"] = float(os.getenv("MAX_DRAWDOWN_CAP_PCT", risk_config.get("max_drawdown_cap_pct", 0.10)))
 risk_config.setdefault("max_total_open_risk_pct", float(os.getenv("MAX_TOTAL_OPEN_RISK", risk_config.get("max_total_open_risk_pct", 0.02))))
 risk_config.setdefault("daily_profit_target_usd", float(os.getenv("DAILY_PROFIT_TARGET_USD", risk_config.get("daily_profit_target_usd", 5.0))))
 risk_config["max_trades_per_day"] = int(os.getenv("MAX_TRADES_PER_DAY", risk_config.get("max_trades_per_day", 0) or 0))
@@ -520,7 +520,8 @@ async def heartbeat() -> None:
 
     ts_local = now_utc.astimezone().isoformat()
     equity = broker.account_equity()
-    open_count = len(_open_trades_state(force_refresh=False))
+    open_snapshot = _open_trades_state(force_refresh=False)
+    open_count = len(open_snapshot) if open_snapshot is not None else None
 
     journal_path = journal.path
     journal_exists = journal_path.exists()
@@ -556,9 +557,9 @@ async def heartbeat() -> None:
     )
 
     BOT_STATE.update({
-        "status": "running",
-        "equity": float(equity),
-        "open_trades": int(open_count),
+        "status": "running" if equity is not None and open_count is not None else "broker-unavailable",
+        "equity": equity,
+        "open_trades": open_count,
         "last_heartbeat": _utc_now().isoformat(),
     })
     health = _health_status(now_utc)
@@ -572,7 +573,7 @@ async def heartbeat() -> None:
         "INFO",
         cycle_context,
         "HEARTBEAT",
-        f"{ts_local} equity={equity:.2f} open_trades={open_count}",
+        f"{ts_local} equity={equity if equity is not None else 'unavailable'} open_trades={open_count}",
     )
 
     if snap is not None:
@@ -780,12 +781,19 @@ def _startup_checks() -> None:
         print(f"[STARTUP-RESET][WARN] Unable to fetch equity for reset: {exc}", flush=True)
         return
 
+    if equity is None:
+        print("[STARTUP-RESET][WARN] Equity unavailable; startup resets skipped.", flush=True)
+        return
+
     try:
         open_trades = _open_trades_state(force_refresh=True)
-        open_count = len(open_trades or [])
+        if open_trades is None:
+            print("[STARTUP-RESET][WARN] Positions unavailable; startup resets skipped.", flush=True)
+            return
+        open_count = len(open_trades)
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[STARTUP-RESET][WARN] Unable to inspect open trades: {exc}", flush=True)
-        open_count = 0
+        return
 
     risk.startup_daily_reset(equity, open_positions_count=open_count)
     snap = _safe_adaptive_snapshot("startup")
@@ -818,7 +826,7 @@ def _startup_checks() -> None:
             print("[RISK] RESET_WEEKLY_LOSS_CAP requested but no weekly baseline changes were needed", flush=True)
 
 
-def _open_trades_state(*, force_refresh: bool = True) -> List[Dict]:
+def _open_trades_state(*, force_refresh: bool = True) -> List[Dict] | None:
     global _LAST_BROKER_SYNC_TS, _LAST_OPEN_TRADES_TS, _LAST_OPEN_TRADES_SNAPSHOT
     if not force_refresh and _LAST_OPEN_TRADES_TS is not None:
         age = _age_seconds(_LAST_OPEN_TRADES_TS)
@@ -826,20 +834,18 @@ def _open_trades_state(*, force_refresh: bool = True) -> List[Dict]:
             return list(_LAST_OPEN_TRADES_SNAPSHOT)
     try:
         trades = broker.list_open_trades()
+        if trades is None:
+            _LAST_OPEN_TRADES_TS = None
+            print("[TRADE][WARN] Broker returned no open-trade snapshot; entries blocked.", flush=True)
+            return None
         _LAST_BROKER_SYNC_TS = _utc_now()
         _LAST_OPEN_TRADES_TS = _LAST_BROKER_SYNC_TS
         _LAST_OPEN_TRADES_SNAPSHOT = list(trades or [])
         return list(_LAST_OPEN_TRADES_SNAPSHOT)
-    except AttributeError:
-        # Older broker implementations may not yet expose list_open_trades.
-        _LAST_BROKER_SYNC_TS = _utc_now()
-        _LAST_OPEN_TRADES_TS = _LAST_BROKER_SYNC_TS
-        _LAST_OPEN_TRADES_SNAPSHOT = []
-        return []
     except Exception as exc:
-        _LAST_BROKER_SYNC_TS = _utc_now()
+        _LAST_OPEN_TRADES_TS = None
         print(f"[TRADE][WARN] Unable to refresh open trades: {exc}", flush=True)
-        return []
+        return None
 
 
 def _trade_identifier(trade: Dict) -> str | None:
@@ -897,7 +903,8 @@ def _age_seconds(ts: datetime | None, now_utc: datetime | None = None) -> float 
 
 def _health_status(now_utc: datetime | None = None) -> Dict:
     now = now_utc or _utc_now()
-    open_count = len(_open_trades_state(force_refresh=False))
+    open_snapshot = _open_trades_state(force_refresh=False)
+    open_count = len(open_snapshot) if open_snapshot is not None else None
     return {
         "scheduler_alive": _scheduler_alive(),
         "last_cycle_age_sec": CYCLE_HEALTH.cycle_age_seconds(now),
@@ -914,9 +921,12 @@ def _instrument_open_on_broker(instrument: str, open_trades: List[Dict] | None =
             trades = broker.list_open_trades()
         except Exception as exc:
             print(f"[TRADE][WARN] Unable to verify broker positions for {instrument}: {exc}", flush=True)
-            return False
+            return True  # Unknown exposure must prevent an additional entry.
     else:
         trades = open_trades
+
+    if trades is None:
+        return True
 
     for trade in trades or []:
         if trade.get("instrument") == instrument:
@@ -1204,13 +1214,16 @@ async def decision_cycle() -> None:
         "blocked_max_positions": 0,
         "blocked_spread": 0,
     }
-    equity = broker.account_equity()
     try:
-        risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
-    except AttributeError:
-        pass
-
-    try:
+        equity = broker.account_equity()
+        if equity is None:
+            watchdog.record_error()
+            print("[TRADE][WARN] Broker equity unavailable; trading cycle skipped.", flush=True)
+            return
+        try:
+            risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
+        except AttributeError:
+            pass
         evaluations = engine.evaluate_all()
     except Exception as exc:  # pragma: no cover - defensive logging
         watchdog.record_error()
@@ -1219,6 +1232,10 @@ async def decision_cycle() -> None:
         return
     else:
         open_trades = _open_trades_state()
+        if open_trades is None:
+            watchdog.record_error()
+            print("[TRADE][WARN] Open-trade snapshot unavailable; trading cycle skipped.", flush=True)
+            return
         # --- Profit-protection rule ($3 trigger / $0.50 trail) ---
         closed_by_trail = profit_guard.process_open_trades(open_trades)
         if closed_by_trail:
@@ -1308,6 +1325,16 @@ async def decision_cycle() -> None:
                 spread_pips = broker.current_spread(evaluation.instrument)
             except AttributeError:
                 spread_pips = None
+
+            if spread_pips is None:
+                cycle_stats["skipped"] += 1
+                cycle_stats["blocked_spread"] += 1
+                _record_block_reason(evaluation.instrument, "spread-unavailable")
+                print(
+                    f"[TRADE] Skipping {evaluation.instrument}; broker spread unavailable",
+                    flush=True,
+                )
+                continue
 
             ok_to_open, risk_reason = risk.should_open(
                 now_utc,
@@ -1629,8 +1656,37 @@ async def runner() -> None:
     global _SCHEDULER_REF
     _startup_checks()
 
+    print(
+        f"[EFFECTIVE-RISK] mode={mode_env} oanda_env={oanda_env} "
+        f"base_pct={risk.risk_per_trade_pct * 100:.3f} "
+        f"cash_sizing_cap={position_sizer._max_risk_per_trade_ccy():.2f} "
+        f"cash_close_threshold={profit_guard.hard_max_loss_ccy:.2f} "
+        f"daily_cap={risk.daily_loss_cap_pct:.3f} weekly_cap={risk.weekly_loss_cap_pct:.3f} "
+        f"drawdown_cap={risk.max_drawdown_cap_pct:.3f} max_positions={risk.max_concurrent_positions} "
+        f"max_entries={risk.max_trades_per_day} "
+        f"drawdown_halted={risk.state.max_drawdown_halt} state_path={risk._state_file}",
+        flush=True,
+    )
+    try:
+        from src.weekly_ops_report import build_weekly_report, save_report, start_weekly_ops_monitor
+        report = build_weekly_report(journal.path)
+        save_report(report)
+        print(
+            f"[ALGO-REPORT][STARTUP] journal={report.journal_path} "
+            f"window_start={report.week_start_utc} window_end={report.week_end_utc} "
+            f"closed_trades={report.total.trades} wins={report.total.wins} losses={report.total.losses} "
+            f"net={report.total.net_pnl:.2f} expectancy={report.total.expectancy:.4f} "
+            f"profit_factor={report.total.profit_factor} "
+            f"open_journal_rows={report.open_trades} alerts={report.alerts}",
+            flush=True,
+        )
+        start_weekly_ops_monitor()
+    except Exception as exc:
+        print(f"[ALGO-REPORT][ERROR] startup report unavailable: {exc}", flush=True)
+
     equity = broker.account_equity()
-    send_snapshot("luke", equity)
+    if equity is not None:
+        send_snapshot("luke", equity)
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(heartbeat, "interval", minutes=1)
@@ -1736,4 +1792,3 @@ if __name__ == "__main__":
 
     launch_status_server_thread()
     asyncio.run(runner())
-

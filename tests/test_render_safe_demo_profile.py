@@ -11,7 +11,9 @@ def _run_config_import(tmp_path: Path) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            "PYTHONPATH": os.pathsep.join(filter(None, [
+                str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH")
+            ])),
             "RENDER_GIT_COMMIT": "test-commit",
             "MOSSY_STATE_PATH": str(tmp_path),
             "MODE": "demo",
@@ -64,5 +66,5 @@ def test_render_safe_demo_profile_overrides_stale_dashboard_values(tmp_path: Pat
 
     second = _run_config_import(tmp_path)
     assert second["RESET_MAX_DRAWDOWN_HALT"] == "false"
-    assert (tmp_path / ".safe_demo_drawdown_recovery_20260805_applied").exists()
+    assert not (tmp_path / ".safe_demo_drawdown_recovery_20260805_applied").exists()
 

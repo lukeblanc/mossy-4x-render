@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,7 +43,7 @@ def _sanitize_equity(equity: Optional[float]) -> Optional[float]:
         value = float(equity)
     except (TypeError, ValueError):
         return None
-    if value <= 0.0:
+    if not math.isfinite(value) or value <= 0.0:
         return None
     return value
 
@@ -259,22 +261,41 @@ class RiskManager:
     # Persistence helpers
     # ------------------------------------------------------------------
     def _load_state(self) -> None:
+        self._state_load_failed = False
+        self._state_save_failed = False
         if not self._state_file.exists():
             return
         try:
             with self._state_file.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-        except Exception:
-            return
-        self.state = RiskState.from_dict(payload)
+            self.state = RiskState.from_dict(payload)
+        except Exception as exc:
+            self._state_load_failed = True
+            print(f"[RISK-STATE][ERROR] Cannot load {self._state_file}; entries blocked: {exc}", flush=True)
 
     def _save_state(self) -> None:
+        if self._state_load_failed:
+            return  # Preserve unreadable evidence; never replace it with empty state.
         payload = self.state.to_dict()
+        temporary = None
         try:
-            with self._state_file.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-        except Exception:
-            pass
+            with tempfile.NamedTemporaryFile(mode="w", dir=self._state_file.parent,
+                                             delete=False, encoding="utf-8") as handle:
+                temporary = Path(handle.name)
+                json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._state_file)
+            self._state_save_failed = False
+        except Exception as exc:
+            self._state_save_failed = True
+            print(f"[RISK-STATE][ERROR] Cannot save {self._state_file}; entries blocked: {exc}", flush=True)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -285,6 +306,8 @@ class RiskManager:
         equity: float,
         close_all_cb: Callable[[], None],
     ) -> None:
+        if _sanitize_equity(equity) is None:
+            return
         self._rollover(now_utc, equity)
         self._update_peak_equity(equity)
         self._remember_equity(equity)
@@ -323,10 +346,25 @@ class RiskManager:
         spread_pips: Optional[float],
         atr_price_units: Optional[float] = None,
     ) -> Tuple[bool, str]:
+        if self._state_load_failed:
+            return False, "risk-state-unreadable"
+        if self._state_save_failed:
+            self._save_state()
+            if self._state_save_failed:
+                return False, "risk-state-unwritable"
+        if _sanitize_equity(equity) is None:
+            return False, "equity-unavailable"
+        if open_positions is None:
+            return False, "positions-unavailable"
         self._rollover(now_utc, equity)
         open_positions_count = len(open_positions) if open_positions is not None else None
         self._maybe_shift_baselines_for_adjustment(equity, open_positions_count)
         self._update_peak_equity(equity)
+        if self._breached_max_drawdown(equity):
+            self.state.max_drawdown_halt = True
+            self._save_state()
+        if self._state_save_failed:
+            return False, "risk-state-unwritable"
 
         if self.mode == "live":
             if equity <= self.equity_floor:
@@ -494,15 +532,11 @@ class RiskManager:
             self._save_state()
         return changed
 
-    def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0) -> None:
-        """
-        Reset daily baselines after startup equity retrieval.
+    def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0,
+                            now_utc: Optional[datetime] = None) -> None:
+        """Initialize missing/current-period baselines, preserving same-day risk state."""
 
-        Demo: always apply.
-        Live: apply only at startup (assumed no open trades) and only once.
-        """
-
-        if self._startup_reset_done:
+        if self._startup_reset_done or self._state_load_failed:
             return
 
         if not self.demo_mode and self.mode != "live":
@@ -517,20 +551,19 @@ class RiskManager:
             # Avoid altering live baselines mid-trade
             return
 
-        self.state.day_start_equity = valid_equity
-        self.state.day_start_equity_utc = valid_equity
-        self.state.peak_equity_today = valid_equity
-        self.state.daily_pl = 0.0
-        self.state.drawdown_pct = 0.0
-        self.state.daily_profit_cap_hit = False
-        self.state.daily_loss_cap_hit = False
+        self._rollover(now_utc or datetime.now(timezone.utc), valid_equity)
+        if self.state.peak_equity_today is None:
+            self.state.peak_equity_today = valid_equity
+        self._update_peak_equity(valid_equity)
         self._last_equity_seen = valid_equity
         self._startup_reset_done = True
         self._save_state()
 
         mode_label = "demo" if self.demo_mode else "live"
         print(
-            f"[STARTUP-RESET][WARN] mode={mode_label} equity={valid_equity:.2f}; daily baselines reset.",
+            f"[STARTUP-RISK] mode={mode_label} equity={valid_equity:.2f} "
+            f"day_baseline={self.state.day_start_equity} week_baseline={self.state.week_start_equity} "
+            f"peak={self.state.peak_equity} halt={self.state.max_drawdown_halt}; persisted limits preserved.",
             flush=True,
         )
 
@@ -643,8 +676,10 @@ class RiskManager:
             self.state.day_start_equity = valid_equity
             self.state.daily_realized_pl = 0.0
             self.state.loss_streak_pause_until = None
-            if self.state.max_drawdown_halt:
-                self.state.max_drawdown_halt = False
+            self.state.peak_equity_today = valid_equity
+            self.state.daily_pl = 0.0
+            self.state.drawdown_pct = 0.0
+            self.state.daily_loss_cap_hit = False
             if prev_day_id is not None:
                 self.state.daily_entry_count = 0
             changed = True
