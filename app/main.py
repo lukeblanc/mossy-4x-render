@@ -19,6 +19,7 @@ from src.risk_setup import (
     build_risk_manager,
     resolve_state_dir,
 )
+from src import profit_protection
 
 broker = Broker()
 STATE_DIR = resolve_state_dir(Path(__file__).resolve().parent.parent / "data")
@@ -207,17 +208,29 @@ async def decision_tick():
     """Run the strategy decision, log diagnostics, and place demo orders."""
     now_utc = datetime.now(timezone.utc)
     equity = broker.account_equity()
+    if equity is None:
+        watchdog.record_error()
+        print("[TRADE][WARN] Equity unavailable; entries skipped.", flush=True)
+        return
     try:
         risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
     except AttributeError:
         pass
 
     open_trades = broker.list_open_trades()
+    if open_trades is None:
+        watchdog.record_error()
+        print("[TRADE][WARN] Positions unavailable; entries skipped.", flush=True)
+        return
     closed_by_trail = profit_guard.process_open_trades(open_trades)
     if closed_by_trail:
         open_trades = _filter_closed_trades(open_trades, closed_by_trail)
 
     spread_pips = broker.current_spread(settings.INSTRUMENT)
+    if spread_pips is None:
+        watchdog.record_error()
+        print("[TRADE][WARN] Spread unavailable; entries skipped.", flush=True)
+        return
     ts_local = now_utc.astimezone()
 
     try:

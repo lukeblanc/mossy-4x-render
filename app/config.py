@@ -44,18 +44,19 @@ def _apply_render_safe_demo_profile() -> None:
         "MERGE_DEFAULT_INSTRUMENTS": "false",
         "ENABLE_RISK_CAP": "true",
         "MAX_RISK_PER_TRADE_CAP_PCT": "0.5",
+        "MAX_RISK_PER_TRADE": "0.0025",
         "ALLOW_HIGH_RISK": "false",
         "DAILY_LOSS_CAP_PCT": "0.01",
         "WEEKLY_LOSS_CAP_PCT": "0.03",
         "MAX_DRAWDOWN_CAP_PCT": "0.05",
-        "MAX_OPEN_TRADES": "3",
+        "MAX_OPEN_TRADES": "2",
         "COOLDOWN_CANDLES": "9",
         "TP_ENABLED": "true",
         "ADAPTIVE_TUNING_ENABLED": "true",
         "ADAPTIVE_WINDOW_START_UTC": "2026-07-13T12:47:00+00:00",
         "ADAPTIVE_RUN_TAG": "MINI_RUN",
         "ADAPTIVE_LOOKBACK": "80",
-        "ADAPTIVE_MIN_SAMPLE": "8",
+        "ADAPTIVE_MIN_SAMPLE": "20",
         "ADAPTIVE_POLICY_ENABLED": "true",
         "ADAPTIVE_POLICY_LOOKBACK": "200",
         "ADAPTIVE_POLICY_MIN_EXACT": "6",
@@ -67,46 +68,43 @@ def _apply_render_safe_demo_profile() -> None:
         "SHADOW_COHORT_START_UTC": "2026-07-13T12:47:00+00:00",
         "SHADOW_INTERVAL_SECONDS": "3600",
         "SHADOW_TRAIN_RATIO": "0.70",
-        "SHADOW_MIN_TRAIN": "20",
-        "SHADOW_MIN_VALIDATION": "10",
-        "SHADOW_MIN_COVERAGE": "0.35",
+        "SHADOW_MIN_TRAIN": "50",
+        "SHADOW_MIN_VALIDATION": "30",
+        "SHADOW_MIN_COVERAGE": "0.50",
         "ENABLE_PROJECTOR": "true",
         "VERBOSE_MARKET_LOGS": "false",
         "OPEN_TRADES_CACHE_TTL_SECONDS": "15",
     }
+    # Preserve stricter operational limits regardless of Python import order.
+    preserved = {key: os.environ[key] for key in (
+        "ADAPTIVE_MIN_SAMPLE", "SHADOW_MIN_TRAIN", "SHADOW_MIN_VALIDATION",
+        "SHADOW_MIN_COVERAGE", "DAILY_LOSS_CAP_PCT", "WEEKLY_LOSS_CAP_PCT",
+        "MAX_DRAWDOWN_CAP_PCT", "MAX_RISK_PER_TRADE_CAP_PCT", "MAX_RISK_PER_TRADE",
+    ) if key in os.environ}
     os.environ.update(safe_values)
+    for key in ("DAILY_LOSS_CAP_PCT", "WEEKLY_LOSS_CAP_PCT", "MAX_DRAWDOWN_CAP_PCT", "MAX_RISK_PER_TRADE_CAP_PCT", "MAX_RISK_PER_TRADE"):
+        try:
+            value = float(preserved.get(key, safe_values[key]))
+            if 0 < value < float(safe_values[key]):
+                os.environ[key] = str(value)
+        except (TypeError, ValueError):
+            pass
+    for key in ("ADAPTIVE_MIN_SAMPLE", "SHADOW_MIN_TRAIN", "SHADOW_MIN_VALIDATION", "SHADOW_MIN_COVERAGE"):
+        if key in preserved:
+            os.environ[key] = preserved[key]
+    from src import apply_runtime_safety_floors
+    apply_runtime_safety_floors()
+    os.environ["MAX_OPEN_TRADES"] = os.environ["MAX_CONCURRENT_POSITIONS"]
 
-    state_root_value = os.getenv("MOSSY_STATE_PATH")
-    if state_root_value:
-        state_root = Path(state_root_value)
-    elif Path("/var/data").exists():
-        state_root = Path("/var/data")
-    else:
-        state_root = Path("data")
-
-    # One-time demo migration: re-anchor the stale persistent max-drawdown
-    # baseline on the next deployment only. Live mode remains disabled and the
-    # max-drawdown guard itself is not weakened or removed.
-    marker = state_root / ".safe_demo_drawdown_recovery_20260805_applied"
-    reset_requested = False
-    try:
-        state_root.mkdir(parents=True, exist_ok=True)
-        if not marker.exists():
-            os.environ["RESET_MAX_DRAWDOWN_HALT"] = "true"
-            marker.write_text("safe demo drawdown recovery applied\n", encoding="utf-8")
-            reset_requested = True
-        else:
-            os.environ["RESET_MAX_DRAWDOWN_HALT"] = "false"
-    except OSError as exc:
-        os.environ["RESET_MAX_DRAWDOWN_HALT"] = "false"
-        print(f"[SAFE-DEMO][WARN] unable to write migration marker: {exc}", flush=True)
+    # A restart is not evidence of a deposit or permission to erase losses.
+    os.environ["RESET_MAX_DRAWDOWN_HALT"] = "false"
+    os.environ["RESET_WEEKLY_LOSS_CAP"] = "false"
 
     print(
         "[SAFE-DEMO] enforced mode=demo oanda_env=practice "
         "instruments=AUD_USD,GBP_USD session=SOFT aggressive=false "
         "risk_cap_pct=0.5 adaptive_policy=true lifetime_memory=true "
-        "shadow_learning=true shadow_auto_apply=false one_time_drawdown_reset="
-        f"{str(reset_requested).lower()}",
+        "shadow_learning=true shadow_auto_apply=false automatic_risk_resets=false",
         flush=True,
     )
 

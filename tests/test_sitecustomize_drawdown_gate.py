@@ -33,13 +33,14 @@ def _run_gate(tmp_path: Path, halted: bool) -> tuple[str, bool]:
     return completed.stdout, marker.exists()
 
 
-def test_active_halt_arms_existing_recovery(tmp_path: Path) -> None:
+def test_active_halt_does_not_arm_recovery_on_import(tmp_path: Path) -> None:
     output, marker_exists = _run_gate(tmp_path, halted=True)
-    assert "active halt detected; reset armed" in output
-    assert marker_exists is False
+    assert "reset armed" not in output
+    assert marker_exists is True
+    assert json.loads((tmp_path / "risk_state.json").read_text())["max_drawdown_halt"] is True
 
 
 def test_no_active_halt_suppresses_recovery(tmp_path: Path) -> None:
     output, marker_exists = _run_gate(tmp_path, halted=False)
-    assert "no active halt; reset suppressed" in output
+    assert "reset armed" not in output
     assert marker_exists is True

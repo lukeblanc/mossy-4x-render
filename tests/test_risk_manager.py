@@ -244,7 +244,7 @@ def test_startup_reset_applies_in_demo(state_dir, capsys):
     manager.startup_daily_reset(1_234.0, open_positions_count=0)
     log = capsys.readouterr().out
 
-    assert "[STARTUP-RESET][WARN]" in log
+    assert "[STARTUP-RISK]" in log
     assert manager.state.day_start_equity == pytest.approx(1_234.0)
     assert manager.state.day_start_equity_utc == pytest.approx(1_234.0)
     assert manager.state.peak_equity_today == pytest.approx(1_234.0)
@@ -322,7 +322,7 @@ def test_rollover_preserves_realized_pl_when_equity_missing(state_dir):
 
 
 
-def test_max_drawdown_halt_resets_on_new_day(state_dir):
+def test_max_drawdown_halt_persists_on_new_day(state_dir):
     manager = RiskManager({"max_drawdown_cap_pct": 0.10, "daily_loss_cap_pct": 1.0, "weekly_loss_cap_pct": 1.0}, mode="paper")
     now = _utc(2024, 1, 1, 0, 0)
 
@@ -336,9 +336,9 @@ def test_max_drawdown_halt_resets_on_new_day(state_dir):
 
     next_day = now + timedelta(days=1)
     ok, reason = manager.should_open(next_day, 1_000.0, [], "EUR_USD", 0.2)
-    assert ok is True
-    assert reason == "ok"
-    assert manager.state.max_drawdown_halt is False
+    assert ok is False
+    assert reason == "max-drawdown"
+    assert manager.state.max_drawdown_halt is True
 
 def test_default_atr_multipliers_are_applied(state_dir):
     manager = RiskManager({}, mode="paper")

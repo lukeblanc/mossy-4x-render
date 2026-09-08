@@ -18,7 +18,7 @@ def _cap_int_env(name: str, maximum: int) -> None:
         current = int(os.getenv(name, str(maximum)))
     except (TypeError, ValueError):
         current = maximum
-    os.environ[name] = str(max(0, min(maximum, current)))
+    os.environ[name] = str(max(1, min(maximum, current)))
 
 
 def _floor_float_env(name: str, minimum: float, maximum: float = 1.0) -> None:
@@ -53,14 +53,7 @@ def apply_runtime_safety_floors() -> None:
 
 apply_runtime_safety_floors()
 
-# Start only the independent reporting monitor. It reads the persistent journal
-# and never changes trading parameters, entries, exits, or position sizing.
-try:
-    from src.weekly_ops_report import start_weekly_ops_monitor
-
-    start_weekly_ops_monitor()
-except Exception as exc:  # pragma: no cover - reporting must never stop trading
-    print(f"[ALGO-REPORT][WARN] monitor bootstrap failed error={exc}", flush=True)
+# Reporting starts explicitly in the worker runner, after configuration loads.
 
 
 __all__ = ["apply_runtime_safety_floors"]
