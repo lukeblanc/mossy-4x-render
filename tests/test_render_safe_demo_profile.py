@@ -11,7 +11,9 @@ def _run_config_import(tmp_path: Path) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            "PYTHONPATH": os.pathsep.join(filter(None, [
+                str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH")
+            ])),
             "RENDER_GIT_COMMIT": "test-commit",
             "MOSSY_STATE_PATH": str(tmp_path),
             "MODE": "demo",

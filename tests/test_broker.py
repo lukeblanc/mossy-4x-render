@@ -41,6 +41,20 @@ class DummyClient:
         return DummyResponse(status_code=200)
 
 
+class ErrorResponse:
+    status_code = 503
+    text = "service unavailable"
+
+    @staticmethod
+    def json():
+        return {}
+
+
+class ReadErrorClient(DummyClient):
+    def get(self, path: str, params=None):
+        return ErrorResponse()
+
+
 def _configure_settings(monkeypatch):
     monkeypatch.setattr(settings, "OANDA_API_KEY", "token")
     monkeypatch.setattr(settings, "OANDA_ACCOUNT_ID", "acct-123")
@@ -148,3 +162,13 @@ def test_close_position_side_uses_put(monkeypatch):
     assert recorded["method"] == "put"
     assert recorded["path"] == "/v3/accounts/acct-123/positions/EUR_USD/close"
     assert recorded["payload"] == {"longUnits": "ALL"}
+
+
+def test_failed_broker_reads_are_not_reported_as_zero_or_no_positions(monkeypatch):
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(Broker, "_client", lambda self: ReadErrorClient({}))
+    broker = Broker()
+
+    assert broker.list_open_trades() is None
+    assert broker.account_equity() is None
+    assert broker.current_spread("EUR_USD") is None

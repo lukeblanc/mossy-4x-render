@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import math
 from typing import Dict, Optional
 
 import httpx
@@ -196,23 +197,35 @@ class Broker:
                 print(f"[BROKER] LIVE order exception: {exc}", flush=True)
             return {"status": "ERROR", "error": str(exc)}
 
-    def list_open_trades(self) -> list:
-        """Return currently open trades for the configured account."""
-        if self.mode == "simulation" or not (self.key and self.account):
+    def list_open_trades(self) -> Optional[list]:
+        """Return currently open trades, or ``None`` when the broker cannot be read.
+
+        An empty list is a valid broker answer.  It must not also be used as the
+        error value because callers use this result to prevent duplicate exposure.
+        """
+        if self.mode == "simulation":
             return []
+        if not (self.key and self.account):
+            return None
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/openTrades")
                 if resp.status_code == 200:
                     data = resp.json()
-                    return data.get("trades", [])
+                    trades = data.get("trades")
+                    if not isinstance(trades, list) or any(
+                        not isinstance(trade, dict) or not trade.get("instrument")
+                        for trade in trades
+                    ):
+                        return None
+                    return trades
                 print(
                     f"[OANDA] Failed to read open trades status={resp.status_code} body={resp.text}",
                     flush=True,
                 )
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
-        return []
+        return None
 
     def get_unrealized_profit(self, instrument: str) -> Optional[float]:
         """Return the unrealized P/L for the given instrument in account currency."""
@@ -341,26 +354,27 @@ class Broker:
             short_val = 0.0
         return self.close_position_side(instrument, long_val, short_val)
 
-    def account_equity(self) -> float:
+    def account_equity(self) -> Optional[float]:
         if not (self.key and self.account):
-            return 0.0
+            return None
         try:
             with self._client() as client:
                 resp = client.get(f"/v3/accounts/{self.account}/summary")
                 if resp.status_code == 200:
                     data = resp.json().get("account", {})
-                    nav = data.get("NAV") or data.get("balance")
+                    nav = data.get("NAV")
                     try:
-                        return float(nav)
+                        equity = float(nav)
+                        return equity if math.isfinite(equity) and equity > 0 else None
                     except (TypeError, ValueError):
-                        return 0.0
+                        return None
         except Exception as exc:
             print(f"[OANDA] Exception fetching equity: {exc}", flush=True)
-        return 0.0
+        return None
 
-    def current_spread(self, instrument: str) -> float:
+    def current_spread(self, instrument: str) -> Optional[float]:
         if not (self.key and self.account):
-            return 0.0
+            return None
         try:
             with self._client() as client:
                 resp = client.get(
@@ -368,28 +382,30 @@ class Broker:
                     params={"instruments": instrument},
                 )
                 if resp.status_code != 200:
-                    return 0.0
+                    return None
                 data = resp.json().get("prices", [])
                 if not data:
-                    return 0.0
+                    return None
                 price = data[0]
                 bids = price.get("bids") or []
                 asks = price.get("asks") or []
                 if not bids or not asks:
-                    return 0.0
+                    return None
                 try:
                     bid = float(bids[0]["price"])
                     ask = float(asks[0]["price"])
                 except (KeyError, TypeError, ValueError):
-                    return 0.0
+                    return None
                 spread = ask - bid
+                if not (math.isfinite(bid) and math.isfinite(ask)) or bid <= 0 or ask < bid:
+                    return None
                 pip_size = self._pip_size(instrument)
                 if pip_size <= 0:
-                    return 0.0
+                    return None
                 return spread / pip_size
         except Exception as exc:
             print(f"[OANDA] Exception fetching spread for {instrument}: {exc}", flush=True)
-            return 0.0
+            return None
 
     def mid_price(self, instrument: str) -> float | None:
         if not (self.key and self.account):
