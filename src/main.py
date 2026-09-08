@@ -796,6 +796,17 @@ def _startup_checks() -> None:
         return
 
     risk.startup_daily_reset(equity, open_positions_count=open_count)
+    demo_run_id = os.getenv("MOSSY_DEMO_RUN_ID", "").strip()
+    if demo_run_id:
+        _, result = risk.start_demo_run(
+            demo_run_id, equity, open_positions_count=open_count, oanda_env=oanda_env,
+        )
+        print(
+            f"[DEMO-RUN] id={demo_run_id!r} status={result} equity={float(equity):.4f} "
+            f"peak={risk.state.peak_equity} halted={risk.state.max_drawdown_halt} "
+            f"audit={risk._state_file}#demo_runs; daily/weekly limits and journal preserved.",
+            flush=True,
+        )
     snap = _safe_adaptive_snapshot("startup")
     if snap is not None:
         print(

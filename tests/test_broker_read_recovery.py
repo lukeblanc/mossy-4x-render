@@ -100,11 +100,25 @@ def test_startup_does_not_reset_risk_with_unknown_broker_state(runtime, monkeypa
     broker, risk, *_ = runtime
     monkeypatch.setenv("RESET_MAX_DRAWDOWN_HALT", "true")
     monkeypatch.setenv("RESET_WEEKLY_LOSS_CAP", "true")
+    monkeypatch.setenv("MOSSY_DEMO_RUN_ID", "explicit-demo-test")
     getattr(broker, failed_read).return_value = None
     main._startup_checks()
     risk.startup_daily_reset.assert_not_called()
     risk.clear_max_drawdown_halt.assert_not_called()
     risk.clear_weekly_loss_cap.assert_not_called()
+    risk.start_demo_run.assert_not_called()
+
+
+def test_startup_applies_explicit_demo_run_after_broker_reads(runtime, monkeypatch):
+    broker, risk, *_ = runtime
+    monkeypatch.setenv("MOSSY_DEMO_RUN_ID", "explicit-demo-test")
+    monkeypatch.setattr(main, "oanda_env", "practice")
+    risk.start_demo_run.return_value = (True, "applied")
+    main._startup_checks()
+    broker.list_open_trades.assert_called_once()
+    risk.start_demo_run.assert_called_once_with(
+        "explicit-demo-test", 10000.0, open_positions_count=0, oanda_env="practice",
+    )
 
 
 @pytest.mark.parametrize("method,payload,expected", [

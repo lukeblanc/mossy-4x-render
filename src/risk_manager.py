@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -79,6 +81,7 @@ class RiskState:
     daily_profit_cap_hit: bool = False
     daily_loss_cap_hit: bool = False
     daily_entry_count: int = 0
+    demo_runs: Dict[str, Dict] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
@@ -105,6 +108,7 @@ class RiskState:
             "daily_profit_cap_hit": self.daily_profit_cap_hit,
             "daily_loss_cap_hit": self.daily_loss_cap_hit,
             "daily_entry_count": self.daily_entry_count,
+            "demo_runs": deepcopy(self.demo_runs),
         }
 
     @classmethod
@@ -135,6 +139,7 @@ class RiskState:
             daily_profit_cap_hit=bool(data.get("daily_profit_cap_hit", False)),
             daily_loss_cap_hit=bool(data.get("daily_loss_cap_hit", False)),
             daily_entry_count=int(data.get("daily_entry_count", 0) or 0),
+            demo_runs=dict(data.get("demo_runs", {})),
         )
 
 
@@ -531,6 +536,52 @@ class RiskManager:
         if changed:
             self._save_state()
         return changed
+
+    def start_demo_run(
+        self, run_id: str, equity: Optional[float], *,
+        open_positions_count: Optional[int], oanda_env: str,
+        now_utc: Optional[datetime] = None,
+    ) -> Tuple[bool, str]:
+        """Apply an explicit demo drawdown reset once, atomically with its audit.
+
+        Every consumed ID and the preceding risk state remain on disk. Reusing
+        an ID after a restart cannot clear a later halt. Daily/weekly controls,
+        entry counts, cooldowns and the trade journal are left intact.
+        """
+        if not self.demo_mode or self.mode == "live" or oanda_env != "practice":
+            return False, "practice-demo-required"
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", run_id):
+            return False, "invalid-run-id"
+        if self._state_load_failed or self._state_save_failed:
+            return False, "risk-state-unavailable"
+        if run_id in self.state.demo_runs:
+            return False, "already-applied"
+        valid_equity = _sanitize_equity(equity)
+        if valid_equity is None:
+            return False, "equity-unavailable"
+        if type(open_positions_count) is not int or open_positions_count != 0:
+            return False, "confirmed-flat-account-required"
+
+        previous = self.state
+        previous_payload = previous.to_dict()
+        candidate = RiskState.from_dict(previous_payload)
+        # Keep previous audits alongside this one, without recursively nesting them.
+        previous_payload.pop("demo_runs")
+        candidate.demo_runs[run_id] = {
+            "started_at_utc": (now_utc or datetime.now(timezone.utc)).isoformat(),
+            "start_equity": valid_equity,
+            "previous_state": previous_payload,
+        }
+        candidate.peak_equity = valid_equity
+        candidate.max_drawdown_halt = False
+        self.state = candidate
+        self._save_state()
+        if self._state_save_failed:
+            # Never resume on an in-memory reset that did not reach durable state.
+            self.state = previous
+            return False, "risk-state-unwritable"
+        self._remember_equity(valid_equity)
+        return True, "applied"
 
     def startup_daily_reset(self, equity: Optional[float], *, open_positions_count: int = 0,
                             now_utc: Optional[datetime] = None) -> None:
