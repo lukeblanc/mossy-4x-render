@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.env.*
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+data
+state
+mcp/runtime_status.db
+*.db
+*.sqlite
+*.sqlite3

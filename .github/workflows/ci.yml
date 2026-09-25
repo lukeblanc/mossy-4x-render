@@ -54,3 +54,28 @@ jobs:
         run: |
           cat pytest-output.txt
           test "${{ steps.pytest.outputs.exit_code }}" = "0"
+
+  mcp-read-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: mcp/requirements.txt
+
+      - name: Install MCP dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          pip install -q -r mcp/requirements.txt pytest
+
+      - name: Compile MCP bridge
+        run: python -m compileall -q mcp/app.py mcp/bridge_state.py
+
+      - name: Verify read-only MCP surface
+        run: pytest -q mcp/test_app.py

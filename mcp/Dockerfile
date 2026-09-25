@@ -9,4 +9,6 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "mcp.app:app", "--host", "0.0.0.0", "--port", "8000"]
+WORKDIR /app/mcp
+
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000} --proxy-headers --forwarded-allow-ips='*'"]
