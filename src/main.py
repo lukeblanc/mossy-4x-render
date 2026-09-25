@@ -72,6 +72,7 @@ except Exception:  # pragma: no cover - defensive fallback
 
 
 from src.projector import project_market
+from src.mcp_status import build_runtime_heartbeat, publish_runtime_heartbeat
 from src.risk_setup import (
     build_profit_protection,
     build_risk_manager,
@@ -580,6 +581,35 @@ async def heartbeat() -> None:
             f"last_broker_sync_age_sec={health['last_broker_sync_age_sec']}"
         ),
     )
+
+    monitoring_payload = build_runtime_heartbeat(
+        service_status=BOT_STATE["status"],
+        mode=os.getenv("MODE", "demo"),
+        oanda_environment=os.getenv("OANDA_ENV", "practice"),
+        scheduler_alive=health["scheduler_alive"],
+        last_cycle_age_sec=health["last_cycle_age_sec"],
+        last_broker_sync_age_sec=health["last_broker_sync_age_sec"],
+        open_trades_count=health["open_trades_count"],
+        equity=equity,
+        revision=_runtime_revision(),
+        observed_at=now_utc,
+    )
+    configured_session_active = (
+        now_utc.weekday() < 5
+        and session_filter.current_session(
+            now_utc, mode=config.get("session_mode", "STRICT")
+        )
+        is not None
+    )
+    monitoring_active = (
+        bool(open_count and open_count > 0) or configured_session_active
+    )
+    monitoring_sent, monitoring_status = await publish_runtime_heartbeat(
+        monitoring_payload, monitoring_active=monitoring_active
+    )
+    if monitoring_status != "throttled":
+        level = "INFO" if monitoring_sent else "WARN"
+        print(f"[MCP_STATUS][{level}] status={monitoring_status}", flush=True)
 
 suppression_counters = {
     "signals_generated": 0,

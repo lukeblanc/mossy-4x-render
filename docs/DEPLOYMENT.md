@@ -7,12 +7,14 @@ Use this sequence for normal changes:
 1. Create a branch and commit your changes.
 2. Open a pull request into `main`.
 3. Merge the pull request.
-4. Let Render auto-deploy from `main`.
+4. Let the `mcp-web` service auto-deploy from `main`.
+5. Manually deploy the active `mossy-4x-render` worker after checks pass.
 
 Why this is the default here:
 
-- `render.yaml` enables `autoDeploy: true` for services, so new commits on the tracked branch deploy automatically.
-- Service setup in `finish_render_setup.py` points Render services to repository branch `main`.
+- The public `mcp-web` service tracks `main` and auto-deploys.
+- The active Singapore worker intentionally has auto-deploy disabled to prevent accidental trading-runtime releases.
+- The older `mossy-4x` worker described by the root Blueprint is suspended. Do not sync the Blueprint over the active `mossy-4x-render` service.
 
 ## When manual deploy steps are needed
 
@@ -21,6 +23,29 @@ You may need manual intervention only when:
 - auto-deploy is disabled in the Render dashboard,
 - a deployment is stuck/failed and needs retry,
 - you are performing rollback/hotfix operations.
+
+## Mossy 4X read-only MCP
+
+The MCP bridge exposes only sanitised health, fixed guardrails, and committed
+algorithm reports. It has no order, optimisation, GitHub-write, secret-write,
+or deploy tools.
+
+The active worker needs these service-level values in Render:
+
+- `MOSSY_MCP_STATUS_URL=https://mcp-web-kyhu.onrender.com/internal/runtime-heartbeat`
+- `MOSSY_MCP_STATUS_KEY=<the same generated secret configured on mcp-web>`
+
+The shared key belongs only in Render environment settings. Never commit it.
+
+`mcp-web` uses a disposable SQLite cache on Render's free tier. During configured
+weekday London/New York sessions, and whenever an open trade exists, the worker
+publishes every ten minutes to keep the bridge warm. Safety-state changes publish
+immediately. Outside those periods the service may sleep and lose its cache;
+runtime health then fails closed as `BLOCKED` until a fresh signed heartbeat is
+stored. Static guardrails and repository reports remain available after wake-up.
+
+Do not copy OANDA, GitHub, or Render API credentials into the MCP service. A paid
+disk or external datastore is intentionally not provisioned by this setup.
 
 ## Aggressive test profile (higher activity, bounded risk)
 

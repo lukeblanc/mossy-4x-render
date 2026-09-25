@@ -1,7 +1,2 @@
-fastapi
-uvicorn[standard]
-optuna
-pandas
-requests
-pynacl
-python-dotenv
+mcp==2.2.0
+uvicorn[standard]>=0.54,<1

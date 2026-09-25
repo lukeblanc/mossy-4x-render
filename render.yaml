@@ -118,19 +118,16 @@ services:
       - key: OANDA_ACCOUNT_ID
         sync: false
 
-  # MCP remains available for manual inspection. The old nightly optimiser was
-  # removed because it used a separate empty database and could not safely apply
-  # validated strategy changes. Runtime learning now reads the real journal.
+  # Public MCP tools are strictly read-only. The worker sends only sanitised
+  # health booleans through a shared secret; account values and credentials are
+  # never exposed. Optimisation, GitHub writes, and deploy triggers are absent.
   - type: web
     name: mcp-web
     env: docker
     plan: free
     dockerfilePath: mcp/Dockerfile
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
-      - key: MCP_API_KEY
-        sync: false
-      - key: GH_PAT
-        sync: false
-      - key: RENDER_DEPLOY_HOOK_URL
+      - key: MOSSY_MCP_STATUS_KEY
         sync: false

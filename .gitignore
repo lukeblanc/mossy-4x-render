@@ -1,2 +1,6 @@
 state/
-
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+mcp/runtime_status.db
