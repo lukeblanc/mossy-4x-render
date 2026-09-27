@@ -95,6 +95,43 @@ def test_heartbeat_survives_missing_equity_and_positions(runtime):
     assert main.BOT_STATE["last_heartbeat"]
 
 
+def test_heartbeat_builds_and_publishes_learning_review_off_thread(
+    runtime, monkeypatch
+):
+    monkeypatch.setenv(
+        "MOSSY_MCP_STATUS_URL",
+        "https://example.test/internal/runtime-heartbeat",
+    )
+    monkeypatch.setenv("MOSSY_MCP_STATUS_KEY", "test-key")
+    built: list[dict] = []
+    published: list[dict] = []
+
+    async def publish_runtime(*args, **kwargs):
+        return False, "throttled"
+
+    def build_review(db_path, **kwargs):
+        payload = {"safe": True, "source_revision": kwargs["source_revision"]}
+        built.append({"db_path": db_path, **kwargs})
+        return payload
+
+    async def publish_review(payload):
+        published.append(payload)
+        return True, "sent"
+
+    monkeypatch.setattr(main, "publish_runtime_heartbeat", publish_runtime)
+    monkeypatch.setattr(main, "build_learning_review", build_review)
+    monkeypatch.setattr(main, "publish_learning_review", publish_review)
+
+    asyncio.run(main.heartbeat())
+
+    assert len(built) == 1
+    assert built[0]["db_path"] == main.journal.path
+    assert built[0]["adaptive_snapshot"] is None
+    assert published == [
+        {"safe": True, "source_revision": built[0]["source_revision"]}
+    ]
+
+
 @pytest.mark.parametrize("failed_read", ["account_equity", "list_open_trades"])
 def test_startup_does_not_reset_risk_with_unknown_broker_state(runtime, monkeypatch, failed_read):
     broker, risk, *_ = runtime

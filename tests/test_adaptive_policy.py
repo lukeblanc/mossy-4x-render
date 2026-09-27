@@ -23,6 +23,7 @@ def _closed_trade(
     trade_id: str,
     pnl: float,
     opened: datetime,
+    run_tag: str = "MINI_RUN",
 ) -> None:
     journal.record_entry(
         trade_id=trade_id,
@@ -36,7 +37,7 @@ def _closed_trade(
         spread_at_entry=0.8,
         session_id="LONDON-2026-07-10-1500",
         session_mode="SOFT",
-        run_tag="MINI_RUN",
+        run_tag=run_tag,
         gating_flags={"trend_ok": True},
         indicators_snapshot=INDICATORS,
         equity_after=1500.0,
@@ -72,7 +73,7 @@ def test_policy_keeps_full_risk_until_setup_has_enough_evidence(tmp_path, monkey
     adaptive_policy.clear_policy_caches()
     monkeypatch.setenv("ADAPTIVE_POLICY_MIN_EXACT", "6")
     journal = TradeJournal(tmp_path / "trade_journal.db")
-    now = datetime(2026, 7, 11, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
     for index, pnl in enumerate((1.0, -0.5, 0.8)):
         _closed_trade(journal, trade_id=f"T{index}", pnl=pnl, opened=now - timedelta(days=3 - index))
 
@@ -93,7 +94,7 @@ def test_policy_reduces_repeated_losing_setup(tmp_path, monkeypatch):
     monkeypatch.setenv("ADAPTIVE_POLICY_MIN_EXACT", "6")
     monkeypatch.setenv("ADAPTIVE_POLICY_CACHE_SECONDS", "1")
     journal = TradeJournal(tmp_path / "trade_journal.db")
-    now = datetime(2026, 7, 11, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
     pnls = (1.0, 0.8, 0.4, -0.5, -0.6, -0.7)
     for index, pnl in enumerate(pnls):
         _closed_trade(
@@ -122,7 +123,7 @@ def test_policy_temporarily_blocks_four_loss_setup(tmp_path, monkeypatch):
     monkeypatch.setenv("ADAPTIVE_POLICY_MIN_EXACT", "6")
     monkeypatch.setenv("ADAPTIVE_POLICY_BLOCK_MINUTES", "240")
     journal = TradeJournal(tmp_path / "trade_journal.db")
-    now = datetime(2026, 7, 11, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
     pnls = (1.0, 0.8, -0.3, -0.4, -0.5, -0.6)
     for index, pnl in enumerate(pnls):
         opened = now - timedelta(minutes=(len(pnls) - index) * 20)
@@ -139,3 +140,45 @@ def test_policy_temporarily_blocks_four_loss_setup(tmp_path, monkeypatch):
     assert decision.risk_scale == pytest.approx(0.0)
     assert decision.loss_streak == 4
     assert decision.reason == "setup-four-loss-streak"
+
+
+def test_policy_respects_runtime_run_tag_and_exit_window(tmp_path, monkeypatch):
+    adaptive_policy.clear_policy_caches()
+    monkeypatch.setenv("ADAPTIVE_POLICY_MIN_EXACT", "3")
+    monkeypatch.setenv("ADAPTIVE_RUN_TAG", "MINI_RUN")
+    monkeypatch.setenv("ADAPTIVE_WINDOW_START_UTC", "2026-07-20T00:00:00+00:00")
+    journal = TradeJournal(tmp_path / "trade_journal.db")
+    now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+
+    for index in range(2):
+        _closed_trade(
+            journal,
+            trade_id=f"valid-{index}",
+            pnl=1.0,
+            opened=now - timedelta(hours=2 - index),
+        )
+    for index in range(4):
+        _closed_trade(
+            journal,
+            trade_id=f"wrong-tag-{index}",
+            pnl=-100.0,
+            opened=now - timedelta(minutes=40 - index),
+            run_tag="LEGACY",
+        )
+        _closed_trade(
+            journal,
+            trade_id=f"before-window-{index}",
+            pnl=-100.0,
+            opened=now - timedelta(days=2, minutes=index),
+        )
+
+    _publish(now)
+    decision = adaptive_policy.evaluate_instrument_policy(
+        "AUD_USD",
+        db_path=journal.path,
+        now_utc=now,
+    )
+
+    assert decision.exact_samples == 2
+    assert decision.risk_scale == pytest.approx(1.0)
+    assert decision.reason == "insufficient-setup-history"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
 from collections import defaultdict
 from collections import deque
@@ -77,35 +78,41 @@ from src.mcp_status import (
     classify_verified_entry_age,
     publish_runtime_heartbeat,
 )
+from src.learning_review import build_learning_review, publish_learning_review
+from src.learning_cohort import DEFAULT_LEARNING_COHORT_START_UTC
 from src.risk_setup import (
     build_profit_protection,
     build_risk_manager,
     resolve_state_dir,
 )
+from src.decision_observer import (
+    DecisionObservationDraft,
+    DecisionObservationLedger,
+    DecisionObservationSink,
+    configuration_fingerprint,
+)
 from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
 
 VERSION = "v1.6.1"
-STARTUP_UTC = datetime.now(timezone.utc)
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "defaults.json"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR = resolve_state_dir(DEFAULT_DATA_DIR)
 journal = TradeJournal(default_journal_path(DATA_DIR))
-
-
-def _adaptive_window_start_utc() -> str:
-    now = datetime.now(timezone.utc)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    window_start = max(day_start, STARTUP_UTC.replace(microsecond=0))
-    return window_start.isoformat()
+decision_observation_sink = DecisionObservationSink(
+    DecisionObservationLedger(journal.path.with_name("learning_observations.db"))
+)
 
 
 adaptive_tuner = AdaptiveTuner(
     journal.path,
     lookback=int(os.getenv("ADAPTIVE_LOOKBACK", 40)),
     min_sample=int(os.getenv("ADAPTIVE_MIN_SAMPLE", 8)),
-    run_tag=os.getenv("ADAPTIVE_RUN_TAG", "MINI_RUN"),
-    window_start_utc=os.getenv("ADAPTIVE_WINDOW_START_UTC", _adaptive_window_start_utc()),
+    run_tag=(os.getenv("ADAPTIVE_RUN_TAG", "").strip() or "MINI_RUN"),
+    window_start_utc=(
+        os.getenv("ADAPTIVE_WINDOW_START_UTC", "").strip()
+        or DEFAULT_LEARNING_COHORT_START_UTC
+    ),
 )
 MINI_RUN_TAG = "MINI_RUN"
 
@@ -120,6 +127,121 @@ def _runtime_revision() -> str:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
     except Exception:
         return "unknown"
+
+
+def _new_decision_observation_draft(
+    evaluation: Evaluation,
+    observed_at_utc: datetime,
+) -> DecisionObservationDraft | None:
+    """Prepare observer state without touching the order-decision path."""
+
+    try:
+        completed_diagnostics = evaluation.completed_diagnostics or {}
+        reference_price = completed_diagnostics.get("close")
+        return DecisionObservationDraft(
+            observed_at_utc=observed_at_utc,
+            instrument=evaluation.instrument,
+            timeframe=str(config.get("timeframe", "M5")),
+            runtime_signal=evaluation.signal,
+            runtime_signal_reason=evaluation.reason,
+            market_active=evaluation.market_active,
+            completed_bar_open_utc=evaluation.completed_bar_open_utc,
+            completed_bar_close_utc=evaluation.completed_bar_close_utc,
+            observer_signal=evaluation.completed_signal,
+            observer_signal_reason=evaluation.completed_reason,
+            completed_diagnostics=completed_diagnostics,
+            runtime_revision=_runtime_revision(),
+            config_fingerprint=configuration_fingerprint(config),
+            reference_price=reference_price,
+        )
+    except Exception as exc:
+        print(
+            f"[LEARNING-OBS][WARN] draft-build-failed error={type(exc).__name__}",
+            flush=True,
+        )
+        return None
+
+
+def _mutate_decision_observation(
+    draft: DecisionObservationDraft | None,
+    method_name: str,
+    **kwargs: object,
+) -> None:
+    """Keep optional observer mutations outside the trading failure domain."""
+
+    if draft is None:
+        return
+    try:
+        method = getattr(draft, method_name)
+        method(**kwargs)
+    except Exception as exc:  # pragma: no cover - fail-open safety boundary
+        print(
+            f"[LEARNING-OBS][WARN] mutation-failed method={method_name} "
+            f"error={type(exc).__name__}",
+            flush=True,
+        )
+
+
+def _finish_decision_observation(
+    draft: DecisionObservationDraft | None,
+    *,
+    outcome: str,
+    gate_stage: str,
+    gate_reason: str | None,
+) -> None:
+    """Finalize and enqueue an observation; all failures are non-trading."""
+
+    if draft is None:
+        return
+    try:
+        observation = draft.finalize(
+            outcome=outcome,
+            gate_stage=gate_stage,
+            gate_reason=gate_reason,
+        )
+        if observation is not None:
+            decision_observation_sink.submit(observation)
+    except Exception as exc:  # pragma: no cover - fail-open safety boundary
+        print(
+            f"[LEARNING-OBS][WARN] finalize-failed error={type(exc).__name__}",
+            flush=True,
+        )
+
+
+_MAX_OBSERVATION_FLUSH_SECONDS = 2.0
+
+
+def _flush_decision_observations(
+    timeout_seconds: float = _MAX_OBSERVATION_FLUSH_SECONDS,
+) -> bool:
+    """Best-effort bounded drain for ordinary interpreter shutdown."""
+
+    try:
+        bounded_timeout = min(
+            _MAX_OBSERVATION_FLUSH_SECONDS,
+            max(0.0, float(timeout_seconds)),
+        )
+    except (TypeError, ValueError, OverflowError):
+        bounded_timeout = _MAX_OBSERVATION_FLUSH_SECONDS
+    try:
+        flushed = bool(decision_observation_sink.flush(bounded_timeout))
+        if not flushed:
+            pending = decision_observation_sink.counters().get("pending_events", 0)
+            print(
+                f"[LEARNING-OBS][WARN] shutdown-flush-timeout pending_events={pending}",
+                flush=True,
+            )
+        return flushed
+    except Exception as exc:  # pragma: no cover - interpreter shutdown boundary
+        print(
+            f"[LEARNING-OBS][WARN] shutdown-flush-failed error={type(exc).__name__}",
+            flush=True,
+        )
+        return False
+
+
+atexit.register(_flush_decision_observations)
+
 
 def _adaptive_snapshot_signature() -> str:
     try:
@@ -280,6 +402,14 @@ def _coerce_float(value: object, fallback: float = 0.0) -> float:
 
 def _clamp_risk_pct(value: float, *, cap: float) -> float:
     return max(0.001, min(float(value), float(cap)))
+
+
+def _reduce_only_risk_pct(base_risk_pct: float, multiplier: float) -> float:
+    """Apply an adaptive multiplier without ever exceeding the configured base."""
+
+    base = max(0.0, float(base_risk_pct))
+    scale = max(0.0, min(1.0, float(multiplier)))
+    return min(0.025, base, base * scale)
 
 
 def _build_trailing_config(config: Dict) -> Dict:
@@ -635,6 +765,39 @@ async def heartbeat() -> None:
     if monitoring_status != "throttled":
         level = "INFO" if monitoring_sent else "WARN"
         print(f"[MCP_STATUS][{level}] status={monitoring_status}", flush=True)
+
+    # Build the aggregate-only learning review off the scheduler thread.  It is
+    # published through a separate authenticated route and can never invoke the
+    # broker, alter configuration, promote a Challenger, or place an order.
+    learning_transport_configured = bool(
+        os.getenv("MOSSY_MCP_STATUS_KEY", "").strip()
+        and (
+            os.getenv("MOSSY_MCP_LEARNING_URL", "").strip()
+            or os.getenv("MOSSY_MCP_STATUS_URL", "").strip()
+        )
+    )
+    if learning_transport_configured:
+        try:
+            learning_payload = await asyncio.to_thread(
+                build_learning_review,
+                journal.path,
+                adaptive_snapshot=snap,
+                observation_snapshot=decision_observation_sink.counters(),
+                source_revision=_runtime_revision(),
+                observed_at=now_utc,
+            )
+            learning_sent, learning_status = await publish_learning_review(
+                learning_payload
+            )
+        except Exception as exc:  # pragma: no cover - fail-open isolation
+            learning_sent = False
+            learning_status = f"error:{type(exc).__name__}"
+        if learning_status != "throttled":
+            level = "INFO" if learning_sent else "WARN"
+            print(
+                f"[MCP_LEARNING][{level}] status={learning_status}",
+                flush=True,
+            )
 
 suppression_counters = {
     "signals_generated": 0,
@@ -1276,6 +1439,9 @@ async def decision_cycle() -> None:
         "blocked_max_positions": 0,
         "blocked_spread": 0,
     }
+    observation_drafts: list[DecisionObservationDraft | None] = []
+    started_observation_drafts: set[int] = set()
+    pending_observation_reason = "cycle-ended-before-evaluation"
     try:
         equity = broker.account_equity()
         if equity is None:
@@ -1287,6 +1453,10 @@ async def decision_cycle() -> None:
         except AttributeError:
             pass
         evaluations = engine.evaluate_all()
+        observation_drafts = [
+            _new_decision_observation_draft(evaluation, now_utc)
+            for evaluation in evaluations
+        ]
     except Exception as exc:  # pragma: no cover - defensive logging
         watchdog.record_error()
         ts = datetime.now(timezone.utc).astimezone().isoformat()
@@ -1297,6 +1467,13 @@ async def decision_cycle() -> None:
         if open_trades is None:
             watchdog.record_error()
             print("[TRADE][WARN] Open-trade snapshot unavailable; trading cycle skipped.", flush=True)
+            for draft in observation_drafts:
+                _finish_decision_observation(
+                    draft,
+                    outcome="blocked",
+                    gate_stage="exposure",
+                    gate_reason="open-trades-unavailable",
+                )
             return
         # --- Profit-protection rule ($3 trigger / $0.50 trail) ---
         closed_by_trail = profit_guard.process_open_trades(open_trades)
@@ -1314,7 +1491,9 @@ async def decision_cycle() -> None:
         if session_snapshot:
             orb.reset_for_session(session_snapshot)
 
-        for evaluation in evaluations:
+        for evaluation, observation_draft in zip(evaluations, observation_drafts):
+            if observation_draft is not None:
+                started_observation_drafts.add(id(observation_draft))
             cycle_stats["evaluations"] += 1
             suppression_counters["signals_generated"] += 1
             _record_signal_evaluated(evaluation.instrument)
@@ -1351,6 +1530,13 @@ async def decision_cycle() -> None:
             elif active_session:
                 orb.reset_for_session(active_session)
 
+            _mutate_decision_observation(
+                observation_draft,
+                "set_session",
+                mode=getattr(session_decision, "mode", session_mode),
+                name=(active_session.name if active_session is not None else "OFF_SESSION"),
+            )
+
             if not session_decision.allowed:
                 suppression_counters["blocked_off_session"] += 1
                 _record_block_reason(evaluation.instrument, session_decision.reason or "off-session")
@@ -1361,6 +1547,12 @@ async def decision_cycle() -> None:
                     f"[FILTER] Entries paused (off-session) now_utc={ts} mode={session_mode} reason={session_decision.reason}",
                     flush=True,
                 )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="session",
+                    gate_reason=session_decision.reason or "off-session",
+                )
                 continue
 
             should_trade, skip_reason = _should_place_trade(open_trades, evaluation)
@@ -1370,6 +1562,13 @@ async def decision_cycle() -> None:
                 if skip_reason == "max-open":
                     suppression_counters["blocked_max_positions"] += 1
                     cycle_stats["blocked_max_positions"] += 1
+                hold = evaluation.signal not in {"BUY", "SELL"}
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="hold" if hold else "blocked",
+                    gate_stage="signal" if hold else "exposure",
+                    gate_reason=(evaluation.reason if hold else skip_reason),
+                )
                 continue
 
             # Final broker-side duplicate guard before risk checks or order submission.
@@ -1380,6 +1579,12 @@ async def decision_cycle() -> None:
                     f"[TRADE] Skipping {evaluation.instrument}; broker reports existing open position",
                     flush=True,
                 )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="exposure",
+                    gate_reason="broker-duplicate",
+                )
                 continue
 
             spread_pips = None
@@ -1388,6 +1593,12 @@ async def decision_cycle() -> None:
             except AttributeError:
                 spread_pips = None
 
+            _mutate_decision_observation(
+                observation_draft,
+                "set_spread",
+                spread_pips=spread_pips,
+            )
+
             if spread_pips is None:
                 cycle_stats["skipped"] += 1
                 cycle_stats["blocked_spread"] += 1
@@ -1395,6 +1606,12 @@ async def decision_cycle() -> None:
                 print(
                     f"[TRADE] Skipping {evaluation.instrument}; broker spread unavailable",
                     flush=True,
+                )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="spread",
+                    gate_reason="spread-unavailable",
                 )
                 continue
 
@@ -1422,6 +1639,12 @@ async def decision_cycle() -> None:
                 else:
                     suppression_counters["blocked_risk"] += 1
                     cycle_stats["blocked_risk"] += 1
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="spread" if risk_reason == "spread-too-wide" else "risk",
+                    gate_reason=risk_reason,
+                )
                 continue
 
             if getattr(risk, "demo_mode", False) and now_utc.weekday() >= 5:
@@ -1430,6 +1653,12 @@ async def decision_cycle() -> None:
                 print(
                     "[WEEKEND] Entry blocked - weekend lock active (UTC Saturday/Sunday)",
                     flush=True,
+                )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="weekend",
+                    gate_reason="weekend-lock",
                 )
                 continue
 
@@ -1463,6 +1692,12 @@ async def decision_cycle() -> None:
                     f"ema50={ema_trend_fast:.5f} ema200={ema_trend_slow:.5f}",
                     flush=True,
                 )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="trend",
+                    gate_reason="trend-misaligned",
+                )
                 continue
 
             xau_blocked, rsi_val, atr_ratio = _xau_blocked(
@@ -1486,6 +1721,12 @@ async def decision_cycle() -> None:
                 )
                 suppression_counters["blocked_risk"] += 1
                 cycle_stats["blocked_risk"] += 1
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="xau",
+                    gate_reason=xau_reason,
+                )
                 continue
 
             macd_ok, macd_line, macd_signal_line, macd_histogram = _macd_confirms(
@@ -1498,6 +1739,12 @@ async def decision_cycle() -> None:
                     f"[FILTER] MACD veto {evaluation.instrument} macd={macd_line:.5f} "
                     f"signal={macd_signal_line:.5f} hist={macd_histogram:.5f}",
                     flush=True,
+                )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="macd",
+                    gate_reason="macd-veto",
                 )
                 continue
             print(
@@ -1518,15 +1765,21 @@ async def decision_cycle() -> None:
                     f"[FILTER] ORB block {evaluation.instrument} reason={orb_reason}",
                     flush=True,
                 )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="orb",
+                    gate_reason=orb_reason or "orb-block",
+                )
                 continue
 
             base_risk_pct = float(risk.risk_per_trade_pct)
             adaptive_snap = _safe_adaptive_snapshot("decision_cycle")
             adaptive_risk_pct = base_risk_pct
             if adaptive_snap is not None:
-                adaptive_risk_pct = max(
-                    0.001,
-                    min(0.025, base_risk_pct * adaptive_snap.risk_multiplier),
+                adaptive_risk_pct = _reduce_only_risk_pct(
+                    base_risk_pct,
+                    adaptive_snap.risk_multiplier,
                 )
 
             xau_scale_active = (
@@ -1593,6 +1846,17 @@ async def decision_cycle() -> None:
                     f"[TRADE] Skipping {evaluation.instrument} due to zero position size",
                     flush=True,
                 )
+                sizing_reason = (
+                    size_diag.get("learning_reason")
+                    if size_diag.get("learning_blocked")
+                    else size_diag.get("reason") or "zero-position-size"
+                )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="sizing",
+                    gate_reason=str(sizing_reason),
+                )
                 continue
 
             result = broker.place_order(
@@ -1614,6 +1878,13 @@ async def decision_cycle() -> None:
                 if fill is None:
                     cycle_stats["skipped"] += 1
                     print("[ORDER][WARN] Unverified trade opening; remaining entries skipped until broker refresh.", flush=True)
+                    _finish_decision_observation(
+                        observation_draft,
+                        outcome="unverified",
+                        gate_stage="order",
+                        gate_reason="unverified-open",
+                    )
+                    pending_observation_reason = "prior-order-state-uncertain"
                     break
                 ticket = fill["trade_id"]
                 sl_price, _ = _calc_exit_prices(evaluation.signal, fill["price"], sl_distance, None)
@@ -1674,6 +1945,12 @@ async def decision_cycle() -> None:
                     f"sl={ 'n/a' if sl_price is None else f'{sl_price:.5f}'} "
                     f"tp={ 'n/a' if tp_price is None else f'{tp_price:.5f}'}",
                 )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="executed",
+                    gate_stage="executed",
+                    gate_reason="broker-fill-verified",
+                )
             else:
                 cycle_stats["skipped"] += 1
                 _record_block_reason(evaluation.instrument, "order-failed")
@@ -1682,11 +1959,32 @@ async def decision_cycle() -> None:
                     f" response={result}",
                     flush=True,
                 )
+                order_status = str(result.get("status") or "failed").strip().lower()
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="order-failed",
+                    gate_stage="order",
+                    gate_reason=f"order-{order_status}",
+                )
                 if result.get("status") == "UNKNOWN":
                     # A timed-out request may already have filled. Read the broker
                     # again next cycle before making another exposure decision.
+                    pending_observation_reason = "prior-order-state-uncertain"
                     break
     finally:
+        for draft in observation_drafts:
+            if draft is not None and not draft.finalized:
+                was_started = id(draft) in started_observation_drafts
+                _finish_decision_observation(
+                    draft,
+                    outcome="aborted" if was_started else "not_evaluated",
+                    gate_stage="cycle",
+                    gate_reason=(
+                        "evaluation-error-before-terminal-outcome"
+                        if was_started
+                        else pending_observation_reason
+                    ),
+                )
         finished_utc = _utc_now()
         cycle_duration = max(0.0, time.monotonic() - started_monotonic)
         CYCLE_HEALTH.record_cycle_complete(cycle_duration, finished_utc)
@@ -1866,4 +2164,7 @@ if __name__ == "__main__":
             sys.exit(0)
 
     launch_status_server_thread()
-    asyncio.run(runner())
+    try:
+        asyncio.run(runner())
+    finally:
+        _flush_decision_observations()

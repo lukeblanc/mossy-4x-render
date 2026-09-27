@@ -3,15 +3,22 @@ from __future__ import annotations
 import json
 import math
 import os
-import sqlite3
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from src.learning_cohort import (
+    DEFAULT_LEARNING_COHORT_START_UTC,
+    DEFAULT_LEARNING_RUN_TAG,
+    load_clean_outcomes,
+)
 
-CLEAN_COHORT_START_UTC = "2026-07-13T12:47:00+00:00"
+
+CLEAN_COHORT_START_UTC = DEFAULT_LEARNING_COHORT_START_UTC
 ALLOWED_INSTRUMENTS = ("AUD_USD", "GBP_USD")
+_SAFE_REVISION = re.compile(r"^[0-9a-f]{7,64}$")
 
 
 @dataclass(frozen=True)
@@ -41,7 +48,9 @@ class ShadowCandidateResult:
 @dataclass(frozen=True)
 class ShadowReport:
     generated_utc: str
+    evidence_revision: str
     cohort_start_utc: str
+    cohort_run_tag: str
     instruments: tuple[str, ...]
     total_clean_trades: int
     train_trades: int
@@ -62,6 +71,15 @@ class _Trade:
     rsi: Optional[float]
     trend: str
     pnl: float
+
+
+def _deployed_revision() -> str:
+    """Return deployment-attested source provenance or an unusable sentinel."""
+
+    candidate = str(
+        os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT") or ""
+    ).strip().lower()
+    return candidate if _SAFE_REVISION.fullmatch(candidate) else "unknown"
 
 
 def _parse_dt(value: object) -> Optional[datetime]:
@@ -117,43 +135,28 @@ def _load_clean_trades(
     db_path: Path,
     *,
     cohort_start_utc: str,
+    cohort_run_tag: str,
     instruments: tuple[str, ...],
 ) -> list[_Trade]:
-    if not db_path.exists():
-        return []
-    placeholders = ",".join("?" for _ in instruments)
-    query = f"""
-        SELECT timestamp_utc, instrument, side, session_id,
-               indicators_snapshot, realized_pnl_ccy
-        FROM trades
-        WHERE broker_confirmed = 1
-          AND exit_timestamp_utc IS NOT NULL
-          AND realized_pnl_ccy IS NOT NULL
-          AND timestamp_utc >= ?
-          AND instrument IN ({placeholders})
-        ORDER BY timestamp_utc ASC
-    """
-    try:
-        conn = sqlite3.connect(db_path, timeout=2.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(query, (cohort_start_utc, *instruments)).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
-
     trades: list[_Trade] = []
-    for row in rows:
-        timestamp = _parse_dt(row["timestamp_utc"])
-        pnl = _safe_float(row["realized_pnl_ccy"])
+    outcomes = load_clean_outcomes(
+        db_path,
+        instruments=instruments,
+        run_tag=cohort_run_tag,
+        entry_start_utc=cohort_start_utc,
+    )
+    for outcome in outcomes:
+        # Order chronologically by when the result became knowable, not entry
+        # time, so a future shadow evaluator cannot learn from open positions.
+        timestamp = _parse_dt(outcome.exit_timestamp_utc)
+        pnl = _safe_float(outcome.realized_pnl_ccy)
         if timestamp is None or pnl is None:
             continue
-        side = str(row["side"] or "").upper()
+        side = outcome.side
         if side not in {"BUY", "SELL"}:
             continue
         try:
-            indicators = json.loads(row["indicators_snapshot"] or "{}")
+            indicators = json.loads(outcome.indicators_snapshot or "{}")
             if not isinstance(indicators, dict):
                 indicators = {}
         except (TypeError, json.JSONDecodeError):
@@ -161,9 +164,9 @@ def _load_clean_trades(
         trades.append(
             _Trade(
                 timestamp=timestamp,
-                instrument=str(row["instrument"] or "").upper(),
+                instrument=outcome.instrument,
                 side=side,
-                session=_session_bucket(row["session_id"]),
+                session=_session_bucket(outcome.session_id),
                 rsi=_safe_float(indicators.get("rsi")),
                 trend=_trend_bucket(side, indicators),
                 pnl=pnl,
@@ -250,12 +253,12 @@ def _evaluate_candidate(
         expectancy_margin = max(0.05, abs(baseline_validation.expectancy) * 0.15)
         beats = (
             validation_metrics.expectancy >= baseline_validation.expectancy + expectancy_margin
-            and validation_metrics.profit_factor >= max(1.05, baseline_validation.profit_factor)
+            and validation_metrics.profit_factor >= max(1.10, baseline_validation.profit_factor)
             and validation_metrics.max_drawdown <= baseline_validation.max_drawdown
             and train_metrics.expectancy > 0
             and train_metrics.profit_factor >= 1.0
         )
-        reason = "validated-improvement" if beats else "did-not-clear-safety-gate"
+        reason = "advisory-improvement" if beats else "did-not-clear-advisory-gate"
     return ShadowCandidateResult(
         name=name,
         description=description,
@@ -273,10 +276,30 @@ def run_shadow_analysis(
     *,
     output_path: Path | str | None = None,
     cohort_start_utc: str | None = None,
+    cohort_run_tag: str | None = None,
     instruments: tuple[str, ...] = ALLOWED_INSTRUMENTS,
 ) -> ShadowReport:
-    start = cohort_start_utc or os.getenv("SHADOW_COHORT_START_UTC", CLEAN_COHORT_START_UTC)
-    trades = _load_clean_trades(Path(db_path), cohort_start_utc=start, instruments=instruments)
+    start = str(
+        cohort_start_utc
+        if cohort_start_utc is not None
+        else os.getenv("ADAPTIVE_WINDOW_START_UTC", CLEAN_COHORT_START_UTC)
+    ).strip()
+    if not start:
+        start = CLEAN_COHORT_START_UTC
+    run_tag = str(
+        cohort_run_tag
+        if cohort_run_tag is not None
+        else os.getenv("ADAPTIVE_RUN_TAG", DEFAULT_LEARNING_RUN_TAG)
+    ).strip()
+    if not run_tag:
+        # An empty tag would silently broaden the cohort to legacy regimes.
+        run_tag = DEFAULT_LEARNING_RUN_TAG
+    trades = _load_clean_trades(
+        Path(db_path),
+        cohort_start_utc=start,
+        cohort_run_tag=run_tag,
+        instruments=instruments,
+    )
     split_ratio = max(0.55, min(0.8, float(os.getenv("SHADOW_TRAIN_RATIO", "0.70"))))
     split_at = max(1, min(len(trades), int(len(trades) * split_ratio))) if trades else 0
     train = trades[:split_at]
@@ -311,8 +334,10 @@ def run_shadow_analysis(
         )
         for name, description, predicate in specs[1:]
     )
-    winners = [candidate for candidate in candidates if candidate.beats_baseline]
-    winners.sort(
+    leading_candidates = [
+        candidate for candidate in candidates if candidate.beats_baseline
+    ]
+    leading_candidates.sort(
         key=lambda candidate: (
             candidate.validation.expectancy,
             candidate.validation.profit_factor,
@@ -321,9 +346,12 @@ def run_shadow_analysis(
         ),
         reverse=True,
     )
-    recommendation = winners[0].name if winners else None
+    recommendation = leading_candidates[0].name if leading_candidates else None
     if recommendation:
-        recommendation_reason = "walk-forward candidate beat baseline and cleared sample, profit-factor and drawdown gates"
+        recommendation_reason = (
+            "advisory executed-trade subset cleared local sample, profit-factor "
+            "and drawdown gates; control-plane status remains collecting"
+        )
     elif len(validation) < min_validation:
         recommendation_reason = f"collecting clean trades: need at least {min_validation} validation trades"
     elif len(train) < min_train:
@@ -333,7 +361,9 @@ def run_shadow_analysis(
 
     report = ShadowReport(
         generated_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        evidence_revision=_deployed_revision(),
         cohort_start_utc=start,
+        cohort_run_tag=run_tag,
         instruments=instruments,
         total_clean_trades=len(trades),
         train_trades=len(train),
@@ -364,11 +394,19 @@ def run_shadow_analysis(
         flush=True,
     )
     if report.recommendation:
-        champion = next(candidate for candidate in report.candidates if candidate.name == report.recommendation)
+        leading_candidate = next(
+            candidate
+            for candidate in report.candidates
+            if candidate.name == report.recommendation
+        )
         print(
-            f"[SHADOW][CHAMPION] name={champion.name} validation_n={champion.validation.trades} "
-            f"expectancy={champion.validation.expectancy:.3f} pf={champion.validation.profit_factor:.3f} "
-            f"drawdown={champion.validation.max_drawdown:.2f} coverage={champion.validation_coverage:.2f}",
+            f"[SHADOW][CHALLENGER] name={leading_candidate.name} "
+            f"validation_n={leading_candidate.validation.trades} "
+            f"expectancy={leading_candidate.validation.expectancy:.3f} "
+            f"pf={leading_candidate.validation.profit_factor:.3f} "
+            f"drawdown={leading_candidate.validation.max_drawdown:.2f} "
+            f"coverage={leading_candidate.validation_coverage:.2f} "
+            "status=collecting auto_apply=false",
             flush=True,
         )
     return report

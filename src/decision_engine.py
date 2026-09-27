@@ -30,6 +30,13 @@ class Evaluation:
     reason: str
     market_active: bool
     candles: Optional[List[Dict[str, float]]] = None
+    # Observer-only snapshot built exclusively from broker candles explicitly
+    # marked complete.  These fields never feed the trading decision above.
+    completed_bar_open_utc: Optional[datetime] = None
+    completed_bar_close_utc: Optional[datetime] = None
+    completed_signal: Optional[str] = None
+    completed_reason: Optional[str] = None
+    completed_diagnostics: Optional[Dict[str, float]] = None
 
 
 def _default_now() -> datetime:
@@ -140,6 +147,10 @@ class DecisionEngine:
             candle_count=candle_count,
             granularity=granularity,
         )
+        completed_observation = self._completed_bar_observation(
+            raw_candles,
+            granularity=str(granularity),
+        )
         normalized = self._normalize_candles(raw_candles)
         if not normalized:
             self._log_signal(instrument, "HOLD", rsi=None, atr=None)
@@ -150,6 +161,7 @@ class DecisionEngine:
                 reason="inactive-market",
                 market_active=False,
                 candles=normalized,
+                **completed_observation,
             )
 
         diagnostics = self._build_indicators(normalized)
@@ -168,7 +180,93 @@ class DecisionEngine:
             reason=reason,
             market_active=True,
             candles=normalized,
+            **completed_observation,
         )
+
+    def _completed_bar_observation(
+        self,
+        raw_candles: List[Dict],
+        *,
+        granularity: str,
+    ) -> Dict[str, object]:
+        """Build a learning-only snapshot without changing strategy inputs.
+
+        OANDA normally returns the still-forming candle alongside completed
+        candles.  The strategy retains its existing inputs exactly; this method
+        separately derives an immutable learning observation from only candles
+        whose broker payload says ``complete: true``.
+        """
+
+        empty: Dict[str, object] = {
+            "completed_bar_open_utc": None,
+            "completed_bar_close_utc": None,
+            "completed_signal": None,
+            "completed_reason": None,
+            "completed_diagnostics": None,
+        }
+        try:
+            usable: List[tuple[Dict, Dict[str, float], datetime]] = []
+            for candle in raw_candles or []:
+                if candle.get("complete") is not True:
+                    continue
+                timestamp = self._parse_candle_timestamp(candle.get("time"))
+                normalized = self._normalize_candles([candle])
+                if timestamp is None or not normalized:
+                    continue
+                usable.append((candle, normalized[0], timestamp))
+
+            if not usable:
+                return empty
+
+            completed_candles = [item[1] for item in usable]
+            bar_open_utc = usable[-1][2]
+            duration = self._granularity_duration(granularity)
+            if duration is None:
+                return empty
+            diagnostics = self._build_indicators(completed_candles)
+            signal, reason = self._generate_signal(diagnostics)
+            return {
+                "completed_bar_open_utc": bar_open_utc,
+                "completed_bar_close_utc": bar_open_utc + duration,
+                "completed_signal": signal,
+                "completed_reason": reason,
+                "completed_diagnostics": diagnostics,
+            }
+        except Exception as exc:  # pragma: no cover - observer must fail open
+            print(
+                f"[LEARNING-OBS][WARN] completed-candle snapshot unavailable "
+                f"error={type(exc).__name__}",
+                flush=True,
+            )
+            return empty
+
+    @staticmethod
+    def _parse_candle_timestamp(value: object) -> Optional[datetime]:
+        if value is None:
+            return None
+        try:
+            timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc)
+
+    @staticmethod
+    def _granularity_duration(granularity: str) -> Optional[timedelta]:
+        label = str(granularity or "").strip().upper()
+        try:
+            if label.startswith("S"):
+                return timedelta(seconds=int(label[1:]))
+            if label.startswith("M"):
+                return timedelta(minutes=int(label[1:]))
+            if label.startswith("H"):
+                return timedelta(hours=int(label[1:]))
+            if label.startswith("D"):
+                return timedelta(days=int(label[1:] or "1"))
+        except (TypeError, ValueError):
+            return None
+        return None
 
     def _fetch_candles(
         self,
