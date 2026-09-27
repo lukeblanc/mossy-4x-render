@@ -1,11 +1,15 @@
 services:
   - type: worker
     name: mossy-4x
-    env: python
+    runtime: python
     plan: starter
-    autoDeploy: true
+    autoDeployTrigger: commit
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python -m src.main"
+    disk:
+      name: disk
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: MODE
         value: demo
@@ -24,9 +28,9 @@ services:
       - key: AGGRESSIVE_RISK_PCT
         value: "0.0025"
       - key: AGGRESSIVE_MAX_POSITIONS
-        value: "2"
+        value: "1"
       - key: MAX_CONCURRENT_POSITIONS
-        value: "2"
+        value: "1"
       - key: MAX_TRADES_PER_DAY
         value: "8"
       - key: AGGRESSIVE_COOLDOWN_CANDLES
@@ -48,9 +52,9 @@ services:
       - key: MAX_RISK_PER_TRADE_CAP_PCT
         value: "0.5"
       - key: MAX_RISK_PER_TRADE_CCY
-        value: "1.50"
+        value: "0.50"
       - key: HARD_MAX_LOSS_CCY
-        value: "1.25"
+        value: "0.50"
       - key: PROFIT_PROTECT_TRIGGER_CCY
         value: "2.00"
       - key: PROFIT_PROTECT_FLOOR_CCY
@@ -123,10 +127,10 @@ services:
   # never exposed. Optimisation, GitHub writes, and deploy triggers are absent.
   - type: web
     name: mcp-web
-    env: docker
+    runtime: docker
     plan: free
     dockerfilePath: mcp/Dockerfile
-    autoDeploy: true
+    autoDeployTrigger: commit
     healthCheckPath: /health
     envVars:
       - key: MOSSY_MCP_STATUS_KEY

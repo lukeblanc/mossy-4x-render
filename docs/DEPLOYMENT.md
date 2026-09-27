@@ -81,10 +81,13 @@ The trailing exit is controlled via environment variables (all optional):
 
 ## Risk limits and exits
 
-- `MAX_OPEN_TRADES` / `MAX_CONCURRENT_POSITIONS` (default `3`) — cap simultaneous positions across instruments.
+- `MAX_OPEN_TRADES` / `MAX_CONCURRENT_POSITIONS` cap simultaneous positions. The Render safe-demo profile forces this to `1` for the supervised canary.
+- `MAX_RISK_PER_TRADE_CCY` is the intended broker-stop exposure in the account currency. The Render safe-demo profile and code-level ceiling are `0.50`; a smaller positive value is preserved, while an invalid explicit value blocks new entries.
+- `HARD_MAX_LOSS_CCY` is an additional software-polled close trigger, capped at `0.50` in the Render safe-demo profile. It is not a guaranteed realised-loss limit because market gaps, slippage, fees, and polling latency can cause an exit beyond the threshold.
 - Initial protective orders are ATR-based:
   - `SL_ATR_MULT` (default `1.2`) and `TP_ATR_MULT` (default `1.0`) scale the latest ATR to place the stop-loss and take-profit.
   - Per-instrument overrides live in `risk.instrument_atr_multipliers` (defaults set `XAU_USD` to `sl=1.6`, `tp=0.8`).
+  - The exact broker-precision stop distance is used for sizing and submission. A market order without a valid protective stop is blocked, and a newly filled trade whose pending stop cannot be read back is closed by exact trade ID while further entries are halted.
 - Time-stop failsafe (runs before entry gating):
   - `TIME_STOP_MINUTES` (default `90`) — minimum trade age before evaluation.
   - `TIME_STOP_MIN_PIPS` (default `2`) — close if pips stay below this after the time threshold.

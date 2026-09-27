@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import os
 from typing import Dict, List, Optional
 
@@ -13,6 +14,13 @@ def _env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _bounded_positive_env(name: str, default: float, maximum: float) -> float:
+    value = _env_float(name, default)
+    if not math.isfinite(value) or value <= 0:
+        return float(default)
+    return min(float(maximum), value)
 
 
 class SmartExitGuard(JournalReconcilerProfitProtection):
@@ -33,7 +41,9 @@ class SmartExitGuard(JournalReconcilerProfitProtection):
         super().__init__(*args, **kwargs)
         legacy_trigger = self.trigger
         legacy_trail = self.trail
-        self.hard_max_loss_ccy = max(0.0, _env_float("HARD_MAX_LOSS_CCY", 1.25))
+        self.hard_max_loss_ccy = _bounded_positive_env(
+            "HARD_MAX_LOSS_CCY", 0.50, 0.50
+        )
         self.profit_protect_trigger_ccy = max(
             0.0, _env_float("PROFIT_PROTECT_TRIGGER_CCY", 2.00)
         )

@@ -22,6 +22,9 @@ def _run_config_import(tmp_path: Path) -> dict[str, str]:
             "AGGRESSIVE_TEST_MODE": "true",
             "AGGRESSIVE_TEST_RISK_PCT": "2.5",
             "MAX_RISK_PER_TRADE_CAP_PCT": "1.0",
+            "MAX_RISK_PER_TRADE_CCY": "1.80",
+            "HARD_MAX_LOSS_CCY": "1.50",
+            "MAX_CONCURRENT_POSITIONS": "2",
             "INSTRUMENTS": "EUR_USD,GBP_USD,AUD_USD,USD_JPY,XAU_USD",
             "MERGE_DEFAULT_INSTRUMENTS": "true",
             "SESSION_MODE": "ALWAYS",
@@ -33,7 +36,8 @@ import os
 import app.config
 keys = [
     'MODE', 'OANDA_ENV', 'AGGRESSIVE_MODE', 'AGGRESSIVE_TEST_MODE',
-    'MAX_RISK_PER_TRADE_CAP_PCT', 'INSTRUMENTS',
+    'MAX_RISK_PER_TRADE_CAP_PCT', 'MAX_RISK_PER_TRADE_CCY',
+    'HARD_MAX_LOSS_CCY', 'MAX_CONCURRENT_POSITIONS', 'INSTRUMENTS',
     'MERGE_DEFAULT_INSTRUMENTS', 'SESSION_MODE',
     'RESET_MAX_DRAWDOWN_HALT'
 ]
@@ -58,6 +62,9 @@ def test_render_safe_demo_profile_overrides_stale_dashboard_values(tmp_path: Pat
         "AGGRESSIVE_MODE": "false",
         "AGGRESSIVE_TEST_MODE": "false",
         "MAX_RISK_PER_TRADE_CAP_PCT": "0.5",
+        "MAX_RISK_PER_TRADE_CCY": "0.50",
+        "HARD_MAX_LOSS_CCY": "0.50",
+        "MAX_CONCURRENT_POSITIONS": "1",
         "INSTRUMENTS": "AUD_USD,GBP_USD",
         "MERGE_DEFAULT_INSTRUMENTS": "false",
         "SESSION_MODE": "SOFT",

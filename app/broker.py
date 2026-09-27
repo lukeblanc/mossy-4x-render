@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from datetime import datetime, timezone
 import math
+import os
+from pathlib import Path
+import time
 from typing import Dict, Optional
 
 import httpx
 
 from app.config import settings
+from src.cash_risk import configured_cash_risk_limit
 
 PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
@@ -80,13 +84,22 @@ def _precision_for(instrument: str) -> Decimal:
     }.get(instrument, Decimal("0.00001"))
 
 
-def _quantize_value(value: float | Decimal | str, precision: Decimal) -> Decimal:
+def _quantize_value(
+    value: float | Decimal | str,
+    precision: Decimal,
+    *,
+    rounding: str = ROUND_HALF_UP,
+) -> Decimal:
     try:
         dec_value = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         raise ValueError(f"Invalid numeric value for normalization: {value}")
-
-    return dec_value.quantize(precision, rounding=ROUND_HALF_UP)
+    if not dec_value.is_finite():
+        raise ValueError(f"Non-finite numeric value for normalization: {value}")
+    try:
+        return dec_value.quantize(precision, rounding=rounding)
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid numeric value for normalization: {value}") from exc
 
 
 def normalize_price(instrument: str, price: float | Decimal | str) -> str:
@@ -98,9 +111,37 @@ def normalize_price(instrument: str, price: float | Decimal | str) -> str:
 
 def normalize_distance(instrument: str, distance: float | Decimal | str) -> str:
     precision = _precision_for(instrument)
-    dec_distance = _quantize_value(distance, precision)
+    try:
+        raw_distance = Decimal(str(distance))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"Invalid protective-stop distance: {distance}") from exc
+    if not raw_distance.is_finite() or raw_distance <= 0:
+        raise ValueError(f"Invalid protective-stop distance: {distance}")
+    if raw_distance < precision:
+        raise ValueError(
+            f"Protective-stop distance is below {instrument} precision: {distance}"
+        )
+    # Preserve at least the strategy's requested technical distance, then size
+    # from this exact rounded-up value before submitting it to the broker.
+    dec_distance = _quantize_value(distance, precision, rounding=ROUND_CEILING)
 
     return str(dec_distance)
+
+
+def _valid_transaction_id(value: object) -> bool:
+    ticket = str(value or "")
+    return ticket.isascii() and ticket.isdigit() and int(ticket) > 0
+
+
+def _entry_halt_path() -> Path:
+    configured = os.getenv("MOSSY_STATE_PATH")
+    if configured:
+        root = Path(configured)
+    elif Path("/var/data").exists():
+        root = Path("/var/data")
+    else:
+        root = Path("data")
+    return root / "broker_entry_halt.txt"
 
 
 class Broker:
@@ -121,9 +162,34 @@ class Broker:
         else:
             self.base_url = PRACTICE
         self._headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        self._entry_halt_path = _entry_halt_path()
+        try:
+            persisted_halt = self._entry_halt_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            persisted_halt = ""
+        self._entry_halted_reason: Optional[str] = persisted_halt or None
+        self._account_currency: Optional[str] = None
+        self._loss_conversion_cache: dict[tuple[str, str], tuple[float, float]] = {}
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=15.0)
+
+    def _latch_entry_halt(self, reason: str) -> None:
+        self._entry_halted_reason = reason
+        try:
+            self._entry_halt_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self._entry_halt_path.with_suffix(".tmp")
+            temporary.write_text(f"{reason}\n", encoding="utf-8")
+            os.replace(temporary, self._entry_halt_path)
+        except OSError as exc:
+            print(f"[BROKER][CRITICAL] Could not persist entry halt: {exc}", flush=True)
+
+    def _clear_entry_halt(self) -> None:
+        self._entry_halted_reason = None
+        try:
+            self._entry_halt_path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"[BROKER][WARN] Could not clear reconciled entry halt: {exc}", flush=True)
 
     def trade_details(self, trade_id: str) -> Optional[Dict]:
         if not self.key or not self.account:
@@ -143,10 +209,34 @@ class Broker:
                     data = resp.json().get("account", {})
                     balance = data.get("balance")
                     currency = data.get("currency")
+                    self._account_currency = str(currency or "").upper() or None
+                    if self._account_currency != "AUD":
+                        self._latch_entry_halt("account-currency-mismatch")
+                        print(
+                            "[OANDA][CRITICAL] Expected AUD account currency; "
+                            f"received {self._account_currency or 'unknown'}",
+                            flush=True,
+                        )
+                        return {
+                            "ok": False,
+                            "reason": "account-currency-mismatch",
+                            "currency": currency,
+                        }
                     print(
                         f"[OANDA] Connected ok. Balance={balance} {currency} (mode={self.mode})",
                         flush=True,
                     )
+                    if self._entry_halted_reason:
+                        trades = self._read_open_trade_summaries(client)
+                        if trades is not None and self._audit_open_trade_protection(
+                            client, trades
+                        ):
+                            old_reason = self._entry_halted_reason
+                            self._clear_entry_halt()
+                            print(
+                                f"[BROKER][RECOVERY] persisted halt reconciled reason={old_reason}",
+                                flush=True,
+                            )
                     return {"ok": True, "balance": balance, "currency": currency}
                 print(
                     f"[OANDA] Connectivity error {resp.status_code}: {resp.text}",
@@ -156,6 +246,185 @@ class Broker:
         except Exception as exc:
             print(f"[OANDA] Connectivity exception: {exc}", flush=True)
             return {"ok": False, "error": str(exc)}
+
+    def _read_open_trade_summaries(self, client) -> Optional[list]:
+        try:
+            response = client.get(f"/v3/accounts/{self.account}/openTrades")
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            trades = payload.get("trades") if isinstance(payload, dict) else None
+            if not isinstance(trades, list) or any(
+                not isinstance(trade, dict)
+                or not _valid_transaction_id(trade.get("id"))
+                or not trade.get("instrument")
+                for trade in trades
+            ):
+                return None
+            return trades
+        except Exception:
+            return None
+
+    def _open_trade_protection_status(
+        self, client, summary: dict
+    ) -> Optional[bool]:
+        """Return True for verified protection, False for unsafe, None if unknown."""
+
+        trade_id = str(summary.get("id") or "")
+        try:
+            trade = read_trade_details(client, self.account, trade_id)
+        except Exception:
+            return None
+        if not isinstance(trade, dict):
+            return None
+        if (
+            str(trade.get("id") or "") != trade_id
+            or str(trade.get("state") or "").upper() != "OPEN"
+            or str(trade.get("instrument") or "") != str(summary.get("instrument") or "")
+        ):
+            return False
+        stop_order = trade.get("stopLossOrder") or trade.get("guaranteedStopLossOrder")
+        if not isinstance(stop_order, dict):
+            return False
+        stop_id = str(stop_order.get("id") or "")
+        summary_stop_id = str(
+            summary.get("stopLossOrderID")
+            or summary.get("guaranteedStopLossOrderID")
+            or ""
+        )
+        if (
+            not _valid_transaction_id(stop_id)
+            or (summary_stop_id and summary_stop_id != stop_id)
+            or str(stop_order.get("state") or "").upper() != "PENDING"
+            or str(stop_order.get("type") or "").upper()
+            not in {"STOP_LOSS", "GUARANTEED_STOP_LOSS"}
+            or str(stop_order.get("tradeID") or "") != trade_id
+        ):
+            return False
+        try:
+            units = Decimal(str(trade.get("currentUnits")))
+            entry_price = Decimal(str(trade.get("price")))
+            stop_price = Decimal(str(stop_order.get("price")))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        if (
+            not units.is_finite()
+            or units == 0
+            or not entry_price.is_finite()
+            or entry_price <= 0
+            or not stop_price.is_finite()
+            or stop_price <= 0
+        ):
+            return False
+        try:
+            _, quote_currency = str(trade["instrument"]).upper().split("_", 1)
+        except (KeyError, ValueError):
+            return False
+        conversion = self.conversion_rate(quote_currency, "AUD")
+        cash_limit = configured_cash_risk_limit()
+        if conversion is None or cash_limit <= 0:
+            return None
+        loss_distance = (
+            max(Decimal("0"), entry_price - stop_price)
+            if units > 0
+            else max(Decimal("0"), stop_price - entry_price)
+        )
+        risk = abs(units) * loss_distance * Decimal(str(conversion))
+        return risk.is_finite() and risk <= Decimal(str(cash_limit))
+
+    def _close_exact_trade(self, client, trade_id: str) -> bool:
+        if not _valid_transaction_id(trade_id):
+            return False
+        try:
+            close_response = client.put(
+                f"/v3/accounts/{self.account}/trades/{trade_id}/close",
+                json={"units": "ALL"},
+            )
+            if close_response.status_code not in (200, 201):
+                return False
+            payload = close_response.json()
+            fill = payload.get("orderFillTransaction") if isinstance(payload, dict) else None
+            closed = fill.get("tradesClosed") if isinstance(fill, dict) else None
+            if not isinstance(closed, list) or not any(
+                isinstance(item, dict) and str(item.get("tradeID") or "") == trade_id
+                for item in closed
+            ):
+                return False
+            trade = read_trade_details(client, self.account, trade_id)
+            return (
+                isinstance(trade, dict)
+                and str(trade.get("id") or "") == trade_id
+                and str(trade.get("state") or "").upper() == "CLOSED"
+            )
+        except Exception:
+            return False
+
+    def _audit_open_trade_protection(self, client, trades: list) -> bool:
+        """Verify every stop and close unsafe trades; unknown evidence blocks entry."""
+
+        found_issue = False
+        for trade in trades:
+            status = self._open_trade_protection_status(client, trade)
+            if status is True:
+                continue
+            found_issue = True
+            trade_id = str(trade.get("id") or "")
+            if status is None:
+                self._latch_entry_halt("protective-stop-audit-unavailable")
+                close_ok = self._close_exact_trade(client, trade_id)
+                print(
+                    "[BROKER][CRITICAL] protective-stop audit unavailable; "
+                    f"trade_id={trade_id} emergency_close={close_ok} "
+                    "new_entries_halted=true",
+                    flush=True,
+                )
+                continue
+            self._latch_entry_halt("unprotected-open-trade")
+            close_ok = self._close_exact_trade(client, trade_id)
+            print(
+                "[BROKER][CRITICAL] unprotected open trade detected; "
+                f"trade_id={trade_id} emergency_close={close_ok} "
+                "new_entries_halted=true",
+                flush=True,
+            )
+        return not found_issue
+
+    def _halt_unknown_order_state(self, client, reason: str, response: dict) -> dict:
+        self._latch_entry_halt(reason)
+        trades = self._read_open_trade_summaries(client)
+        audited = trades is not None
+        if trades is not None:
+            self._audit_open_trade_protection(client, trades)
+        return {
+            "status": "UNKNOWN",
+            "reason": reason,
+            "open_trade_audit": "completed" if audited else "unavailable",
+            "response": response,
+        }
+
+    def _halt_and_close_trade(
+        self,
+        client,
+        *,
+        trade_id: str,
+        reason: str,
+        response: dict,
+    ) -> dict:
+        """Close one uncertain fill and persist an entry halt."""
+
+        self._latch_entry_halt(reason)
+        close_ok = self._close_exact_trade(client, trade_id)
+        print(
+            f"[BROKER][CRITICAL] {reason}; trade_id={trade_id} "
+            f"emergency_close={close_ok} new_entries_halted=true",
+            flush=True,
+        )
+        return {
+            "status": "UNKNOWN",
+            "reason": reason,
+            "emergency_close": "confirmed" if close_ok else "uncertain",
+            "response": response,
+        }
 
     def place_order(
         self,
@@ -172,6 +441,34 @@ class Broker:
             print(f"[BROKER] Ignoring unknown signal: {signal}", flush=True)
             return {"status": "IGNORED", "reason": "unknown-signal"}
 
+        if self._entry_halted_reason:
+            print(
+                f"[BROKER][HALT] Entry blocked: {self._entry_halted_reason}",
+                flush=True,
+            )
+            return {"status": "BLOCKED", "reason": self._entry_halted_reason}
+
+        try:
+            units_value = float(units)
+        except (TypeError, ValueError, OverflowError):
+            units_value = 0.0
+        if (
+            not math.isfinite(units_value)
+            or units_value <= 0
+            or not units_value.is_integer()
+        ):
+            print(f"[BROKER][BLOCK] Invalid order units: {units}", flush=True)
+            return {"status": "BLOCKED", "reason": "invalid-order-units"}
+
+        try:
+            normalized_sl_distance = normalize_distance(instrument, sl_distance)
+        except (TypeError, ValueError, InvalidOperation):
+            print(
+                f"[BROKER][BLOCK] {instrument} {side} missing a valid protective stop",
+                flush=True,
+            )
+            return {"status": "BLOCKED", "reason": "invalid-protective-stop"}
+
         if self.mode == "simulation":
             print(
                 f"[BROKER] {self.mode.upper()} SIMULATED {side} order for {instrument} size={units}",
@@ -186,23 +483,47 @@ class Broker:
             )
             return {"status": "ERROR", "reason": "missing-creds"}
 
-        trade_units = int(units if side == "BUY" else -units)
+        try:
+            _, quote_currency = instrument.upper().split("_", 1)
+        except ValueError:
+            return {"status": "BLOCKED", "reason": "invalid-instrument"}
+        cash_risk_limit = configured_cash_risk_limit()
+        loss_conversion = self.conversion_rate(quote_currency, "AUD")
+        if cash_risk_limit <= 0:
+            return {"status": "BLOCKED", "reason": "invalid-cash-risk-cap"}
+        if loss_conversion is None:
+            return {"status": "BLOCKED", "reason": "loss-conversion-unavailable"}
+        try:
+            planned_stop_risk = (
+                Decimal(str(units_value))
+                * Decimal(normalized_sl_distance)
+                * Decimal(str(loss_conversion))
+            )
+            cash_limit_decimal = Decimal(str(cash_risk_limit))
+        except InvalidOperation:
+            return {"status": "BLOCKED", "reason": "invalid-planned-stop-risk"}
+        if (
+            not planned_stop_risk.is_finite()
+            or planned_stop_risk <= 0
+            or planned_stop_risk > cash_limit_decimal
+        ):
+            print(
+                f"[BROKER][BLOCK] planned_stop_risk={planned_stop_risk} "
+                f"limit={cash_limit_decimal} {instrument}",
+                flush=True,
+            )
+            return {"status": "BLOCKED", "reason": "cash-risk-limit-exceeded"}
+
+        trade_units = int(units_value if side == "BUY" else -units_value)
         order_payload = {
             "type": "MARKET",
             "instrument": instrument,
             "units": str(trade_units),
+            "stopLossOnFill": {
+                "timeInForce": "GTC",
+                "distance": normalized_sl_distance,
+            },
         }
-
-        if sl_distance is not None and sl_distance > 0:
-            try:
-                normalized_sl_distance = normalize_distance(instrument, sl_distance)
-            except ValueError:
-                normalized_sl_distance = None
-            if normalized_sl_distance is not None:
-                order_payload["stopLossOnFill"] = {
-                    "timeInForce": "GTC",
-                    "distance": normalized_sl_distance,
-                }
         if (
             entry_price is not None
             and tp_distance is not None
@@ -214,7 +535,14 @@ class Broker:
             except (TypeError, ValueError, InvalidOperation):
                 entry_val = None
                 tp_val = None
-            if entry_val is not None and tp_val is not None:
+            if (
+                entry_val is not None
+                and tp_val is not None
+                and entry_val.is_finite()
+                and tp_val.is_finite()
+                and entry_val > 0
+                and tp_val > 0
+            ):
                 if side == "BUY":
                     tp_price = entry_val + tp_val
                 else:
@@ -237,17 +565,124 @@ class Broker:
                 if resp.status_code in (200, 201):
                     data = resp.json()
                     if not isinstance(data, dict):
-                        return {"status": "UNKNOWN", "reason": "invalid-order-response"}
+                        return self._halt_unknown_order_state(
+                            client, "invalid-order-response", {}
+                        )
                     if data.get("orderCancelTransaction"):
                         return {"status": "CANCELLED", "response": data}
                     if data.get("orderRejectTransaction"):
                         return {"status": "REJECTED", "response": data}
                     filled = opened_trade_fill(data)
                     if filled is None:
-                        return {"status": "UNKNOWN", "reason": "no-confirmed-trade-opening", "response": data}
-                    if (data["orderFillTransaction"].get("instrument") != instrument
-                            or filled["units"] * trade_units <= 0):
-                        return {"status": "UNKNOWN", "reason": "fill-does-not-match-request", "response": data}
+                        return self._halt_unknown_order_state(
+                            client, "no-confirmed-trade-opening", data
+                        )
+                    if (
+                        data["orderFillTransaction"].get("instrument") != instrument
+                        or filled["units"] * trade_units <= 0
+                        or abs(filled["units"]) > abs(trade_units)
+                    ):
+                        return self._halt_and_close_trade(
+                            client,
+                            trade_id=filled["trade_id"],
+                            reason="fill-does-not-match-request",
+                            response=data,
+                        )
+                    try:
+                        trade = read_trade_details(
+                            client, self.account, filled["trade_id"]
+                        )
+                    except Exception:
+                        trade = None
+                    stop_order = (
+                        (
+                            trade.get("stopLossOrder")
+                            or trade.get("guaranteedStopLossOrder")
+                        )
+                        if isinstance(trade, dict)
+                        else None
+                    )
+                    stop_trade_id = (
+                        str(stop_order.get("tradeID") or "")
+                        if isinstance(stop_order, dict)
+                        else ""
+                    )
+                    stop_type = (
+                        str(stop_order.get("type") or "").upper()
+                        if isinstance(stop_order, dict)
+                        else ""
+                    )
+                    try:
+                        current_units = Decimal(str(trade.get("currentUnits")))
+                        trade_price = Decimal(str(trade.get("price")))
+                        stop_price = Decimal(str(stop_order.get("price")))
+                        submitted_distance = Decimal(normalized_sl_distance)
+                        conversion_decimal = Decimal(str(loss_conversion))
+                    except (AttributeError, InvalidOperation, TypeError, ValueError):
+                        current_units = Decimal("NaN")
+                        trade_price = Decimal("NaN")
+                        stop_price = Decimal("NaN")
+                        submitted_distance = Decimal("NaN")
+                        conversion_decimal = Decimal("NaN")
+                    numeric_stop_fields_valid = all(
+                        value.is_finite()
+                        for value in (
+                            current_units,
+                            trade_price,
+                            stop_price,
+                            submitted_distance,
+                            conversion_decimal,
+                        )
+                    )
+                    if numeric_stop_fields_valid:
+                        actual_distance = abs(trade_price - stop_price)
+                        actual_stop_risk = (
+                            abs(current_units) * actual_distance * conversion_decimal
+                        )
+                        stop_direction_ok = (
+                            (side == "BUY" and stop_price < trade_price)
+                            or (side == "SELL" and stop_price > trade_price)
+                        )
+                    else:
+                        actual_distance = Decimal("NaN")
+                        actual_stop_risk = Decimal("NaN")
+                        stop_direction_ok = False
+                    if (
+                        not isinstance(trade, dict)
+                        or str(trade.get("id") or "") != filled["trade_id"]
+                        or str(trade.get("state") or "").upper() != "OPEN"
+                        or str(trade.get("instrument") or "") != instrument
+                        or not current_units.is_finite()
+                        or current_units == 0
+                        or current_units * Decimal(str(trade_units)) <= 0
+                        or abs(current_units) > abs(Decimal(str(trade_units)))
+                        or not isinstance(stop_order, dict)
+                        or not _valid_transaction_id(stop_order.get("id"))
+                        or str(stop_order.get("state") or "").upper() != "PENDING"
+                        or stop_type not in {"STOP_LOSS", "GUARANTEED_STOP_LOSS"}
+                        or stop_trade_id != filled["trade_id"]
+                        or not trade_price.is_finite()
+                        or not stop_price.is_finite()
+                        or trade_price <= 0
+                        or stop_price <= 0
+                        or not stop_direction_ok
+                        or not actual_stop_risk.is_finite()
+                        or actual_stop_risk <= 0
+                        or actual_stop_risk > cash_limit_decimal
+                        or actual_distance > submitted_distance + _precision_for(instrument)
+                    ):
+                        return self._halt_and_close_trade(
+                            client,
+                            trade_id=filled["trade_id"],
+                            reason="protective-stop-not-confirmed",
+                            response=data,
+                        )
+                    print(
+                        f"[BROKER][STOP-VERIFIED] trade_id={filled['trade_id']} "
+                        f"stop_order_id={stop_order['id']} "
+                        f"planned_stop_risk={actual_stop_risk:.5f} AUD",
+                        flush=True,
+                    )
                     print(f"[OANDA] DEMO TRADE OPENED trade_id={filled['trade_id']} "
                           f"price={filled['price']} units={filled['units']}", flush=True)
                     return {"status": "SENT", "response": data}
@@ -258,14 +693,34 @@ class Broker:
                         f"[BROKER] LIVE order error {resp.status_code}: {resp.text}",
                         flush=True,
                     )
-                return {"status": "UNKNOWN" if resp.status_code >= 500 else "ERROR",
-                        "code": resp.status_code, "text": resp.text}
+                if resp.status_code >= 500:
+                    result = self._halt_unknown_order_state(
+                        client, "order-http-state-uncertain", {}
+                    )
+                    result.update({"code": resp.status_code, "text": resp.text})
+                    return result
+                return {"status": "ERROR", "code": resp.status_code, "text": resp.text}
         except Exception as exc:
             if self.mode == "demo":
                 print(f"[OANDA] DEMO ORDER FAILED {exc}", flush=True)
             else:
                 print(f"[BROKER] LIVE order exception: {exc}", flush=True)
-            return {"status": "UNKNOWN", "error": str(exc)}
+            self._latch_entry_halt("order-transport-state-uncertain")
+            audit_status = "unavailable"
+            try:
+                with self._client() as audit_client:
+                    trades = self._read_open_trade_summaries(audit_client)
+                    if trades is not None:
+                        self._audit_open_trade_protection(audit_client, trades)
+                        audit_status = "completed"
+            except Exception:
+                pass
+            return {
+                "status": "UNKNOWN",
+                "reason": "order-transport-state-uncertain",
+                "open_trade_audit": audit_status,
+                "error": str(exc),
+            }
 
     def list_open_trades(self) -> Optional[list]:
         """Return currently open trades, or ``None`` when the broker cannot be read.
@@ -279,20 +734,12 @@ class Broker:
             return None
         try:
             with self._client() as client:
-                resp = client.get(f"/v3/accounts/{self.account}/openTrades")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    trades = data.get("trades")
-                    if not isinstance(trades, list) or any(
-                        not isinstance(trade, dict) or not trade.get("instrument")
-                        for trade in trades
-                    ):
-                        return None
-                    return trades
-                print(
-                    f"[OANDA] Failed to read open trades status={resp.status_code} body={resp.text}",
-                    flush=True,
-                )
+                trades = self._read_open_trade_summaries(client)
+                if trades is None:
+                    return None
+                if not self._audit_open_trade_protection(client, trades):
+                    return None
+                return trades
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
         return None
@@ -520,17 +967,62 @@ class Broker:
             return None
         if source == target:
             return 1.0
+        if not (self.key and self.account):
+            return None
 
-        direct = f"{source}_{target}"
-        direct_mid = self.mid_price(direct)
-        if direct_mid and direct_mid > 0:
-            return direct_mid
+        cache_key = (source, target)
+        cached = self._loss_conversion_cache.get(cache_key)
+        now_monotonic = time.monotonic()
+        if cached is not None and now_monotonic - cached[0] <= 15.0:
+            return cached[1]
 
-        inverse = f"{target}_{source}"
-        inverse_mid = self.mid_price(inverse)
-        if inverse_mid and inverse_mid > 0:
-            return 1.0 / inverse_mid
+        # OANDA's accountLoss home-conversion factor is deliberately used
+        # instead of a mid price: loss-side conversion is the conservative
+        # value for sizing a protective stop in the account currency.
+        candidates = (f"{source}_{target}", f"{target}_{source}")
+        try:
+            with self._client() as client:
+                if self._account_currency is None:
+                    summary = client.get(f"/v3/accounts/{self.account}/summary")
+                    if summary.status_code != 200:
+                        return None
+                    account = summary.json().get("account", {})
+                    self._account_currency = str(account.get("currency") or "").upper() or None
+                if self._account_currency != target:
+                    return None
 
+                for instrument in candidates:
+                    response = client.get(
+                        f"/v3/accounts/{self.account}/pricing",
+                        params={
+                            "instruments": instrument,
+                            "includeHomeConversions": "true",
+                        },
+                    )
+                    if response.status_code != 200:
+                        continue
+                    payload = response.json()
+                    conversions = payload.get("homeConversions")
+                    if not isinstance(conversions, list):
+                        continue
+                    for conversion in conversions:
+                        if not isinstance(conversion, dict):
+                            continue
+                        if str(conversion.get("currency") or "").upper() != source:
+                            continue
+                        try:
+                            factor = float(conversion["accountLoss"])
+                        except (KeyError, TypeError, ValueError, OverflowError):
+                            return None
+                        if math.isfinite(factor) and factor > 0:
+                            self._loss_conversion_cache[cache_key] = (
+                                now_monotonic,
+                                factor,
+                            )
+                            return factor
+                        return None
+        except Exception as exc:
+            print(f"[OANDA] Loss-side conversion unavailable: {exc}", flush=True)
         return None
 
     def close_all_positions(self) -> None:

@@ -46,15 +46,20 @@ def test_incomplete_or_invalid_opening_fill_is_not_confirmed(path, value):
     ({"orderFillTransaction": {"id": "2", "tradeReduced": {"tradeID": "10"}}}, "UNKNOWN"),
     ([], "UNKNOWN"),
 ])
-def test_http_success_does_not_mean_a_new_trade(monkeypatch, payload, expected):
+def test_http_success_does_not_mean_a_new_trade(
+    monkeypatch, tmp_path, payload, expected
+):
     monkeypatch.setattr(settings, "MODE", "demo")
     monkeypatch.setattr(settings, "OANDA_ENV", "practice")
     monkeypatch.setattr(settings, "OANDA_API_KEY", "test-only")
     monkeypatch.setattr(settings, "OANDA_ACCOUNT_ID", "test-only")
+    monkeypatch.setenv("MOSSY_STATE_PATH", str(tmp_path))
+    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0.50")
     from contextlib import nullcontext
     client = SimpleNamespace(post=lambda *args, **kwargs:
                              SimpleNamespace(status_code=201, json=lambda: deepcopy(payload)))
     monkeypatch.setattr(Broker, "_client", lambda self: nullcontext(client))
+    monkeypatch.setattr(Broker, "conversion_rate", lambda self, *args: 1.0)
     assert Broker().place_order("EUR_USD", "BUY", 100, sl_distance=0.001)["status"] == expected
 
 
@@ -92,6 +97,40 @@ def test_entry_journal_uses_actual_fill_price_size_and_time(runtime, monkeypatch
     assert record["stop_loss_price"] == pytest.approx(1.20023)
     assert record["gating_flags"]["signal_price"] == 1.2
     risk.register_entry.assert_called_once()
+
+
+def test_exact_normalized_stop_is_used_for_sizing_and_submission(runtime, monkeypatch):
+    broker, risk, _, engine = prepare_decision(runtime, monkeypatch)
+    engine.evaluate_all.return_value = engine.evaluate_all.return_value[:1]
+    risk.sl_distance_from_atr.return_value = 0.001235
+    captured = {}
+
+    def size_for_exact_stop(*args, **kwargs):
+        captured["stop_distance"] = args[2]
+        return 100, {"final_units": 100}
+
+    monkeypatch.setattr(main.position_sizer, "units_for_risk", size_for_exact_stop)
+    broker.place_order.return_value = confirmed_order_result()
+
+    asyncio.run(main.decision_cycle())
+
+    assert captured["stop_distance"] == pytest.approx(0.00124)
+    assert broker.place_order.call_args.kwargs["sl_distance"] == pytest.approx(0.00124)
+
+
+def test_subprecision_protective_stop_blocks_before_sizing_or_order(runtime, monkeypatch):
+    broker, risk, _, engine = prepare_decision(runtime, monkeypatch)
+    engine.evaluate_all.return_value = engine.evaluate_all.return_value[:1]
+    risk.sl_distance_from_atr.return_value = 0.000001
+    monkeypatch.setattr(
+        main.position_sizer,
+        "units_for_risk",
+        lambda *args, **kwargs: pytest.fail("sizing must not run without a valid stop"),
+    )
+
+    asyncio.run(main.decision_cycle())
+
+    broker.place_order.assert_not_called()
 
 
 @pytest.mark.parametrize("result", [{"status": "UNKNOWN"}, {"status": "SENT"}])

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import math
-import os
 from typing import Optional, Tuple
 
 from src import adaptive_policy
+from src.cash_risk import HARD_MAX_RISK_PER_TRADE_CCY, configured_cash_risk_limit
 
 
 ACCOUNT_CURRENCY = "AUD"
-DEFAULT_MAX_RISK_PER_TRADE_CCY = 1.50
+DEFAULT_MAX_RISK_PER_TRADE_CCY = HARD_MAX_RISK_PER_TRADE_CCY
 
 
 def _pip_size(instrument: str) -> float:
@@ -37,11 +37,7 @@ def _pip_value_per_unit_in_account_ccy(
 
 
 def _max_risk_per_trade_ccy() -> float:
-    raw = os.getenv("MAX_RISK_PER_TRADE_CCY", str(DEFAULT_MAX_RISK_PER_TRADE_CCY))
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_RISK_PER_TRADE_CCY
+    return configured_cash_risk_limit()
 
 
 def units_for_risk(
@@ -57,11 +53,19 @@ def units_for_risk(
     """Return units sized to percentage risk with an absolute cash-risk ceiling.
 
     The percentage risk remains the strategy request, but the final broker-side
-    stop exposure is capped by MAX_RISK_PER_TRADE_CCY (default 1.50 in account
+    stop exposure is capped by MAX_RISK_PER_TRADE_CCY (default 0.50 in account
     currency). Adaptive learning may only reduce or block risk; it cannot raise
     the requested percentage or bypass the absolute cash ceiling.
     """
 
+    try:
+        equity = float(equity)
+        stop_distance = float(stop_distance)
+        risk_pct = float(risk_pct)
+    except (TypeError, ValueError, OverflowError):
+        return 0, {}
+    if not all(math.isfinite(value) for value in (equity, stop_distance, risk_pct)):
+        return 0, {}
     if equity <= 0 or stop_distance <= 0 or risk_pct <= 0:
         return 0, {}
 
@@ -77,7 +81,13 @@ def units_for_risk(
             reason="policy-error",
         )
 
-    learning_scale = max(0.0, min(1.0, float(policy.risk_scale)))
+    try:
+        policy_scale = float(policy.risk_scale)
+    except (TypeError, ValueError, OverflowError):
+        policy_scale = 0.0
+    learning_scale = (
+        max(0.0, min(1.0, policy_scale)) if math.isfinite(policy_scale) else 0.0
+    )
     effective_risk_pct = min(float(risk_pct), float(risk_pct) * learning_scale)
     if policy.blocked or effective_risk_pct <= 0:
         diagnostics = {
@@ -110,11 +120,20 @@ def units_for_risk(
 
     requested_risk_amount = equity * effective_risk_pct
     max_risk_ccy = _max_risk_per_trade_ccy()
-    risk_amount = (
-        min(requested_risk_amount, max_risk_ccy)
-        if max_risk_ccy > 0
-        else requested_risk_amount
-    )
+    if max_risk_ccy <= 0:
+        return 0, {
+            "equity": equity,
+            "risk_pct": effective_risk_pct,
+            "requested_risk_pct": risk_pct,
+            "requested_risk_amount": requested_risk_amount,
+            "risk_amount": 0.0,
+            "max_risk_per_trade_ccy": max_risk_ccy,
+            "stop_pips": stop_pips,
+            "pip_value_per_unit": 0.0,
+            "final_units": 0,
+            "reason": "invalid-cash-risk-cap",
+        }
+    risk_amount = min(requested_risk_amount, max_risk_ccy)
     pip_value_per_unit = _pip_value_per_unit_in_account_ccy(
         instrument,
         broker=broker,
@@ -128,7 +147,14 @@ def units_for_risk(
         return 0, {}
 
     # Rounding up to the broker minimum must never exceed the cash-risk budget.
-    final_units = int(raw_units)
+    final_units = math.floor(raw_units)
+    risk_per_unit = stop_pips * pip_value_per_unit
+    planned_stop_risk = final_units * risk_per_unit
+    # Defensive postcondition: floating-point edge cases must never round the
+    # final order above the cash-risk budget.
+    while final_units > 0 and planned_stop_risk > risk_amount:
+        final_units -= 1
+        planned_stop_risk = final_units * risk_per_unit
     if final_units < max(1, int(min_trade_units)):
         return 0, {"risk_amount": risk_amount, "final_units": 0,
                    "reason": "minimum-units-exceed-risk-budget"}
@@ -142,6 +168,7 @@ def units_for_risk(
         "stop_pips": stop_pips,
         "pip_value_per_unit": pip_value_per_unit,
         "final_units": final_units,
+        "planned_stop_risk": planned_stop_risk,
         "learning_scale": learning_scale,
         "learning_reason": policy.reason,
         "learning_setup_key": policy.setup_key,
