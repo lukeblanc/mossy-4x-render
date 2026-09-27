@@ -250,11 +250,13 @@ class RiskManager:
         try:
             cap_pct = float(os.getenv("MAX_RISK_PER_TRADE_CAP_PCT", "1.0")) / 100.0
         except (TypeError, ValueError):
-            cap_pct = 0.01
-        cap_pct = max(0.001, min(cap_pct, 1.0))
+            cap_pct = 0.0
+        if not math.isfinite(cap_pct):
+            cap_pct = 0.0
+        cap_pct = max(0.0, min(cap_pct, 1.0))
 
         original = float(self.risk_per_trade_pct)
-        capped = max(0.001, min(original, cap_pct))
+        capped = max(0.0, min(original, cap_pct))
         if capped < original:
             print(
                 f"[RISK] risk capped from {original*100:.1f}% to {capped*100:.1f}%",

@@ -12,7 +12,7 @@ class ConversionBroker:
 
 
 def test_learning_can_only_reduce_requested_risk(monkeypatch):
-    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0")
+    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0.50")
     monkeypatch.setattr(
         adaptive_policy,
         "evaluate_instrument_policy",
@@ -33,14 +33,14 @@ def test_learning_can_only_reduce_requested_risk(monkeypatch):
         broker=ConversionBroker(),
     )
 
-    assert units == 5000
+    assert units == 500
     assert diagnostics["requested_risk_pct"] == pytest.approx(0.005)
     assert diagnostics["risk_pct"] == pytest.approx(0.005)
     assert diagnostics["learning_scale"] == pytest.approx(1.0)
 
 
 def test_learning_block_returns_zero_units(monkeypatch):
-    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0")
+    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0.50")
     monkeypatch.setattr(
         adaptive_policy,
         "evaluate_instrument_policy",

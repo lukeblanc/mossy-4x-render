@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.smart_exit_guard import SmartExitGuard
 
 
@@ -53,6 +55,21 @@ def test_hard_cash_loss_floor_is_active_without_aggressive_mode(monkeypatch):
 
     assert closed == ["T1"]
     assert broker.closed == ["AUD_USD"]
+
+
+@pytest.mark.parametrize("configured", ["0", "-1", "nan", "inf", "bad", "1.50"])
+def test_hard_cash_loss_floor_cannot_be_disabled_or_loosened(monkeypatch, configured):
+    monkeypatch.setenv("HARD_MAX_LOSS_CCY", configured)
+    guard = SmartExitGuard(DummyBroker([]), aggressive=False)
+
+    assert guard.hard_max_loss_ccy == 0.50
+
+
+def test_hard_cash_loss_floor_preserves_stricter_value(monkeypatch):
+    monkeypatch.setenv("HARD_MAX_LOSS_CCY", "0.25")
+    guard = SmartExitGuard(DummyBroker([]), aggressive=False)
+
+    assert guard.hard_max_loss_ccy == 0.25
 
 
 def test_winner_protection_retains_share_of_early_peak(monkeypatch):

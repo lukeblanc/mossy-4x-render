@@ -51,7 +51,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.broker import Broker, opened_trade_fill
+from app.broker import Broker, normalize_distance, opened_trade_fill
 from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
@@ -401,7 +401,14 @@ def _coerce_float(value: object, fallback: float = 0.0) -> float:
 
 
 def _clamp_risk_pct(value: float, *, cap: float) -> float:
-    return max(0.001, min(float(value), float(cap)))
+    try:
+        configured = float(value)
+        ceiling = float(cap)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(configured) or not math.isfinite(ceiling):
+        return 0.0
+    return max(0.0, min(configured, max(0.0, ceiling)))
 
 
 def _reduce_only_risk_pct(base_risk_pct: float, multiplier: float) -> float:
@@ -1663,7 +1670,35 @@ async def decision_cycle() -> None:
                 continue
 
             atr_val = diagnostics.get("atr")
-            sl_distance = risk.sl_distance_from_atr(atr_val, instrument=evaluation.instrument)
+            raw_sl_distance = risk.sl_distance_from_atr(
+                atr_val, instrument=evaluation.instrument
+            )
+            try:
+                # Use the exact broker-formatted distance for both sizing and
+                # submission so price precision can never increase exposure
+                # after the position size has already been calculated.
+                sl_distance = float(
+                    normalize_distance(evaluation.instrument, raw_sl_distance)
+                )
+            except (TypeError, ValueError, OverflowError):
+                cycle_stats["skipped"] += 1
+                cycle_stats["blocked_risk"] += 1
+                suppression_counters["blocked_risk"] += 1
+                _record_block_reason(
+                    evaluation.instrument, "invalid-protective-stop"
+                )
+                print(
+                    f"[TRADE] Skipping {evaluation.instrument}: "
+                    "protective stop is invalid at broker precision",
+                    flush=True,
+                )
+                _finish_decision_observation(
+                    observation_draft,
+                    outcome="blocked",
+                    gate_stage="risk",
+                    gate_reason="invalid-protective-stop",
+                )
+                continue
             tp_enabled = bool(config.get("risk", {}).get("tp_enabled", True))
             if tp_enabled:
                 tp_distance_fn = getattr(risk, "tp_distance_from_atr", None)

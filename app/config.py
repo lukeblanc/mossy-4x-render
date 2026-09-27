@@ -45,11 +45,14 @@ def _apply_render_safe_demo_profile() -> None:
         "ENABLE_RISK_CAP": "true",
         "MAX_RISK_PER_TRADE_CAP_PCT": "0.5",
         "MAX_RISK_PER_TRADE": "0.0025",
+        "MAX_RISK_PER_TRADE_CCY": "0.50",
+        "HARD_MAX_LOSS_CCY": "0.50",
         "ALLOW_HIGH_RISK": "false",
         "DAILY_LOSS_CAP_PCT": "0.01",
         "WEEKLY_LOSS_CAP_PCT": "0.03",
         "MAX_DRAWDOWN_CAP_PCT": "0.05",
-        "MAX_OPEN_TRADES": "2",
+        "MAX_CONCURRENT_POSITIONS": "1",
+        "MAX_OPEN_TRADES": "1",
         "COOLDOWN_CANDLES": "9",
         "TP_ENABLED": "true",
         "ADAPTIVE_TUNING_ENABLED": "true",
@@ -80,9 +83,14 @@ def _apply_render_safe_demo_profile() -> None:
         "ADAPTIVE_MIN_SAMPLE", "SHADOW_MIN_TRAIN", "SHADOW_MIN_VALIDATION",
         "SHADOW_MIN_COVERAGE", "DAILY_LOSS_CAP_PCT", "WEEKLY_LOSS_CAP_PCT",
         "MAX_DRAWDOWN_CAP_PCT", "MAX_RISK_PER_TRADE_CAP_PCT", "MAX_RISK_PER_TRADE",
+        "MAX_RISK_PER_TRADE_CCY", "HARD_MAX_LOSS_CCY",
     ) if key in os.environ}
     os.environ.update(safe_values)
-    for key in ("DAILY_LOSS_CAP_PCT", "WEEKLY_LOSS_CAP_PCT", "MAX_DRAWDOWN_CAP_PCT", "MAX_RISK_PER_TRADE_CAP_PCT", "MAX_RISK_PER_TRADE"):
+    for key in (
+        "DAILY_LOSS_CAP_PCT", "WEEKLY_LOSS_CAP_PCT", "MAX_DRAWDOWN_CAP_PCT",
+        "MAX_RISK_PER_TRADE_CAP_PCT", "MAX_RISK_PER_TRADE",
+        "MAX_RISK_PER_TRADE_CCY", "HARD_MAX_LOSS_CCY",
+    ):
         try:
             value = float(preserved.get(key, safe_values[key]))
             if 0 < value < float(safe_values[key]):
@@ -103,7 +111,8 @@ def _apply_render_safe_demo_profile() -> None:
     print(
         "[SAFE-DEMO] enforced mode=demo oanda_env=practice "
         "instruments=AUD_USD,GBP_USD session=SOFT aggressive=false "
-        "risk_cap_pct=0.5 adaptive_policy=true lifetime_memory=true "
+        "risk_cap_pct=0.5 cash_risk_cap=0.50 max_positions=1 "
+        "adaptive_policy=true lifetime_memory=true "
         "shadow_learning=true shadow_auto_apply=false automatic_risk_resets=false",
         flush=True,
     )

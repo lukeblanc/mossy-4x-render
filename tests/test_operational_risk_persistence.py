@@ -106,19 +106,23 @@ print(json.dumps(dict(sample=main.adaptive_tuner.min_sample,
                          reset="false", train="80", validation="45", coverage="0.75")
 
 
-def test_modest_cash_cap_increase_and_minimum_unit_protection(monkeypatch):
+def test_cash_cap_is_hard_bounded_and_minimum_unit_protection(monkeypatch):
     monkeypatch.setattr(adaptive_policy, "evaluate_instrument_policy", lambda instrument:
                         adaptive_policy.PolicyDecision(instrument=instrument, setup_key="test", risk_scale=1,
                                                        blocked=False, reason="test"))
     class Broker:
         def conversion_rate(self, *args):
             return 1.5
-    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "1.50")
-    before, _ = position_sizer.units_for_risk(1381.52, "AUD_USD", 0.001, 0.0025, broker=Broker())
+    monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "0.25")
+    before, before_diag = position_sizer.units_for_risk(
+        1381.52, "AUD_USD", 0.001, 0.0025, broker=Broker()
+    )
     monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", "1.80")
     after, diag = position_sizer.units_for_risk(1381.52, "AUD_USD", 0.001, 0.0025, broker=Broker())
-    assert after == 1200 and before == 1000
-    assert diag["risk_amount"] == 1.80
+    assert before == 166 and after == 333
+    assert before_diag["risk_amount"] == 0.25
+    assert diag["risk_amount"] == 0.50
+    assert diag["planned_stop_risk"] <= 0.50
     units, diag = position_sizer.units_for_risk(1381.52, "AUD_USD", 0.001, 0.0025,
                                               broker=Broker(), min_trade_units=2000)
     assert units == 0
