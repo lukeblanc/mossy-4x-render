@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import src.mcp_status as mcp_status
-from src.mcp_status import build_runtime_heartbeat, publish_runtime_heartbeat
+from src.mcp_status import (
+    build_runtime_heartbeat,
+    classify_verified_entry_age,
+    publish_runtime_heartbeat,
+)
 
 
 @pytest.fixture
@@ -24,6 +28,8 @@ def test_runtime_heartbeat_is_sanitised_and_applies_supervisor_floor():
         open_trades_count=1,
         equity=1_328.80,
         revision="abc123",
+        entry_window_state="weekend_locked",
+        last_verified_entry_age_bucket="one_to_three_days",
         observed_at=datetime(2026, 9, 25, tzinfo=timezone.utc),
     )
 
@@ -33,8 +39,11 @@ def test_runtime_heartbeat_is_sanitised_and_applies_supervisor_floor():
     assert heartbeat["broker_sync_fresh"] is True
     assert heartbeat["has_open_trades"] is True
     assert heartbeat["supervisor_floor_breached"] is True
+    assert heartbeat["entry_window_state"] == "weekend_locked"
+    assert heartbeat["last_verified_entry_age_bucket"] == "one_to_three_days"
     assert "equity" not in heartbeat
     assert "account" not in heartbeat
+    assert "last_verified_entry_at" not in heartbeat
 
 
 def test_runtime_heartbeat_fails_closed_when_telemetry_is_unknown_or_stale():
@@ -48,6 +57,8 @@ def test_runtime_heartbeat_fails_closed_when_telemetry_is_unknown_or_stale():
         open_trades_count=None,
         equity=None,
         revision="abc123",
+        entry_window_state="off_session",
+        last_verified_entry_age_bucket="unknown",
     )
 
     assert heartbeat["decision_cycle_fresh"] is False
@@ -68,9 +79,85 @@ def test_runtime_heartbeat_fails_closed_for_invalid_equity(equity):
         open_trades_count=0,
         equity=equity,
         revision="abc123",
+        entry_window_state="in_configured_session",
+        last_verified_entry_age_bucket="never",
     )
 
     assert heartbeat["supervisor_floor_breached"] is True
+
+
+@pytest.mark.parametrize(
+    ("latest_entry_at", "expected"),
+    [
+        (None, "never"),
+        (datetime(2026, 9, 25, 11, 30, tzinfo=timezone.utc), "under_1h"),
+        (datetime(2026, 9, 25, 2, 0, tzinfo=timezone.utc), "under_24h"),
+        (datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc), "one_to_three_days"),
+        (datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc), "over_three_days"),
+        (datetime(2026, 9, 25, 12, 2, tzinfo=timezone.utc), "unknown"),
+    ],
+)
+def test_verified_entry_timestamp_is_reduced_to_safe_age_bucket(
+    latest_entry_at, expected
+):
+    observed_at = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+
+    assert (
+        classify_verified_entry_age(latest_entry_at, observed_at=observed_at)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("entry_window_state", "maybe-open"),
+        ("last_verified_entry_age_bucket", "exactly-37-minutes"),
+    ],
+)
+def test_runtime_heartbeat_rejects_non_enumerated_observability_values(field, value):
+    kwargs = {
+        "service_status": "running",
+        "mode": "demo",
+        "oanda_environment": "practice",
+        "scheduler_alive": True,
+        "last_cycle_age_sec": 10.0,
+        "last_broker_sync_age_sec": 20.0,
+        "open_trades_count": 0,
+        "equity": 10_000.0,
+        "revision": "abc123",
+        "entry_window_state": "off_session",
+        "last_verified_entry_age_bucket": "never",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ValueError):
+        build_runtime_heartbeat(**kwargs)
+
+
+def test_observability_state_is_part_of_safety_fingerprint():
+    baseline = {
+        "observed_at": "first",
+        "entry_window_state": "off_session",
+        "last_verified_entry_age_bucket": "under_24h",
+    }
+
+    newer_timestamp = {**baseline, "observed_at": "newer"}
+    changed_window = {**baseline, "entry_window_state": "weekend_locked"}
+    changed_recency = {
+        **baseline,
+        "last_verified_entry_age_bucket": "one_to_three_days",
+    }
+
+    assert mcp_status._safety_fingerprint(newer_timestamp) == mcp_status._safety_fingerprint(
+        baseline
+    )
+    assert mcp_status._safety_fingerprint(changed_window) != mcp_status._safety_fingerprint(
+        baseline
+    )
+    assert mcp_status._safety_fingerprint(changed_recency) != mcp_status._safety_fingerprint(
+        baseline
+    )
 
 
 @pytest.mark.anyio

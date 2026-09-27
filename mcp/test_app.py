@@ -55,6 +55,8 @@ def _heartbeat() -> dict:
         "broker_sync_fresh": True,
         "has_open_trades": False,
         "supervisor_floor_breached": True,
+        "entry_window_state": "off_session",
+        "last_verified_entry_age_bucket": "under_24h",
         "revision": "unit-test-revision",
     }
 
@@ -109,10 +111,39 @@ async def test_mcp_lists_only_read_only_tools_and_reports_floor_block(bridge):
         result = await client.call_tool("get_runtime_health", {})
         assert result.is_error is not True
         assert result.structured_content["supervisor_status"] == "BLOCKED"
+        assert result.structured_content["runtime"]["entry_window_state"] == "off_session"
+        assert (
+            result.structured_content["runtime"]["last_verified_entry_age_bucket"]
+            == "under_24h"
+        )
         assert any(
             "equity floor" in blocker
             for blocker in result.structured_content["blockers"]
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("entry_window_state", "unknown-window"),
+        ("last_verified_entry_age_bucket", "37-minutes"),
+        ("equity", 1_328.80),
+    ],
+)
+def test_internal_heartbeat_strictly_rejects_unknown_or_sensitive_fields(
+    bridge, field, value
+):
+    heartbeat = _heartbeat()
+    heartbeat[field] = value
+
+    with TestClient(bridge.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/internal/runtime-heartbeat",
+            headers={"Authorization": "Bearer unit-test-secret"},
+            json=heartbeat,
+        )
+
+    assert response.status_code == 422
 
 
 def test_broker_unavailable_status_is_always_blocked(bridge):

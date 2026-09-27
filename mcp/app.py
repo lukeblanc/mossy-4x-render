@@ -43,6 +43,17 @@ class RuntimeHeartbeat(BaseModel):
     broker_sync_fresh: bool
     has_open_trades: bool | None = None
     supervisor_floor_breached: bool
+    entry_window_state: Literal[
+        "weekend_locked", "in_configured_session", "off_session"
+    ]
+    last_verified_entry_age_bucket: Literal[
+        "never",
+        "under_1h",
+        "under_24h",
+        "one_to_three_days",
+        "over_three_days",
+        "unknown",
+    ]
     revision: str = Field(min_length=1, max_length=120)
 
 
