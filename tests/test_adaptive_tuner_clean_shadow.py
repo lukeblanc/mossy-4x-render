@@ -13,9 +13,11 @@ def _db(path: Path) -> None:
             """
             CREATE TABLE trades (
                 trade_id TEXT,
+                timestamp_utc TEXT,
                 exit_timestamp_utc TEXT,
                 realized_pnl_ccy REAL,
-                run_tag TEXT
+                run_tag TEXT,
+                broker_confirmed INTEGER
             )
             """
         )
@@ -37,8 +39,12 @@ def _db(path: Path) -> None:
         for index, pnl in enumerate((1.0, -0.5, 0.4), start=1):
             conn.execute(
                 """
-                INSERT INTO trades(trade_id, exit_timestamp_utc, realized_pnl_ccy, run_tag)
-                VALUES (?, '2026-07-13T13:00:00+00:00', ?, 'MINI_RUN')
+                INSERT INTO trades(
+                    trade_id, timestamp_utc, exit_timestamp_utc,
+                    realized_pnl_ccy, run_tag, broker_confirmed
+                )
+                VALUES (?, '2026-07-13T12:50:00+00:00',
+                        '2026-07-13T13:00:00+00:00', ?, 'MINI_RUN', 1)
                 """,
                 (str(index), pnl),
             )
@@ -81,7 +87,7 @@ def test_shadow_analysis_runs_on_first_snapshot_even_with_young_monotonic_clock(
 ):
     path = tmp_path / "journal.db"
     _db(path)
-    calls: list[Path] = []
+    calls: list[tuple[Path, dict[str, str]]] = []
     sentinel = object()
 
     monkeypatch.setenv("SHADOW_LEARNING_ENABLED", "true")
@@ -90,12 +96,25 @@ def test_shadow_analysis_runs_on_first_snapshot_even_with_young_monotonic_clock(
     monkeypatch.setattr(
         adaptive_module,
         "run_shadow_analysis",
-        lambda db_path: calls.append(Path(db_path)) or sentinel,
+        lambda db_path, **kwargs: calls.append((Path(db_path), kwargs)) or sentinel,
     )
 
-    tuner = AdaptiveTuner(path, min_sample=8)
+    tuner = AdaptiveTuner(
+        path,
+        min_sample=8,
+        run_tag="MINI_RUN",
+        window_start_utc="2026-07-13T12:47:00+00:00",
+    )
     tuner.snapshot()
     tuner.snapshot()
 
-    assert calls == [path]
+    assert calls == [
+        (
+            path,
+            {
+                "cohort_start_utc": "2026-07-13T12:47:00+00:00",
+                "cohort_run_tag": "MINI_RUN",
+            },
+        )
+    ]
     assert tuner.shadow_report is sentinel

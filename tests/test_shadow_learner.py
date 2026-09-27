@@ -65,6 +65,9 @@ def test_shadow_uses_only_clean_confirmed_current_pair_cohort(tmp_path, monkeypa
     cohort = datetime.fromisoformat(CLEAN_COHORT_START_UTC)
     _closed_trade(journal, trade_id="valid", opened=cohort + timedelta(minutes=1))
     _closed_trade(journal, trade_id="old", opened=cohort - timedelta(days=1))
+    # Preserve the original entry-time cohort boundary: an older entry does
+    # not become eligible merely because it closes after the boundary.
+    _closed_trade(journal, trade_id="straddle", opened=cohort - timedelta(minutes=5))
     _closed_trade(
         journal,
         trade_id="gold",
@@ -79,15 +82,20 @@ def test_shadow_uses_only_clean_confirmed_current_pair_cohort(tmp_path, monkeypa
     )
     monkeypatch.setenv("SHADOW_MIN_TRAIN", "8")
     monkeypatch.setenv("SHADOW_MIN_VALIDATION", "4")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
 
     output = tmp_path / "report.json"
     report = run_shadow_analysis(journal.path, output_path=output)
 
     assert report.total_clean_trades == 1
+    assert report.evidence_revision == "a" * 40
+    assert report.cohort_run_tag == "MINI_RUN"
     assert report.recommendation is None
     assert report.auto_apply is False
     saved = json.loads(output.read_text(encoding="utf-8"))
     assert saved["total_clean_trades"] == 1
+    assert saved["evidence_revision"] == "a" * 40
+    assert saved["cohort_run_tag"] == "MINI_RUN"
     assert saved["auto_apply"] is False
 
 
@@ -108,6 +116,7 @@ def test_shadow_recommends_only_after_unseen_validation_beats_baseline(tmp_path,
     monkeypatch.setenv("SHADOW_MIN_VALIDATION", "4")
     monkeypatch.setenv("SHADOW_MIN_COVERAGE", "0.20")
     monkeypatch.setenv("SHADOW_TRAIN_RATIO", "0.70")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b" * 40)
 
     report = run_shadow_analysis(journal.path, output_path=tmp_path / "report.json")
 
@@ -121,6 +130,7 @@ def test_shadow_recommends_only_after_unseen_validation_beats_baseline(tmp_path,
     assert champion.validation.expectancy == pytest.approx(2.0)
     assert champion.validation.max_drawdown == pytest.approx(0.0)
     assert report.auto_apply is False
+    assert report.evidence_revision == "b" * 40
 
 
 def test_shadow_never_recommends_overfit_training_only_result(tmp_path, monkeypatch):
@@ -154,3 +164,42 @@ def test_shadow_never_recommends_overfit_training_only_result(tmp_path, monkeypa
     assert momentum.beats_baseline is False
     assert report.recommendation not in {"momentum_50", "momentum_55_45"}
     assert report.auto_apply is False
+
+
+def test_shadow_revision_and_run_tag_fail_closed_without_attestation(
+    tmp_path, monkeypatch
+):
+    journal = TradeJournal(tmp_path / "trade_journal.db")
+    cohort = datetime.fromisoformat(CLEAN_COHORT_START_UTC)
+    _closed_trade(journal, trade_id="mini", opened=cohort + timedelta(minutes=1))
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setenv("ADAPTIVE_RUN_TAG", "")
+
+    report = run_shadow_analysis(
+        journal.path,
+        output_path=tmp_path / "report.json",
+    )
+
+    assert report.evidence_revision == "unknown"
+    assert report.cohort_run_tag == "MINI_RUN"
+    assert report.total_clean_trades == 1
+
+
+def test_shadow_explicit_run_tag_excludes_other_regimes(tmp_path, monkeypatch):
+    journal = TradeJournal(tmp_path / "trade_journal.db")
+    cohort = datetime.fromisoformat(CLEAN_COHORT_START_UTC)
+    _closed_trade(journal, trade_id="mini", opened=cohort + timedelta(minutes=1))
+    _closed_trade(journal, trade_id="legacy", opened=cohort + timedelta(minutes=2))
+    with journal._connect() as conn:
+        conn.execute("UPDATE trades SET run_tag='LEGACY' WHERE trade_id='legacy'")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "c" * 40)
+
+    report = run_shadow_analysis(
+        journal.path,
+        output_path=tmp_path / "report.json",
+        cohort_run_tag="MINI_RUN",
+    )
+
+    assert report.cohort_run_tag == "MINI_RUN"
+    assert report.total_clean_trades == 1

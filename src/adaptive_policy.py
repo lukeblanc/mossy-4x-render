@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -12,6 +11,12 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from src import session_filter
+from src.learning_cohort import (
+    CleanOutcome,
+    DEFAULT_LEARNING_COHORT_START_UTC,
+    DEFAULT_LEARNING_RUN_TAG,
+    load_clean_outcomes,
+)
 
 
 @dataclass(frozen=True)
@@ -204,14 +209,14 @@ def publish_market_context(
     return context
 
 
-def _context_from_row(row: sqlite3.Row) -> Optional[MarketContext]:
+def _context_from_outcome(outcome: CleanOutcome) -> Optional[MarketContext]:
     try:
-        indicators_raw = row["indicators_snapshot"] or "{}"
+        indicators_raw = outcome.indicators_snapshot or "{}"
         indicators = json.loads(indicators_raw) if isinstance(indicators_raw, str) else dict(indicators_raw)
     except Exception:
         indicators = {}
 
-    ts_value = row["timestamp_utc"] or row["exit_timestamp_utc"]
+    ts_value = outcome.entry_timestamp_utc or outcome.exit_timestamp_utc
     try:
         ts = datetime.fromisoformat(str(ts_value).replace("Z", "+00:00"))
         if ts.tzinfo is None:
@@ -219,20 +224,20 @@ def _context_from_row(row: sqlite3.Row) -> Optional[MarketContext]:
     except Exception:
         ts = datetime.now(timezone.utc)
 
-    instrument = str(row["instrument"] or "").strip().upper()
+    instrument = outcome.instrument
     if not instrument:
         return None
     return _build_context(
         instrument,
         indicators,
         ts,
-        side=row["side"],
-        session=row["session_id"],
+        side=outcome.side,
+        session=outcome.session_id,
     )
 
 
-def _metrics(rows: list[sqlite3.Row]) -> dict[str, float | int | Optional[datetime]]:
-    pnl_values = [float(row["realized_pnl_ccy"] or 0.0) for row in rows]
+def _metrics(rows: list[CleanOutcome]) -> dict[str, float | int | Optional[datetime]]:
+    pnl_values = [outcome.realized_pnl_ccy for outcome in rows]
     wins = [pnl for pnl in pnl_values if pnl > 0]
     losses = [pnl for pnl in pnl_values if pnl < 0]
     sample = len(pnl_values)
@@ -251,7 +256,7 @@ def _metrics(rows: list[sqlite3.Row]) -> dict[str, float | int | Optional[dateti
 
     last_ts: Optional[datetime] = None
     if rows:
-        raw_ts = rows[0]["exit_timestamp_utc"]
+        raw_ts = rows[0].exit_timestamp_utc
         try:
             last_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
             if last_ts.tzinfo is None:
@@ -269,64 +274,47 @@ def _metrics(rows: list[sqlite3.Row]) -> dict[str, float | int | Optional[dateti
     }
 
 
-def _read_history(db_path: Path, instrument: str, lookback: int) -> list[sqlite3.Row]:
-    if not db_path.exists():
-        return []
-    try:
-        conn = sqlite3.connect(db_path, timeout=2.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            columns = {
-                str(row[1])
-                for row in conn.execute("PRAGMA table_info(trades)").fetchall()
-                if len(row) > 1
-            }
-            required = {
-                "instrument",
-                "side",
-                "session_id",
-                "indicators_snapshot",
-                "realized_pnl_ccy",
-                "timestamp_utc",
-                "exit_timestamp_utc",
-            }
-            if not required.issubset(columns):
-                return []
-            return conn.execute(
-                """
-                SELECT instrument, side, session_id, indicators_snapshot,
-                       realized_pnl_ccy, timestamp_utc, exit_timestamp_utc
-                FROM trades
-                WHERE instrument = ?
-                  AND exit_timestamp_utc IS NOT NULL
-                  AND realized_pnl_ccy IS NOT NULL
-                ORDER BY exit_timestamp_utc DESC
-                LIMIT ?
-                """,
-                (instrument, max(10, int(lookback))),
-            ).fetchall()
-        finally:
-            conn.close()
-    except (OSError, sqlite3.Error):
-        return []
+def _read_history(
+    db_path: Path,
+    instrument: str,
+    lookback: int,
+    *,
+    as_of_utc: datetime,
+) -> list[CleanOutcome]:
+    run_tag = (
+        os.getenv("ADAPTIVE_RUN_TAG", "").strip() or DEFAULT_LEARNING_RUN_TAG
+    )
+    window_start = (
+        os.getenv("ADAPTIVE_WINDOW_START_UTC", "").strip()
+        or DEFAULT_LEARNING_COHORT_START_UTC
+    )
+    return load_clean_outcomes(
+        db_path,
+        instruments=(instrument,),
+        run_tag=run_tag,
+        entry_start_utc=window_start,
+        as_of_utc=as_of_utc,
+        limit=max(10, int(lookback)),
+        descending=True,
+    )
 
 
 def _decision_for_context(
     context: MarketContext,
-    rows: list[sqlite3.Row],
+    rows: list[CleanOutcome],
     *,
     now_utc: datetime,
 ) -> PolicyDecision:
-    exact_rows: list[sqlite3.Row] = []
-    pair_side_rows: list[sqlite3.Row] = []
-    for row in rows:
-        historical = _context_from_row(row)
+    exact_rows: list[CleanOutcome] = []
+    pair_side_rows: list[CleanOutcome] = []
+    for outcome in rows:
+        historical = _context_from_outcome(outcome)
         if historical is None:
             continue
         if historical.side == context.side:
-            pair_side_rows.append(row)
+            pair_side_rows.append(outcome)
         if historical.setup_key == context.setup_key:
-            exact_rows.append(row)
+            exact_rows.append(outcome)
 
     exact = _metrics(exact_rows)
     pair_side = _metrics(pair_side_rows)
@@ -442,15 +430,22 @@ def evaluate_instrument_policy(
         if cached and now_monotonic - cached[0] <= ttl:
             return cached[1]
 
+    effective_now = now_utc or datetime.now(timezone.utc)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=timezone.utc)
+    else:
+        effective_now = effective_now.astimezone(timezone.utc)
+
     history = _read_history(
         Path(db_path) if db_path is not None else _journal_path(),
         normalized,
         int(os.getenv("ADAPTIVE_POLICY_LOOKBACK", "200")),
+        as_of_utc=effective_now,
     )
     decision = _decision_for_context(
         context,
         history,
-        now_utc=(now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc),
+        now_utc=effective_now,
     )
 
     with _CONTEXT_LOCK:

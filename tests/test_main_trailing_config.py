@@ -70,3 +70,11 @@ def test_format_trading_summary_uses_explicit_trade_counter_names():
     assert "run_tag=MINI_RUN" in summary
     assert "window_start_utc=2026-03-30T00:00:00+00:00" in summary
     assert "window_end_utc=2026-03-30T01:00:00+00:00" in summary
+
+
+def test_adaptive_risk_is_strictly_reduce_only_below_old_floor():
+    base = 0.0005
+
+    assert main_mod._reduce_only_risk_pct(base, 0.8) == 0.0004
+    assert main_mod._reduce_only_risk_pct(base, 2.0) == base
+    assert main_mod._reduce_only_risk_pct(base, -1.0) == 0.0
