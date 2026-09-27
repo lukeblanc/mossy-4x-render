@@ -16,12 +16,65 @@ DEFAULT_FRESHNESS_SECONDS = 180.0
 ACTIVE_PUBLISH_INTERVAL_SECONDS = 600.0
 IDLE_PUBLISH_INTERVAL_SECONDS = 14_400.0
 
+ENTRY_WINDOW_STATES = frozenset(
+    {"weekend_locked", "in_configured_session", "off_session"}
+)
+VERIFIED_ENTRY_AGE_BUCKETS = frozenset(
+    {
+        "never",
+        "under_1h",
+        "under_24h",
+        "one_to_three_days",
+        "over_three_days",
+        "unknown",
+    }
+)
+
 _last_success_monotonic: float | None = None
 _last_success_fingerprint: str | None = None
 
 
 def _fresh(age_seconds: float | None, threshold: float) -> bool:
     return age_seconds is not None and 0.0 <= float(age_seconds) <= threshold
+
+
+def classify_verified_entry_age(
+    latest_entry_at: datetime | None, *, observed_at: datetime | None = None
+) -> str:
+    """Reduce a verified entry timestamp to a non-sensitive recency bucket."""
+
+    if latest_entry_at is None:
+        return "never"
+    if not isinstance(latest_entry_at, datetime):
+        return "unknown"
+
+    timestamp = observed_at or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    entry_timestamp = latest_entry_at
+    if entry_timestamp.tzinfo is None:
+        entry_timestamp = entry_timestamp.replace(tzinfo=timezone.utc)
+
+    try:
+        age_seconds = (
+            timestamp.astimezone(timezone.utc)
+            - entry_timestamp.astimezone(timezone.utc)
+        ).total_seconds()
+    except (OverflowError, ValueError):
+        return "unknown"
+
+    # Tolerate ordinary clock skew, but do not describe a materially future
+    # timestamp as recent activity.
+    if age_seconds < -60.0:
+        return "unknown"
+    age_seconds = max(0.0, age_seconds)
+    if age_seconds < 3_600.0:
+        return "under_1h"
+    if age_seconds < 86_400.0:
+        return "under_24h"
+    if age_seconds < 259_200.0:
+        return "one_to_three_days"
+    return "over_three_days"
 
 
 def build_runtime_heartbeat(
@@ -35,6 +88,8 @@ def build_runtime_heartbeat(
     open_trades_count: int | None,
     equity: float | None,
     revision: str,
+    entry_window_state: str,
+    last_verified_entry_age_bucket: str,
     observed_at: datetime | None = None,
     supervisor_equity_floor_aud: float = DEFAULT_SUPERVISOR_EQUITY_FLOOR_AUD,
     freshness_seconds: float = DEFAULT_FRESHNESS_SECONDS,
@@ -57,6 +112,12 @@ def build_runtime_heartbeat(
         or not math.isfinite(equity_value)
         or equity_value < float(supervisor_equity_floor_aud)
     )
+    normalized_entry_window = str(entry_window_state).strip().lower()
+    if normalized_entry_window not in ENTRY_WINDOW_STATES:
+        raise ValueError("invalid entry window state")
+    normalized_entry_age = str(last_verified_entry_age_bucket).strip().lower()
+    if normalized_entry_age not in VERIFIED_ENTRY_AGE_BUCKETS:
+        raise ValueError("invalid verified entry age bucket")
 
     return {
         "observed_at": timestamp.astimezone(timezone.utc).isoformat(),
@@ -70,6 +131,8 @@ def build_runtime_heartbeat(
         if open_trades_count is None
         else bool(open_trades_count > 0),
         "supervisor_floor_breached": floor_breached,
+        "entry_window_state": normalized_entry_window,
+        "last_verified_entry_age_bucket": normalized_entry_age,
         "revision": revision,
     }
 

@@ -72,7 +72,11 @@ except Exception:  # pragma: no cover - defensive fallback
 
 
 from src.projector import project_market
-from src.mcp_status import build_runtime_heartbeat, publish_runtime_heartbeat
+from src.mcp_status import (
+    build_runtime_heartbeat,
+    classify_verified_entry_age,
+    publish_runtime_heartbeat,
+)
 from src.risk_setup import (
     build_profit_protection,
     build_risk_manager,
@@ -500,6 +504,20 @@ risk = build_risk_manager(
     demo_mode=(mode_env == "demo"),
     state_dir=DATA_DIR,
 )
+
+
+def _entry_window_state(now_utc: datetime) -> str:
+    """Describe entry-window availability without changing entry decisions."""
+
+    if now_utc.weekday() >= 5:
+        return "weekend_locked"
+    if session_filter.current_session(
+        now_utc, mode=config.get("session_mode", "STRICT")
+    ) is not None:
+        return "in_configured_session"
+    return "off_session"
+
+
 async def heartbeat() -> None:
     watchdog.last_heartbeat_ts = _utc_now()
     now_utc = _utc_now()
@@ -582,6 +600,17 @@ async def heartbeat() -> None:
         ),
     )
 
+    entry_window_state = _entry_window_state(now_utc)
+    try:
+        latest_verified_entry_at = journal.latest_verified_entry_timestamp()
+        last_verified_entry_age_bucket = classify_verified_entry_age(
+            latest_verified_entry_at, observed_at=now_utc
+        )
+    except Exception:
+        # Recency is optional observability. Unknown must not interrupt the
+        # scheduler or be mistaken for a confirmed absence of prior entries.
+        last_verified_entry_age_bucket = "unknown"
+
     monitoring_payload = build_runtime_heartbeat(
         service_status=BOT_STATE["status"],
         mode=os.getenv("MODE", "demo"),
@@ -592,15 +621,11 @@ async def heartbeat() -> None:
         open_trades_count=health["open_trades_count"],
         equity=equity,
         revision=_runtime_revision(),
+        entry_window_state=entry_window_state,
+        last_verified_entry_age_bucket=last_verified_entry_age_bucket,
         observed_at=now_utc,
     )
-    configured_session_active = (
-        now_utc.weekday() < 5
-        and session_filter.current_session(
-            now_utc, mode=config.get("session_mode", "STRICT")
-        )
-        is not None
-    )
+    configured_session_active = entry_window_state == "in_configured_session"
     monitoring_active = (
         bool(open_count and open_count > 0) or configured_session_active
     )

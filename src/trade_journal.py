@@ -366,6 +366,37 @@ class TradeJournal:
             row = conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()
             return int(row[0] if row else 0)
 
+    def latest_verified_entry_timestamp(self) -> Optional[datetime]:
+        """Return the newest persisted, non-invalidated broker-fill timestamp.
+
+        ``record_entry`` is called only after the broker response has been
+        validated as a newly opened trade.  Rows later identified by the
+        journal-cleanup resolution ledger are excluded so stale/phantom rows do
+        not make entry activity look more recent than it really is.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT trades.timestamp_utc
+                FROM trades
+                LEFT JOIN journal_entry_resolutions AS resolutions
+                  ON resolutions.trade_id = trades.trade_id
+                WHERE trades.timestamp_utc IS NOT NULL
+                  AND TRIM(trades.timestamp_utc) <> ''
+                  AND resolutions.trade_id IS NULL
+                ORDER BY trades.timestamp_utc DESC, trades.trade_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        if row is None:
+            return None
+        timestamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc)
+
 
 def _safe_div(numerator: float, denominator: float) -> float:
     if denominator == 0:

@@ -77,6 +77,54 @@ def test_trade_journal_entry_and_exit(tmp_path):
     assert journal.count_trade_events() == 2
 
 
+def test_latest_verified_entry_timestamp_excludes_invalidated_rows(tmp_path):
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(db_path)
+    older = datetime(2026, 9, 22, 7, 0, tzinfo=timezone.utc)
+    newer = older + timedelta(hours=3)
+
+    for trade_id, timestamp in (("T-OLD", older), ("T-NEW", newer)):
+        journal.record_entry(
+            trade_id=trade_id,
+            timestamp_utc=timestamp,
+            instrument="AUD_USD",
+            side="BUY",
+            units=100,
+            entry_price=0.65,
+            stop_loss_price=0.64,
+            take_profit_price=0.66,
+            spread_at_entry=0.1,
+            session_id="LONDON",
+            session_mode="SOFT",
+            gating_flags={"entry_source": "broker_fill"},
+            indicators_snapshot={},
+        )
+
+    assert journal.latest_verified_entry_timestamp() == newer
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO journal_entry_resolutions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "T-NEW",
+                "DUPLICATE_ALIAS",
+                "T-OLD",
+                newer.isoformat(),
+                "cleanup-test",
+                "{}",
+                "{}",
+            ),
+        )
+
+    assert journal.latest_verified_entry_timestamp() == older
+
+
+def test_latest_verified_entry_timestamp_is_none_for_empty_journal(tmp_path):
+    journal = TradeJournal(tmp_path / "journal.db")
+
+    assert journal.latest_verified_entry_timestamp() is None
+
+
 
 def test_run_performance_analysis_creates_pdf(tmp_path, monkeypatch):
     from src.trade_journal import run_performance_analysis
