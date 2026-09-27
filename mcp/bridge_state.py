@@ -30,6 +30,16 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learning_snapshot (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            observed_at_utc TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
     return connection
 
 
@@ -66,6 +76,67 @@ def load_runtime_heartbeat(*, path: Path | None = None) -> dict | None:
         return None
     return {
         "observed_at": row["observed_at"],
+        "received_at": row["received_at"],
+        "payload": json.loads(row["payload_json"]),
+    }
+
+
+def save_learning_snapshot(
+    payload: dict, *, received_at: datetime | None = None, path: Path | None = None
+) -> bool:
+    """Save only a newer learning observation and return whether it won the race."""
+
+    received = received_at or datetime.now(timezone.utc)
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    raw_observed = payload["observed_at_utc"]
+    if not isinstance(raw_observed, str):
+        raise ValueError("observed_at_utc must be an ISO-8601 string")
+    try:
+        parsed_observed = datetime.fromisoformat(raw_observed.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("observed_at_utc must be an ISO-8601 timestamp") from exc
+    if parsed_observed.tzinfo is None:
+        raise ValueError("observed_at_utc must include a timezone")
+    observed = parsed_observed.astimezone(timezone.utc).isoformat()
+    stored_payload = dict(payload)
+    stored_payload["observed_at_utc"] = observed
+    with _connect(path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO learning_snapshot (
+                id, observed_at_utc, received_at, payload_json
+            )
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                observed_at_utc = excluded.observed_at_utc,
+                received_at = excluded.received_at,
+                payload_json = excluded.payload_json
+            WHERE excluded.observed_at_utc > learning_snapshot.observed_at_utc
+            """,
+            (
+                observed,
+                received.astimezone(timezone.utc).isoformat(),
+                json.dumps(stored_payload, sort_keys=True),
+            ),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+def load_learning_snapshot(*, path: Path | None = None) -> dict | None:
+    with _connect(path) as connection:
+        row = connection.execute(
+            """
+            SELECT observed_at_utc, received_at, payload_json
+            FROM learning_snapshot
+            WHERE id = 1
+            """
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "observed_at_utc": row["observed_at_utc"],
         "received_at": row["received_at"],
         "payload": json.loads(row["payload_json"]),
     }
