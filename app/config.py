@@ -8,6 +8,7 @@ from typing import Dict
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
 
 def _as_bool(value: object) -> bool:
