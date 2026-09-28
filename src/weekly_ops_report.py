@@ -85,6 +85,19 @@ def _parse_timestamp(value: object) -> datetime | None:
     return result.astimezone(timezone.utc)
 
 
+def _execution_quality_from_flags(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        payload = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    execution = payload.get("execution_quality")
+    return execution if isinstance(execution, dict) else None
+
+
 def _journal_path() -> Path:
     configured = os.getenv("MOSSY_STATE_PATH")
     if configured:
@@ -183,11 +196,7 @@ def _load_closed_trades(db_path: Path, start_utc: datetime, end_utc: datetime) -
                 "spread_at_exit": _safe_float(row["spread_at_exit"]),
                 "max_profit_ccy": _safe_float(row["max_profit_ccy"]),
                 "broker_confirmed": row["broker_confirmed"],
-                "execution_quality": (
-                    (json.loads(row["gating_flags"] or "{}").get("execution_quality"))
-                    if isinstance(row["gating_flags"], str)
-                    else None
-                ),
+                "execution_quality": _execution_quality_from_flags(row["gating_flags"]),
             }
         )
     return sorted(trades, key=lambda trade: trade["timestamp_key"])
