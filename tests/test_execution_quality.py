@@ -85,7 +85,7 @@ def test_aggregate_reports_only_real_samples():
     assert report["sample_count"] == 2
     assert report["impact_sample_count"] == 2
     assert round(report["avg_depth_impact_pips"], 6) == 0.25
-    assert report["worst_depth_impact_pips"] == 1.0
+    assert round(report["worst_depth_impact_pips"], 6) == 1.0
     assert report["adverse_impact_count"] == 1
     assert report["improved_impact_count"] == 1
 
