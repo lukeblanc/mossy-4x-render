@@ -92,6 +92,7 @@ from src.decision_observer import (
     configuration_fingerprint,
 )
 from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
+from src.scheduler_policy import install_runtime_jobs
 
 VERSION = "v1.6.1"
 
@@ -2097,8 +2098,21 @@ async def runner() -> None:
         send_snapshot("luke", equity)
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(heartbeat, "interval", minutes=1)
-    scheduler.add_job(decision_cycle, "interval", minutes=1)
+    runtime_schedule = install_runtime_jobs(
+        scheduler,
+        heartbeat_job=heartbeat,
+        decision_job=decision_cycle,
+        now_utc=_utc_now(),
+    )
+    print(
+        "[SCHEDULER] "
+        f"decision_seconds={runtime_schedule.decision_seconds} "
+        f"heartbeat_seconds={runtime_schedule.heartbeat_seconds} "
+        f"heartbeat_phase_seconds={runtime_schedule.heartbeat_phase_seconds} "
+        f"misfire_grace_seconds={runtime_schedule.misfire_grace_seconds} "
+        "coalesce=true max_instances=1",
+        flush=True,
+    )
     scheduler.start()
     _SCHEDULER_REF = scheduler
     BOT_STATE["scheduler_alive"] = True
