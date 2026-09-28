@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.execution_quality import aggregate_execution_quality
+
 PERTH = ZoneInfo("Australia/Perth")
 DEFAULT_REPOSITORY = "lukeblanc/mossy-4x-render"
 DEFAULT_BRANCH = "main"
@@ -60,6 +62,7 @@ class WeeklyOpsReport:
     duplicate_alias_rows: int = 0
     unconfirmed_closed_rows: int = 0
     account_reconciliation: dict[str, Any] | None = None
+    execution_quality: dict[str, Any] | None = None
 
 
 def _safe_float(value: object) -> float | None:
@@ -135,6 +138,7 @@ def _load_closed_trades(db_path: Path, start_utc: datetime, end_utc: datetime) -
                 "spread_at_exit": "NULL",
                 "max_profit_ccy": "NULL",
                 "broker_confirmed": "NULL",
+                "gating_flags": "'{}'",
             }
             select_parts = ["exit_timestamp_utc", "realized_pnl_ccy"]
             for name, fallback in optional.items():
@@ -179,6 +183,11 @@ def _load_closed_trades(db_path: Path, start_utc: datetime, end_utc: datetime) -
                 "spread_at_exit": _safe_float(row["spread_at_exit"]),
                 "max_profit_ccy": _safe_float(row["max_profit_ccy"]),
                 "broker_confirmed": row["broker_confirmed"],
+                "execution_quality": (
+                    (json.loads(row["gating_flags"] or "{}").get("execution_quality"))
+                    if isinstance(row["gating_flags"], str)
+                    else None
+                ),
             }
         )
     return sorted(trades, key=lambda trade: trade["timestamp_key"])
@@ -346,6 +355,7 @@ def build_weekly_report(
         cancelled_order_rows=resolutions.get("CANCELLED_ORDER", 0),
         duplicate_alias_rows=resolutions.get("DUPLICATE_ALIAS", 0),
         unconfirmed_closed_rows=unconfirmed,
+        execution_quality=aggregate_execution_quality(trades),
     )
 
 
@@ -416,6 +426,20 @@ def render_markdown(report: WeeklyOpsReport) -> str:
         f"- **Unconfirmed closes excluded from performance:** {report.unconfirmed_closed_rows}",
         f"- **Best instrument:** {report.best_instrument or 'not enough data'}",
         f"- **Worst instrument:** {report.worst_instrument or 'not enough data'}",
+        "",
+        "## Execution quality (TCA observer)",
+        (
+            "- No OANDA fill-quality samples recorded in this window."
+            if not report.execution_quality or not report.execution_quality.get("sample_count")
+            else (
+                f"- Samples: {report.execution_quality.get('sample_count')} | "
+                f"avg fill spread={report.execution_quality.get('avg_spread_pips_at_fill'):.3f} pips | "
+                f"avg depth impact={report.execution_quality.get('avg_depth_impact_pips'):.3f} pips | "
+                f"worst depth impact={report.execution_quality.get('worst_depth_impact_pips'):.3f} pips | "
+                f"avg half-spread cost={report.execution_quality.get('avg_half_spread_cost_ccy')}"
+            )
+        ),
+        "- This observer measures execution; it does not alter order type, price bounds, entries, exits or risk.",
         "",
         "## By instrument",
     ]
