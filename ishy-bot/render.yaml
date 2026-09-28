@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ishy-web
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app -b 0.0.0.0:$PORT"
+    envVars:
+      - key: CHECK_INTERVAL_MIN
+        value: "30"
