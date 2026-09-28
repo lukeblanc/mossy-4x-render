@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import os
 import sqlite3
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,7 @@ class WeeklyOpsReport:
     cancelled_order_rows: int = 0
     duplicate_alias_rows: int = 0
     unconfirmed_closed_rows: int = 0
+    account_reconciliation: dict[str, Any] | None = None
 
 
 def _safe_float(value: object) -> float | None:
@@ -142,29 +145,30 @@ def _load_closed_trades(db_path: Path, start_utc: datetime, end_utc: datetime) -
                 FROM trades
                 WHERE exit_timestamp_utc IS NOT NULL
                   AND realized_pnl_ccy IS NOT NULL
-                  AND exit_timestamp_utc >= ?
-                  AND exit_timestamp_utc <= ?
                 ORDER BY exit_timestamp_utc ASC
                 """,
-                (
-                    start_utc.replace(microsecond=0).isoformat(),
-                    end_utc.replace(microsecond=0).isoformat(),
-                ),
             ).fetchall()
         finally:
             conn.close()
     except sqlite3.Error:
         return []
 
+    from src.account_reconciliation import EvidenceError, time_key
+    lower, upper = time_key(start_utc.isoformat()), time_key(end_utc.isoformat())
     trades: list[dict[str, Any]] = []
     for row in rows:
         pnl = _safe_float(row["realized_pnl_ccy"])
         timestamp = _parse_timestamp(row["exit_timestamp_utc"])
-        if pnl is None or timestamp is None:
+        try:
+            precise_time = time_key(row["exit_timestamp_utc"])
+        except EvidenceError:
+            continue
+        if pnl is None or timestamp is None or not lower < precise_time <= upper:
             continue
         trades.append(
             {
                 "timestamp": timestamp,
+                "timestamp_key": precise_time,
                 "pnl": pnl,
                 "instrument": str(row["instrument"] or "UNKNOWN").upper(),
                 "direction": str(row["side"] or "UNKNOWN").upper(),
@@ -177,7 +181,7 @@ def _load_closed_trades(db_path: Path, start_utc: datetime, end_utc: datetime) -
                 "broker_confirmed": row["broker_confirmed"],
             }
         )
-    return trades
+    return sorted(trades, key=lambda trade: trade["timestamp_key"])
 
 
 def _count_open_trades(db_path: Path) -> int:
@@ -283,6 +287,8 @@ def build_weekly_report(
 ) -> WeeklyOpsReport:
     path = Path(db_path) if db_path is not None else _journal_path()
     start_utc, end_utc = _week_bounds(now_utc)
+    start_utc = start_utc.replace(microsecond=0)
+    end_utc = end_utc.replace(microsecond=0)
     all_trades = _load_closed_trades(path, start_utc, end_utc)
     trades = [trade for trade in all_trades
               if trade.get("broker_confirmed") in (1, True, "1", "true", "True")]
@@ -351,6 +357,45 @@ def _metric_line(label: str, value: SegmentMetrics) -> str:
     )
 
 
+def attach_account_reconciliation(report: WeeklyOpsReport) -> WeeklyOpsReport:
+    """Add independent GET-only evidence on the weekly-report thread."""
+    from src.account_reconciliation import collect_reconciliation, number, TOLERANCE, unavailable
+    try:
+        audit = collect_reconciliation(report.journal_path, report.week_start_utc, report.week_end_utc)
+        if audit.get("journal_trade_pl") is not None and abs(number(audit["journal_trade_pl"]) - number(report.total.net_pnl)) > TOLERANCE:
+            audit["status"] = "UNVERIFIED"
+            audit["journal_status"] = "UNVERIFIED"
+            audit["reasons"] = sorted(set(audit["reasons"] + ["weekly-report-population-mismatch"]))
+    except Exception:
+        audit = unavailable("account-audit-unavailable")
+    # Do not change the Champion, risk, trading status, or historical P&L rows.
+    return replace(report, account_reconciliation=audit)
+
+
+def _account_markdown(audit: dict[str, Any] | None) -> list[str]:
+    audit = audit or {"status": "UNVERIFIED", "reasons": ["account-evidence-not-collected"]}
+    lines = ["", "## Account reconciliation", f"**Performance verification: {audit['status']}**",
+             "The accounting window is start-exclusive and end-inclusive; heartbeat equity changes are not substituted for balance changes."]
+    if audit.get("opening_checkpoint"):
+        lines += [f"- Currency: {audit['currency']}",
+                  f"- Window: {audit['window_start_utc']} to {audit['window_end_utc']}",
+                  f"- Opening broker balance: {audit['opening_checkpoint']['balance']}",
+                  f"- Closing broker balance: {audit['closing_checkpoint']['balance']}",
+                  f"- Balance change: {audit['balance_change']}"]
+        for label, key in (("Broker realised trade P&L", "realized_pl"), ("Financing (signed)", "financing"),
+                           ("Commission cost", "commission_cost"), ("Guaranteed execution fee cost", "guaranteed_fee_cost"),
+                           ("Dividend adjustments (signed)", "dividend_adjustment"), ("Deposits/withdrawals (signed)", "transfers")):
+            lines.append(f"- {label}: {audit['components'][key]}")
+        lines += [f"- Account balance result excluding transfers: {audit['account_net_excluding_transfers'] if audit['account_net_excluding_transfers'] is not None else 'UNVERIFIED'}",
+                  f"- Unexplained balance delta: {audit['unexplained_balance_delta']}",
+                  f"- Journal minus broker realised P&L: {audit['journal_vs_broker_pl_delta']}",
+                  f"- Ledger verification: {audit['ledger_status']}; journal matching: {audit['journal_status']}"]
+    for reason in audit.get("reasons", []):
+        lines.append(f"- Evidence issue: {reason}")
+    lines.append("This is balance accounting, not mark-to-market return or proof of a profitable trading strategy. No journal values were repaired or replaced.")
+    return lines
+
+
 def render_markdown(report: WeeklyOpsReport) -> str:
     lines = [
         "# Mossy 4X Weekly ALGO Operations Report",
@@ -360,7 +405,8 @@ def render_markdown(report: WeeklyOpsReport) -> str:
         f"**Trading status:** {report.status}",
         f"**Readiness score:** {report.readiness_score}/100",
         "",
-        "## Verified performance",
+        "## Journal trade results (not total account return)",
+        "These are broker-confirmed closed-trade P&L rows. Financing, fees and transfers are reconciled separately.",
         _metric_line("All closed trades", report.total),
         f"- **Maximum reconstructed drawdown:** {report.max_drawdown:.2f}",
         f"- **Longest losing streak:** {report.longest_losing_streak}",
@@ -376,6 +422,7 @@ def render_markdown(report: WeeklyOpsReport) -> str:
     lines.extend(_metric_line(name, metrics) for name, metrics in report.by_instrument.items())
     if not report.by_instrument:
         lines.append("- No closed trades in this reporting window.")
+    lines.extend(_account_markdown(report.account_reconciliation))
     lines.extend(["", "## By direction"])
     lines.extend(_metric_line(name, metrics) for name, metrics in report.by_direction.items())
     lines.extend(["", "## By session"])
@@ -404,6 +451,52 @@ def render_markdown(report: WeeklyOpsReport) -> str:
     return "\n".join(lines)
 
 
+def save_account_evidence(audit: dict[str, Any], root: Path, generated_utc: str) -> Path:
+    """Keep immutable, private checkpoint reports separate from LATEST files."""
+    directory = root / "account-reconciliation"
+    directory.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(audit, indent=2, sort_keys=True, allow_nan=False)
+    digest = hashlib.sha256(content.encode()).hexdigest()[:16]
+    stamp = datetime.fromisoformat(generated_utc).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    destination = directory / f"{stamp}-{digest}.json"
+    fd, temporary = tempfile.mkstemp(prefix=".audit-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return destination
+
+
+def _log_account_evidence(audit: dict[str, Any]) -> None:
+    print(
+        f"[ACCOUNT-RECONCILIATION] status={audit.get('status', 'UNVERIFIED')} "
+        f"window_start={audit.get('window_start_utc')} window_end={audit.get('window_end_utc')} "
+        f"balance_change={audit.get('balance_change')} "
+        f"net_excluding_transfers={audit.get('account_net_excluding_transfers')} "
+        f"unexplained_delta={audit.get('unexplained_balance_delta')} "
+        f"journal_pl_delta={audit.get('journal_vs_broker_pl_delta')} "
+        f"reasons={audit.get('reasons', [])}", flush=True,
+    )
+
+
+def startup_account_audit(root: Path) -> None:
+    """One read-only audit on the existing report thread; never delay runner."""
+    try:
+        report = attach_account_reconciliation(build_weekly_report())
+        audit = report.account_reconciliation or {"status": "UNVERIFIED"}
+        save_account_evidence(audit, root, report.generated_utc)
+        _log_account_evidence(audit)
+    except Exception:
+        print("[ACCOUNT-RECONCILIATION] status=UNVERIFIED reason=startup-audit-unavailable", flush=True)
+
+
 def save_report(report: WeeklyOpsReport, directory: Path | str | None = None) -> tuple[Path, Path, Path]:
     root = Path(directory) if directory is not None else _report_dir()
     root.mkdir(parents=True, exist_ok=True)
@@ -416,6 +509,8 @@ def save_report(report: WeeklyOpsReport, directory: Path | str | None = None) ->
     markdown_path.write_text(markdown, encoding="utf-8")
     json_path.write_text(json.dumps(asdict(report), indent=2, sort_keys=True), encoding="utf-8")
     latest_path.write_text(markdown, encoding="utf-8")
+    if report.account_reconciliation is not None:
+        save_account_evidence(report.account_reconciliation, root, report.generated_utc)
     return markdown_path, json_path, latest_path
 
 
@@ -501,14 +596,18 @@ def publish_report_to_github(report: WeeklyOpsReport) -> bool:
 
 
 def generate_and_publish(now_utc: datetime | None = None) -> WeeklyOpsReport:
-    report = build_weekly_report(now_utc=now_utc)
+    report = attach_account_reconciliation(build_weekly_report(now_utc=now_utc))
     markdown_path, json_path, _ = save_report(report)
     published = publish_report_to_github(report)
+    _log_account_evidence(report.account_reconciliation or {"status": "UNVERIFIED"})
     print(
         f"[ALGO-REPORT] generated status={report.status} readiness={report.readiness_score} "
         f"trades={report.total.trades} net={report.total.net_pnl:.2f} "
         f"pf={report.total.profit_factor:.3f} markdown={markdown_path} json={json_path} "
-        f"github_published={str(published).lower()}",
+        f"github_published={str(published).lower()} "
+        f"account_verification={(report.account_reconciliation or {}).get('status', 'UNVERIFIED')} "
+        f"unexplained_delta={(report.account_reconciliation or {}).get('unexplained_balance_delta')} "
+        f"journal_pl_delta={(report.account_reconciliation or {}).get('journal_vs_broker_pl_delta')}",
         flush=True,
     )
     return report
@@ -532,6 +631,7 @@ def _due(now_utc: datetime, marker: Path) -> bool:
 def _monitor_loop() -> None:
     root = _report_dir()
     marker = _published_marker(root)
+    startup_account_audit(root)
     interval = max(900, int(os.getenv("ALGO_REPORT_CHECK_SECONDS", "3600")))
     while True:
         now = datetime.now(timezone.utc)
