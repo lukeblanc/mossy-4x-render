@@ -93,6 +93,7 @@ from src.decision_observer import (
 )
 from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
 from src.scheduler_policy import install_runtime_jobs
+from src.execution_quality import summarize_fill_execution
 
 VERSION = "v1.6.1"
 
@@ -1948,6 +1949,21 @@ async def decision_cycle() -> None:
                     "entry_source": "broker_fill",
                     "signal_price": entry_price,
                 }
+                execution_quality = summarize_fill_execution(
+                    result.get("response"),
+                    side=evaluation.signal,
+                    instrument=evaluation.instrument,
+                )
+                if execution_quality is not None:
+                    gating_flags["execution_quality"] = execution_quality
+                    print(
+                        "[EXECUTION-QUALITY] "
+                        f"instrument={evaluation.instrument} "
+                        f"spread_pips={execution_quality['spread_pips_at_fill']:.3f} "
+                        f"depth_impact_pips={execution_quality['depth_impact_pips']:.3f} "
+                        f"half_spread_cost_ccy={execution_quality.get('half_spread_cost_ccy')}",
+                        flush=True,
+                    )
                 try:
                     journal.record_entry(
                         trade_id=ticket,
