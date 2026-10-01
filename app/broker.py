@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from datetime import datetime, timezone
 import math
+import json
 import os
 from pathlib import Path
 import time
@@ -174,6 +175,11 @@ class Broker:
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=15.0)
 
+    @property
+    def entry_halt_reason(self) -> Optional[str]:
+        """Observe the latch without broker calls, recovery, or other side effects."""
+        return self._entry_halted_reason
+
     def _latch_entry_halt(self, reason: str) -> None:
         self._entry_halted_reason = reason
         try:
@@ -184,12 +190,14 @@ class Broker:
         except OSError as exc:
             print(f"[BROKER][CRITICAL] Could not persist entry halt: {exc}", flush=True)
 
-    def _clear_entry_halt(self) -> None:
-        self._entry_halted_reason = None
+    def _clear_entry_halt(self) -> bool:
         try:
             self._entry_halt_path.unlink(missing_ok=True)
         except OSError as exc:
             print(f"[BROKER][WARN] Could not clear reconciled entry halt: {exc}", flush=True)
+            return False
+        self._entry_halted_reason = None
+        return True
 
     def trade_details(self, trade_id: str) -> Optional[Dict]:
         if not self.key or not self.account:
@@ -198,7 +206,11 @@ class Broker:
             return read_trade_details(client, self.account, trade_id)
 
     def connectivity_check(self) -> dict:
-        """Log a quick read-only call to prove creds (demo or live)."""
+        """Startup reconciliation; may close unsafe trades and clear a clean halt.
+
+        This is not a read-only health check. Normal monitoring must use the
+        side-effect-free entry_halt_reason property to observe the latch.
+        """
         if not (self.key and self.account):
             print("[OANDA] No credentials set; skipping connectivity check.")
             return {"ok": False, "reason": "no-creds"}
@@ -232,11 +244,11 @@ class Broker:
                             client, trades
                         ):
                             old_reason = self._entry_halted_reason
-                            self._clear_entry_halt()
-                            print(
-                                f"[BROKER][RECOVERY] persisted halt reconciled reason={old_reason}",
-                                flush=True,
-                            )
+                            if self._clear_entry_halt():
+                                print(
+                                    f"[BROKER][RECOVERY] persisted halt reconciled reason={old_reason}",
+                                    flush=True,
+                                )
                     return {"ok": True, "balance": balance, "currency": currency}
                 print(
                     f"[OANDA] Connectivity error {resp.status_code}: {resp.text}",
@@ -268,45 +280,62 @@ class Broker:
     def _open_trade_protection_status(
         self, client, summary: dict
     ) -> Optional[bool]:
-        """Return True for verified protection, False for unsafe, None if unknown."""
+        """Return True for verified protection, False for unsafe, None if unknown.
+
+        The historical halt category is retained for compatibility. This audit
+        logs the specific failed condition so an over-budget stop is never
+        mistaken for evidence that the broker lost or removed a stop order.
+        Only whitelisted diagnostic fields are logged, never raw responses.
+        """
 
         trade_id = str(summary.get("id") or "")
+
+        def failure(reason: str, *, unknown: bool = False, **evidence):
+            details = {"trade_id": trade_id, "audit_reason": reason,
+                       "status": "unknown" if unknown else "unsafe", **evidence}
+            print("[BROKER][PROTECTION-AUDIT] " + json.dumps(details, sort_keys=True),
+                  flush=True)
+            return None if unknown else False
+
         try:
             trade = read_trade_details(client, self.account, trade_id)
         except Exception:
-            return None
+            return failure("trade-details-unavailable", unknown=True)
         if not isinstance(trade, dict):
-            return None
-        if (
-            str(trade.get("id") or "") != trade_id
-            or str(trade.get("state") or "").upper() != "OPEN"
-            or str(trade.get("instrument") or "") != str(summary.get("instrument") or "")
-        ):
-            return False
+            return failure("trade-details-unverified", unknown=True)
+        if str(trade.get("id") or "") != trade_id:
+            return failure("trade-id-mismatch")
+        if str(trade.get("state") or "").upper() != "OPEN":
+            return failure("trade-not-open")
+        if str(trade.get("instrument") or "") != str(summary.get("instrument") or ""):
+            return failure("trade-instrument-mismatch")
         stop_order = trade.get("stopLossOrder") or trade.get("guaranteedStopLossOrder")
         if not isinstance(stop_order, dict):
-            return False
+            return failure("stop-order-missing")
         stop_id = str(stop_order.get("id") or "")
         summary_stop_id = str(
             summary.get("stopLossOrderID")
             or summary.get("guaranteedStopLossOrderID")
             or ""
         )
-        if (
-            not _valid_transaction_id(stop_id)
-            or (summary_stop_id and summary_stop_id != stop_id)
-            or str(stop_order.get("state") or "").upper() != "PENDING"
-            or str(stop_order.get("type") or "").upper()
-            not in {"STOP_LOSS", "GUARANTEED_STOP_LOSS"}
-            or str(stop_order.get("tradeID") or "") != trade_id
-        ):
-            return False
+        if not _valid_transaction_id(stop_id):
+            return failure("stop-id-invalid")
+        if summary_stop_id and summary_stop_id != stop_id:
+            return failure("stop-id-mismatch", stop_order_id=stop_id)
+        if str(stop_order.get("state") or "").upper() != "PENDING":
+            return failure("stop-not-pending", stop_order_id=stop_id)
+        if str(stop_order.get("type") or "").upper() not in {
+            "STOP_LOSS", "GUARANTEED_STOP_LOSS"
+        }:
+            return failure("stop-type-invalid", stop_order_id=stop_id)
+        if str(stop_order.get("tradeID") or "") != trade_id:
+            return failure("stop-trade-id-mismatch", stop_order_id=stop_id)
         try:
             units = Decimal(str(trade.get("currentUnits")))
             entry_price = Decimal(str(trade.get("price")))
             stop_price = Decimal(str(stop_order.get("price")))
         except (InvalidOperation, TypeError, ValueError):
-            return False
+            return failure("stop-risk-input-invalid", stop_order_id=stop_id)
         if (
             not units.is_finite()
             or units == 0
@@ -315,22 +344,31 @@ class Broker:
             or not stop_price.is_finite()
             or stop_price <= 0
         ):
-            return False
+            return failure("stop-risk-input-invalid", stop_order_id=stop_id)
         try:
             _, quote_currency = str(trade["instrument"]).upper().split("_", 1)
         except (KeyError, ValueError):
-            return False
+            return failure("trade-instrument-invalid")
         conversion = self.conversion_rate(quote_currency, "AUD")
         cash_limit = configured_cash_risk_limit()
-        if conversion is None or cash_limit <= 0:
-            return None
+        if conversion is None or not math.isfinite(conversion) or conversion <= 0:
+            return failure("loss-conversion-unavailable", unknown=True)
+        if cash_limit <= 0:
+            return failure("cash-risk-limit-invalid", unknown=True)
         loss_distance = (
             max(Decimal("0"), entry_price - stop_price)
             if units > 0
             else max(Decimal("0"), stop_price - entry_price)
         )
         risk = abs(units) * loss_distance * Decimal(str(conversion))
-        return risk.is_finite() and risk <= Decimal(str(cash_limit))
+        if not risk.is_finite() or risk > Decimal(str(cash_limit)):
+            return failure(
+                "stop-cash-risk-exceeded", stop_order_id=stop_id,
+                units=str(units), entry_price=str(entry_price), stop_price=str(stop_price),
+                loss_conversion=str(conversion), planned_stop_risk=str(risk),
+                cash_limit=str(cash_limit), currency="AUD",
+            )
+        return True
 
     def _close_exact_trade(self, client, trade_id: str) -> bool:
         if not _valid_transaction_id(trade_id):
@@ -382,7 +420,7 @@ class Broker:
             self._latch_entry_halt("unprotected-open-trade")
             close_ok = self._close_exact_trade(client, trade_id)
             print(
-                "[BROKER][CRITICAL] unprotected open trade detected; "
+                "[BROKER][CRITICAL] open-trade protection audit failed; "
                 f"trade_id={trade_id} emergency_close={close_ok} "
                 "new_entries_halted=true",
                 flush=True,

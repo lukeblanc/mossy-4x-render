@@ -33,7 +33,11 @@ def test_learning_can_only_reduce_requested_risk(monkeypatch):
         broker=ConversionBroker(),
     )
 
-    assert units == 500
+    # Learning cannot upscale risk, and currency conversion reserves 2% of
+    # the unchanged A$0.50 broker-audited cap for new-position sizing.
+    assert units == 490
+    assert diagnostics["risk_amount"] == pytest.approx(0.49)
+    assert diagnostics["max_risk_per_trade_ccy"] == pytest.approx(0.50)
     assert diagnostics["requested_risk_pct"] == pytest.approx(0.005)
     assert diagnostics["risk_pct"] == pytest.approx(0.005)
     assert diagnostics["learning_scale"] == pytest.approx(1.0)

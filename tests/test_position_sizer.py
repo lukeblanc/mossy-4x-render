@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from src import adaptive_policy, position_sizer
@@ -40,13 +42,15 @@ def test_units_for_risk_non_jpy_applies_default_cash_cap(monkeypatch):
     )
 
     # Requested percentage risk is 33.10 AUD, but the broker-side stop exposure
-    # is capped at 0.50 AUD. Pip value per unit is 0.00015 AUD, so units are
-    # floored to keep planned risk below the cap.
-    assert units == 333
+    # is sized below 0.49 AUD, reserving 2% of the 0.50 AUD audit cap for
+    # conversion drift. Pip value per unit is 0.00015 AUD; units round down.
+    assert units == 326
     assert diag["requested_risk_amount"] == 33.1
-    assert diag["risk_amount"] == 0.5
+    assert diag["risk_amount"] == 0.49
     assert diag["max_risk_per_trade_ccy"] == 0.5
-    assert diag["planned_stop_risk"] <= 0.5
+    assert diag["cash_risk_sizing_limit"] == 0.49
+    assert diag["conversion_risk_reserve_pct"] == 0.02
+    assert diag["planned_stop_risk"] <= 0.49
     assert round(diag["stop_pips"], 5) == 10.0
 
 
@@ -62,9 +66,9 @@ def test_units_for_risk_dashboard_value_cannot_loosen_code_cap(monkeypatch):
         broker=broker,
     )
 
-    assert units == 333
+    assert units == 326
     assert diag["requested_risk_amount"] == 12.5
-    assert diag["risk_amount"] == 0.5
+    assert diag["risk_amount"] == 0.49
     assert diag["max_risk_per_trade_ccy"] == 0.5
 
 
@@ -81,7 +85,8 @@ def test_units_for_risk_jpy_pair_uses_0_01_pip_size(monkeypatch):
     )
 
     assert round(diag["stop_pips"], 5) == 10.0
-    assert diag["risk_amount"] == 0.5
+    assert diag["risk_amount"] == 0.49
+    assert diag["conversion_risk_reserve_pct"] == 0.02
     assert units > 0
 
 
@@ -132,9 +137,10 @@ def test_stricter_cash_cap_is_preserved(monkeypatch):
         broker=broker,
     )
 
-    assert units == 166
-    assert diag["risk_amount"] == 0.25
-    assert diag["planned_stop_risk"] <= 0.25
+    assert units == 163
+    assert diag["risk_amount"] == 0.245
+    assert diag["max_risk_per_trade_ccy"] == 0.25
+    assert diag["planned_stop_risk"] <= 0.245
 
 
 @pytest.mark.parametrize("stop_distance", [0.00001, 0.00005, 0.001, 0.01, 0.1])
@@ -155,7 +161,13 @@ def test_planned_stop_risk_never_exceeds_cash_cap(
     )
 
     if units > 0:
-        assert diag["planned_stop_risk"] <= 0.50
-        assert units * stop_distance * conversion_rate <= 0.50
+        assert diag["planned_stop_risk"] <= 0.49
+        # Check the broker's decimal exposure, avoiding float associativity at
+        # an exact sizing-budget boundary (e.g. 490 * 0.00001 * 100).
+        broker_risk = (
+            Decimal(units) * Decimal(str(stop_distance)) * Decimal(str(conversion_rate))
+        )
+        assert broker_risk <= Decimal("0.49")
+        assert broker_risk * Decimal("1.02") <= Decimal("0.50")
     else:
         assert diag.get("reason") == "minimum-units-exceed-risk-budget"

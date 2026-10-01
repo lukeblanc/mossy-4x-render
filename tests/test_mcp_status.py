@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 import src.mcp_status as mcp_status
@@ -247,3 +249,200 @@ async def test_safety_state_change_bypasses_publish_throttle(monkeypatch):
 
     assert sent is True
     assert status == "sent"
+
+
+def _halt_heartbeat(**kwargs):
+    return build_runtime_heartbeat(
+        service_status="running", mode="demo", oanda_environment="practice",
+        scheduler_alive=True, last_cycle_age_sec=1.0,
+        last_broker_sync_age_sec=1.0, open_trades_count=0, equity=10000.0,
+        revision="test", entry_window_state="off_session",
+        last_verified_entry_age_bucket="never", **kwargs,
+    )
+
+
+@pytest.mark.parametrize("reason", sorted(mcp_status.BROKER_ENTRY_HALT_REASONS))
+def test_halt_reason_allowlist_is_preserved(reason):
+    payload = _halt_heartbeat(broker_entry_halted=True, broker_entry_halt_reason=reason)
+    assert payload["broker_entry_halted"] is True
+    assert payload["broker_entry_halt_reason"] == reason
+
+
+@pytest.mark.parametrize("reason", [None, "", "private account detail", {"secret": "value"}])
+def test_arbitrary_halt_reason_is_reduced_to_other(reason):
+    payload = _halt_heartbeat(broker_entry_halted=True, broker_entry_halt_reason=reason)
+    assert payload["broker_entry_halt_reason"] == "other"
+    assert "private account detail" not in json.dumps(payload)
+    assert "secret" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("halted", [None, False])
+def test_missing_and_clear_halt_observations_remain_distinct(halted):
+    payload = _halt_heartbeat(broker_entry_halted=halted)
+    assert payload["broker_entry_halted"] is halted
+    assert payload["broker_entry_halt_reason"] is None
+    assert _halt_heartbeat()["broker_entry_halted"] is None
+
+
+@pytest.mark.parametrize("halted", [0, 1, "false", "true"])
+def test_halt_flag_requires_a_real_boolean(halted):
+    with pytest.raises(ValueError, match="halt flag"):
+        _halt_heartbeat(broker_entry_halted=halted)
+
+
+@pytest.mark.parametrize("halted", [None, False])
+def test_contradictory_halt_reason_is_rejected(halted):
+    with pytest.raises(ValueError, match="confirmed halt"):
+        _halt_heartbeat(broker_entry_halted=halted, broker_entry_halt_reason="other")
+
+
+@pytest.fixture
+def heartbeat_transport(monkeypatch):
+    monkeypatch.setenv("MOSSY_MCP_STATUS_URL", "https://example.test/internal/runtime-heartbeat")
+    monkeypatch.setenv("MOSSY_MCP_STATUS_KEY", "test-secret")
+    monkeypatch.setattr(mcp_status, "_last_success_monotonic", None)
+    monkeypatch.setattr(mcp_status, "_last_success_fingerprint", None)
+    original_client = httpx.AsyncClient
+    requests = []
+
+    def install(handler):
+        def record(request):
+            requests.append(request)
+            assert request.url == "https://example.test/internal/runtime-heartbeat"
+            assert request.headers["Authorization"] == "Bearer test-secret"
+            return handler(request)
+
+        def client(**kwargs):
+            assert kwargs["follow_redirects"] is False
+            return original_client(transport=httpx.MockTransport(record), **kwargs)
+
+        monkeypatch.setattr(mcp_status.httpx, "AsyncClient", client)
+        return requests
+
+    return install
+
+
+def _capabilities():
+    return {"optional_heartbeat_fields": sorted(mcp_status.BROKER_HALT_TELEMETRY_FIELDS)}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_publish_negotiates_new_and_legacy_bridges(heartbeat_transport, legacy):
+    requests = heartbeat_transport(lambda request: (
+        httpx.Response(405) if legacy else httpx.Response(200, json=_capabilities())
+    ) if request.method == "GET" else httpx.Response(202))
+    payload = _halt_heartbeat(broker_entry_halted=True, broker_entry_halt_reason="other")
+
+    result = await publish_runtime_heartbeat(payload)
+
+    assert result == (True, "sent:legacy-telemetry" if legacy else "sent")
+    assert [request.method for request in requests] == ["GET", "POST"]
+    expected = {key: value for key, value in payload.items()
+                if not legacy or key not in mcp_status.BROKER_HALT_TELEMETRY_FIELDS}
+    assert json.loads(requests[1].content) == expected
+    assert payload["broker_entry_halted"] is True  # No in-place downgrade.
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403, 404, 422, 500, 302])
+async def test_capability_http_failure_never_downgrades_or_posts(heartbeat_transport, status):
+    requests = heartbeat_transport(lambda request: httpx.Response(status))
+    assert await publish_runtime_heartbeat(_halt_heartbeat()) == (
+        False, "http-error:HTTPStatusError",
+    )
+    assert len(requests) == 1
+    assert mcp_status._last_success_monotonic is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("capabilities,expected", [
+    (None, "invalid-heartbeat-capabilities"),
+    ({}, "invalid-heartbeat-capabilities"),
+    ([], "invalid-heartbeat-capabilities"),
+    ({"optional_heartbeat_fields": "broker_entry_halted"}, "invalid-heartbeat-capabilities"),
+    ({"optional_heartbeat_fields": [{}]}, "invalid-heartbeat-capabilities"),
+    ({"optional_heartbeat_fields": []}, "unsupported-heartbeat-capabilities"),
+    ({"optional_heartbeat_fields": ["broker_entry_halted"]}, "unsupported-heartbeat-capabilities"),
+])
+async def test_invalid_capabilities_never_downgrade_or_post(
+    heartbeat_transport, capabilities, expected
+):
+    requests = heartbeat_transport(lambda request: httpx.Response(200, json=capabilities))
+    assert await publish_runtime_heartbeat(_halt_heartbeat()) == (False, expected)
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
+async def test_invalid_capability_json_never_downgrades_or_posts(heartbeat_transport):
+    requests = heartbeat_transport(lambda request: httpx.Response(200, text="not json"))
+    assert await publish_runtime_heartbeat(_halt_heartbeat()) == (
+        False, "invalid-heartbeat-capabilities",
+    )
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("status", [401, 422, 500])
+async def test_post_failure_never_retries_a_downgrade(heartbeat_transport, legacy, status):
+    requests = heartbeat_transport(lambda request: (
+        httpx.Response(405) if legacy else httpx.Response(200, json=_capabilities())
+    ) if request.method == "GET" else httpx.Response(status))
+    assert await publish_runtime_heartbeat(_halt_heartbeat()) == (
+        False, "http-error:HTTPStatusError",
+    )
+    assert len(requests) == 2
+    assert mcp_status._last_success_monotonic is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failed_method", ["GET", "POST"])
+async def test_transport_failure_never_downgrades(heartbeat_transport, failed_method):
+    def handler(request):
+        if request.method == failed_method:
+            raise httpx.ConnectError("offline", request=request)
+        return httpx.Response(200, json=_capabilities())
+
+    requests = heartbeat_transport(handler)
+    assert await publish_runtime_heartbeat(_halt_heartbeat()) == (
+        False, "http-error:ConnectError",
+    )
+    assert len(requests) == (1 if failed_method == "GET" else 2)
+
+
+@pytest.mark.anyio
+async def test_throttle_precedes_negotiation_and_halt_change_bypasses_it(
+    heartbeat_transport, monkeypatch
+):
+    requests = heartbeat_transport(lambda request: httpx.Response(
+        200 if request.method == "GET" else 202, json=_capabilities()
+    ))
+    clear = _halt_heartbeat(broker_entry_halted=False)
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 100.0)
+    assert await publish_runtime_heartbeat(clear, monitoring_active=True) == (True, "sent")
+    assert len(requests) == 2
+    assert await publish_runtime_heartbeat(clear, monitoring_active=True) == (False, "throttled")
+    assert len(requests) == 2
+    halted = _halt_heartbeat(broker_entry_halted=True, broker_entry_halt_reason="other")
+    assert await publish_runtime_heartbeat(halted, monitoring_active=True) == (True, "sent")
+    assert len(requests) == 4
+
+
+@pytest.mark.anyio
+async def test_legacy_bridge_upgrade_is_renegotiated(heartbeat_transport, monkeypatch):
+    legacy = True
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(405) if legacy else httpx.Response(200, json=_capabilities())
+        return httpx.Response(202)
+
+    requests = heartbeat_transport(handler)
+    payload = _halt_heartbeat(broker_entry_halted=False)
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 100.0)
+    assert await publish_runtime_heartbeat(payload, monitoring_active=True) == (True, "sent:legacy-telemetry")
+    legacy = False
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 701.0)
+    assert await publish_runtime_heartbeat(payload, monitoring_active=True) == (True, "sent")
+    assert json.loads(requests[-1].content)["broker_entry_halted"] is False

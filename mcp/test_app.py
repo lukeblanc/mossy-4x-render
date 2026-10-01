@@ -392,6 +392,96 @@ def test_broker_unavailable_status_is_always_blocked(bridge):
     assert "Worker status is broker-unavailable." in result["blockers"]
 
 
+def test_heartbeat_capability_route_is_authenticated_and_read_only(bridge, monkeypatch):
+    with TestClient(bridge.app, base_url="http://localhost") as client:
+        assert client.get("/internal/runtime-heartbeat").status_code == 401
+        assert client.get(
+            "/internal/runtime-heartbeat", headers={"Authorization": "Bearer wrong"},
+        ).status_code == 401
+        response = client.get(
+            "/internal/runtime-heartbeat",
+            headers={"Authorization": "Bearer unit-test-secret"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"optional_heartbeat_fields": [
+            "broker_entry_halted", "broker_entry_halt_reason",
+        ]}
+        assert bridge.load_runtime_heartbeat() is None
+        monkeypatch.delenv("MOSSY_MCP_STATUS_KEY")
+        assert client.get("/internal/runtime-heartbeat").status_code == 503
+
+
+@pytest.mark.parametrize("halt_fields,expected_state,expected_blocker", [
+    ({}, None, "Broker entry halt state is unknown"),
+    ({"broker_entry_halted": None, "broker_entry_halt_reason": None}, None,
+     "Broker entry halt state is unknown"),
+    ({"broker_entry_halted": False, "broker_entry_halt_reason": None}, False, None),
+    ({"broker_entry_halted": True, "broker_entry_halt_reason": "protective-stop-not-confirmed"},
+     True, "Broker entries are halted: protective-stop-not-confirmed"),
+])
+def test_bridge_distinguishes_legacy_unknown_clear_and_halted_telemetry(
+    bridge, halt_fields, expected_state, expected_blocker
+):
+    heartbeat = {**_heartbeat(), **halt_fields, "supervisor_floor_breached": False}
+    with TestClient(bridge.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/internal/runtime-heartbeat",
+            headers={"Authorization": "Bearer unit-test-secret"}, json=heartbeat,
+        )
+        assert response.status_code == 202
+    result = bridge.get_runtime_health()
+    assert result["runtime"]["broker_entry_halted"] is expected_state
+    if expected_blocker:
+        assert result["supervisor_status"] == "BLOCKED"
+        assert any(expected_blocker in blocker for blocker in result["blockers"])
+    else:
+        assert result["supervisor_status"] == "READY_FOR_REVIEW"
+        assert result["blockers"] == []
+
+
+@pytest.mark.parametrize("halt_fields", [
+    {"broker_entry_halted": "false"},
+    {"broker_entry_halted": "true", "broker_entry_halt_reason": "other"},
+    {"broker_entry_halted": 0},
+    {"broker_entry_halted": 1, "broker_entry_halt_reason": "other"},
+    {"broker_entry_halted": False, "broker_entry_halt_reason": "other"},
+    {"broker_entry_halted": None, "broker_entry_halt_reason": "other"},
+    {"broker_entry_halt_reason": "other"},
+    {"broker_entry_halted": True},
+    {"broker_entry_halted": True, "broker_entry_halt_reason": "private account detail"},
+    {"broker_entry_halted": True, "broker_entry_halt_reason": {"secret": "value"}},
+])
+def test_bridge_rejects_ambiguous_or_unbounded_halt_telemetry(bridge, halt_fields):
+    with TestClient(bridge.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/internal/runtime-heartbeat",
+            headers={"Authorization": "Bearer unit-test-secret"},
+            json={**_heartbeat(), **halt_fields},
+        )
+    assert response.status_code == 422
+    assert bridge.load_runtime_heartbeat() is None
+
+
+def test_worker_and_bridge_halt_reason_allowlists_match(bridge):
+    # The bridge deliberately has no dependency on worker HTTP/trading packages.
+    import ast
+
+    source = (MCP_DIR.parent / "src" / "mcp_status.py").read_text(encoding="utf-8")
+    assignment = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "BROKER_ENTRY_HALT_REASONS"
+                for target in node.targets)
+    )
+    reasons = ast.literal_eval(assignment.value.args[0])
+    for reason in reasons:
+        model = bridge.RuntimeHeartbeat.model_validate({
+            **_heartbeat(), "broker_entry_halted": True,
+            "broker_entry_halt_reason": reason,
+        })
+        assert model.broker_entry_halt_reason == reason
+
+
 def test_health_fails_when_internal_status_key_is_missing(bridge, monkeypatch):
     monkeypatch.delenv("MOSSY_MCP_STATUS_KEY")
 

@@ -163,7 +163,30 @@ class RuntimeHeartbeat(BaseModel):
         "over_three_days",
         "unknown",
     ]
+    # An older worker has not reported whether its entry latch is clear.
+    broker_entry_halted: bool | None = Field(default=None, strict=True)
+    broker_entry_halt_reason: Literal[
+        "account-currency-mismatch",
+        "protective-stop-audit-unavailable",
+        "unprotected-open-trade",
+        "invalid-order-response",
+        "no-confirmed-trade-opening",
+        "fill-does-not-match-request",
+        "protective-stop-not-confirmed",
+        "order-http-state-uncertain",
+        "order-transport-state-uncertain",
+        "other",
+    ] | None = None
     revision: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_broker_halt_state(self) -> "RuntimeHeartbeat":
+        if self.broker_entry_halted is True:
+            if self.broker_entry_halt_reason is None:
+                raise ValueError("a confirmed broker halt requires a bounded reason")
+        elif self.broker_entry_halt_reason is not None:
+            raise ValueError("a broker halt reason requires a confirmed halt")
+        return self
 
 
 class StrictSnapshotModel(BaseModel):
@@ -569,6 +592,12 @@ def _runtime_supervision(snapshot: dict | None) -> dict:
         blockers.append("Decision cycle is stale.")
     if not payload["broker_sync_fresh"]:
         blockers.append("Broker sync is stale.")
+    if payload["broker_entry_halted"] is None:
+        blockers.append("Broker entry halt state is unknown; worker telemetry is incomplete.")
+    elif payload["broker_entry_halted"]:
+        blockers.append(
+            f"Broker entries are halted: {payload['broker_entry_halt_reason']}."
+        )
     if payload["supervisor_floor_breached"]:
         blockers.append(
             f"The AUD {SUPERVISOR_EQUITY_FLOOR_AUD:,.0f} supervisory equity floor is breached."
@@ -1175,6 +1204,23 @@ async def health(_: Request) -> Response:
         },
         status_code=200 if key_configured else 503,
     )
+
+
+@mcp.custom_route("/internal/runtime-heartbeat", methods=["GET"])
+async def runtime_heartbeat_capabilities(request: Request) -> Response:
+    expected = os.getenv(STATUS_KEY_ENV, "").strip()
+    if not expected:
+        return JSONResponse(
+            {"detail": f"Server missing {STATUS_KEY_ENV}."}, status_code=503
+        )
+    supplied = _bearer_token(request)
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        return JSONResponse({"detail": "Unauthorized."}, status_code=401)
+    return JSONResponse({
+        "optional_heartbeat_fields": [
+            "broker_entry_halted", "broker_entry_halt_reason",
+        ],
+    })
 
 
 @mcp.custom_route("/internal/runtime-heartbeat", methods=["POST"])
