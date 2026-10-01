@@ -4,7 +4,11 @@ import math
 from typing import Optional, Tuple
 
 from src import adaptive_policy
-from src.cash_risk import HARD_MAX_RISK_PER_TRADE_CCY, configured_cash_risk_limit
+from src.cash_risk import (
+    CROSS_CURRENCY_SIZING_RESERVE_PCT,
+    HARD_MAX_RISK_PER_TRADE_CCY,
+    configured_cash_risk_limit,
+)
 
 
 ACCOUNT_CURRENCY = "AUD"
@@ -56,6 +60,11 @@ def units_for_risk(
     stop exposure is capped by MAX_RISK_PER_TRADE_CCY (default 0.50 in account
     currency). Adaptive learning may only reduce or block risk; it cannot raise
     the requested percentage or bypass the absolute cash ceiling.
+
+    When the stop exposure needs currency conversion, new positions reserve 2%
+    of the cash ceiling for conversion drift. Smaller percentage-risk requests
+    stay unchanged. This buffer is not a guarantee against larger moves, and
+    never changes the cash limit enforced by the broker audit.
     """
 
     try:
@@ -133,7 +142,14 @@ def units_for_risk(
             "final_units": 0,
             "reason": "invalid-cash-risk-cap",
         }
-    risk_amount = min(requested_risk_amount, max_risk_ccy)
+    _, quote_ccy = _instrument_currencies(instrument)
+    conversion_risk_reserve_pct = (
+        CROSS_CURRENCY_SIZING_RESERVE_PCT
+        if quote_ccy != account_currency.upper()
+        else 0.0
+    )
+    cash_risk_sizing_limit = max_risk_ccy * (1.0 - conversion_risk_reserve_pct)
+    risk_amount = min(requested_risk_amount, cash_risk_sizing_limit)
     pip_value_per_unit = _pip_value_per_unit_in_account_ccy(
         instrument,
         broker=broker,
@@ -156,8 +172,14 @@ def units_for_risk(
         final_units -= 1
         planned_stop_risk = final_units * risk_per_unit
     if final_units < max(1, int(min_trade_units)):
-        return 0, {"risk_amount": risk_amount, "final_units": 0,
-                   "reason": "minimum-units-exceed-risk-budget"}
+        return 0, {
+            "risk_amount": risk_amount,
+            "max_risk_per_trade_ccy": max_risk_ccy,
+            "cash_risk_sizing_limit": cash_risk_sizing_limit,
+            "conversion_risk_reserve_pct": conversion_risk_reserve_pct,
+            "final_units": 0,
+            "reason": "minimum-units-exceed-risk-budget",
+        }
     diagnostics = {
         "equity": equity,
         "risk_pct": effective_risk_pct,
@@ -165,6 +187,8 @@ def units_for_risk(
         "requested_risk_amount": requested_risk_amount,
         "risk_amount": risk_amount,
         "max_risk_per_trade_ccy": max_risk_ccy,
+        "cash_risk_sizing_limit": cash_risk_sizing_limit,
+        "conversion_risk_reserve_pct": conversion_risk_reserve_pct,
         "stop_pips": stop_pips,
         "pip_value_per_unit": pip_value_per_unit,
         "final_units": final_units,
@@ -180,6 +204,7 @@ def units_for_risk(
         print(
             f"[POSITION-SIZE][CASH-CAP] instrument={instrument} "
             f"requested_risk={requested_risk_amount:.2f} capped_risk={risk_amount:.2f} "
+            f"cash_limit={max_risk_ccy:.2f} conversion_reserve={conversion_risk_reserve_pct:.2%} "
             f"currency={account_currency}",
             flush=True,
         )

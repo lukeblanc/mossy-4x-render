@@ -5,6 +5,9 @@ import os
 
 
 HARD_MAX_RISK_PER_TRADE_CCY = 0.50
+# New cross-currency positions leave room for account-currency conversion drift.
+# This only reduces sizing; the broker audit continues to enforce the full cap.
+CROSS_CURRENCY_SIZING_RESERVE_PCT = 0.02
 
 
 def configured_cash_risk_limit() -> float:
@@ -26,4 +29,8 @@ def configured_cash_risk_limit() -> float:
     return min(configured, HARD_MAX_RISK_PER_TRADE_CCY)
 
 
-__all__ = ["HARD_MAX_RISK_PER_TRADE_CCY", "configured_cash_risk_limit"]
+__all__ = [
+    "HARD_MAX_RISK_PER_TRADE_CCY",
+    "CROSS_CURRENCY_SIZING_RESERVE_PCT",
+    "configured_cash_risk_limit",
+]

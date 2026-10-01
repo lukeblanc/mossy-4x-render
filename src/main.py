@@ -35,6 +35,8 @@ BOT_STATE = {
     "scheduler_alive": False,
     "last_cycle_age_sec": None,
     "last_broker_sync_age_sec": None,
+    "broker_entry_halted": False,
+    "broker_entry_halt_reason": None,
 }
 
 _ACTIVE_CYCLE_TICKS: set[str] = set()
@@ -711,6 +713,8 @@ async def heartbeat() -> None:
         "scheduler_alive": health["scheduler_alive"],
         "last_cycle_age_sec": health["last_cycle_age_sec"],
         "last_broker_sync_age_sec": health["last_broker_sync_age_sec"],
+        "broker_entry_halted": health["broker_entry_halted"],
+        "broker_entry_halt_reason": health["broker_entry_halt_reason"],
     })
 
     log_cycle_event(
@@ -735,7 +739,9 @@ async def heartbeat() -> None:
             f"scheduler_alive={health['scheduler_alive']} "
             f"last_cycle_age_sec={health['last_cycle_age_sec']} "
             f"open_trades_count={health['open_trades_count']} "
-            f"last_broker_sync_age_sec={health['last_broker_sync_age_sec']}"
+            f"last_broker_sync_age_sec={health['last_broker_sync_age_sec']} "
+            f"broker_entry_halted={health['broker_entry_halted']} "
+            f"broker_entry_halt_reason={health['broker_entry_halt_reason']}"
         ),
     )
 
@@ -762,6 +768,8 @@ async def heartbeat() -> None:
         revision=_runtime_revision(),
         entry_window_state=entry_window_state,
         last_verified_entry_age_bucket=last_verified_entry_age_bucket,
+        broker_entry_halted=health["broker_entry_halted"],
+        broker_entry_halt_reason=health["broker_entry_halt_reason"],
         observed_at=now_utc,
     )
     configured_session_active = entry_window_state == "in_configured_session"
@@ -1139,11 +1147,18 @@ def _health_status(now_utc: datetime | None = None) -> Dict:
     now = now_utc or _utc_now()
     open_snapshot = _open_trades_state(force_refresh=False)
     open_count = len(open_snapshot) if open_snapshot is not None else None
+    # Scheduler liveness does not imply entries are permitted. Read the halt
+    # after the broker snapshot in case its protection audit latched a halt.
+    entry_halt_reason = getattr(broker, "entry_halt_reason", None)
+    if not isinstance(entry_halt_reason, str):
+        entry_halt_reason = None
     return {
         "scheduler_alive": _scheduler_alive(),
         "last_cycle_age_sec": CYCLE_HEALTH.cycle_age_seconds(now),
         "open_trades_count": open_count,
         "last_broker_sync_age_sec": _age_seconds(_LAST_BROKER_SYNC_TS, now),
+        "broker_entry_halted": bool(entry_halt_reason),
+        "broker_entry_halt_reason": entry_halt_reason,
     }
 
 

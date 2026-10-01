@@ -29,6 +29,23 @@ VERIFIED_ENTRY_AGE_BUCKETS = frozenset(
         "unknown",
     }
 )
+BROKER_ENTRY_HALT_REASONS = frozenset(
+    {
+        "account-currency-mismatch",
+        "protective-stop-audit-unavailable",
+        "unprotected-open-trade",
+        "invalid-order-response",
+        "no-confirmed-trade-opening",
+        "fill-does-not-match-request",
+        "protective-stop-not-confirmed",
+        "order-http-state-uncertain",
+        "order-transport-state-uncertain",
+        "other",
+    }
+)
+BROKER_HALT_TELEMETRY_FIELDS = frozenset(
+    {"broker_entry_halted", "broker_entry_halt_reason"}
+)
 
 _last_success_monotonic: float | None = None
 _last_success_fingerprint: str | None = None
@@ -90,6 +107,8 @@ def build_runtime_heartbeat(
     revision: str,
     entry_window_state: str,
     last_verified_entry_age_bucket: str,
+    broker_entry_halted: bool | None = None,
+    broker_entry_halt_reason: str | None = None,
     observed_at: datetime | None = None,
     supervisor_equity_floor_aud: float = DEFAULT_SUPERVISOR_EQUITY_FLOOR_AUD,
     freshness_seconds: float = DEFAULT_FRESHNESS_SECONDS,
@@ -118,6 +137,19 @@ def build_runtime_heartbeat(
     normalized_entry_age = str(last_verified_entry_age_bucket).strip().lower()
     if normalized_entry_age not in VERIFIED_ENTRY_AGE_BUCKETS:
         raise ValueError("invalid verified entry age bucket")
+    if broker_entry_halted is not None and type(broker_entry_halted) is not bool:
+        raise ValueError("invalid broker entry halt flag")
+    if broker_entry_halted is not True and broker_entry_halt_reason is not None:
+        raise ValueError("broker entry halt reason requires a confirmed halt")
+    # Persisted reasons may come from older/future code. Never transmit free text.
+    bounded_halt_reason = None
+    if broker_entry_halted is True:
+        bounded_halt_reason = (
+            broker_entry_halt_reason
+            if isinstance(broker_entry_halt_reason, str)
+            and broker_entry_halt_reason in BROKER_ENTRY_HALT_REASONS
+            else "other"
+        )
 
     return {
         "observed_at": timestamp.astimezone(timezone.utc).isoformat(),
@@ -133,6 +165,8 @@ def build_runtime_heartbeat(
         "supervisor_floor_breached": floor_breached,
         "entry_window_state": normalized_entry_window,
         "last_verified_entry_age_bucket": normalized_entry_age,
+        "broker_entry_halted": broker_entry_halted,
+        "broker_entry_halt_reason": bounded_halt_reason,
         "revision": revision,
     }
 
@@ -175,10 +209,40 @@ async def publish_runtime_heartbeat(
 
     try:
         async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
+            headers = {"Authorization": f"Bearer {key}"}
+            outbound_payload = payload
+            legacy_telemetry = False
+            if BROKER_HALT_TELEMETRY_FIELDS.intersection(payload):
+                # Old bridges reject all extra fields with a generic 422. Only
+                # an unsupported capability route (405) permits a downgrade.
+                capability_response = await client.get(url, headers=headers)
+                if capability_response.status_code == 405:
+                    outbound_payload = {
+                        field: value for field, value in payload.items()
+                        if field not in BROKER_HALT_TELEMETRY_FIELDS
+                    }
+                    legacy_telemetry = True
+                else:
+                    capability_response.raise_for_status()
+                    try:
+                        capabilities = capability_response.json()
+                    except ValueError:
+                        return False, "invalid-heartbeat-capabilities"
+                    fields = (
+                        capabilities.get("optional_heartbeat_fields")
+                        if isinstance(capabilities, dict) else None
+                    )
+                    if (
+                        not isinstance(fields, list)
+                        or not all(isinstance(field, str) for field in fields)
+                    ):
+                        return False, "invalid-heartbeat-capabilities"
+                    if not BROKER_HALT_TELEMETRY_FIELDS.issubset(fields):
+                        return False, "unsupported-heartbeat-capabilities"
             response = await client.post(
                 url,
-                headers={"Authorization": f"Bearer {key}"},
-                json=payload,
+                headers=headers,
+                json=outbound_payload,
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -187,4 +251,4 @@ async def publish_runtime_heartbeat(
         return False, f"error:{type(exc).__name__}"
     _last_success_monotonic = now_monotonic
     _last_success_fingerprint = fingerprint
-    return True, "sent"
+    return True, "sent:legacy-telemetry" if legacy_telemetry else "sent"
