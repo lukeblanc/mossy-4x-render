@@ -403,6 +403,39 @@ def test_daily_trade_cap_blocks_and_resets(monkeypatch, state_dir):
     assert ok is True
 
 
+def test_twenty_entry_cap_and_count_survive_same_day_restart(monkeypatch, state_dir):
+    monkeypatch.setenv("MAX_TRADES_PER_DAY", "20")
+    monkeypatch.setenv("MINI_RUN_MAX_TRADES_PER_DAY", "8")
+    config = {"max_trades_per_day": 8}
+    now = _utc(2026, 10, 5, 0, 0)
+    first = RiskManager(config, mode="paper", demo_mode=True)
+    first.startup_daily_reset(1_000.0, now_utc=now)
+    for index in range(19):
+        first.register_entry(now + timedelta(minutes=index), "AUD_USD")
+
+    # Allow the preserved nine-candle cooldown to expire within the same day.
+    resumed_at = now + timedelta(hours=4)
+    second = RiskManager(config, mode="paper", demo_mode=True)
+    second.startup_daily_reset(1_000.0, now_utc=resumed_at)
+    assert second.max_trades_per_day == 20
+    assert second.state.daily_entry_count == 19
+    assert second.state.day_start_equity == 1_000.0
+    assert second.should_open(resumed_at, 1_000.0, [], "AUD_USD", 0.1) == (True, "ok")
+
+    second.register_entry(resumed_at, "AUD_USD")
+    assert second.state.daily_entry_count == 20
+    assert second.should_open(resumed_at, 1_000.0, [], "AUD_USD", 0.1) == (
+        False, "daily-trade-cap"
+    )
+
+    third = RiskManager(config, mode="paper", demo_mode=True)
+    third.startup_daily_reset(1_000.0, now_utc=resumed_at + timedelta(minutes=1))
+    assert third.state.daily_entry_count == 20
+    assert third.should_open(
+        resumed_at + timedelta(minutes=1), 1_000.0, [], "GBP_USD", 0.1
+    ) == (False, "daily-trade-cap")
+
+
 def test_aggressive_test_mode_bypasses_mini_run_trade_soft_cap(monkeypatch, state_dir):
     monkeypatch.delenv("MAX_TRADES_PER_DAY", raising=False)
     monkeypatch.delenv("MINI_RUN_MAX_TRADES_PER_DAY", raising=False)

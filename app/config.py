@@ -111,7 +111,11 @@ def _apply_render_safe_demo_profile() -> None:
     print(
         "[SAFE-DEMO] enforced mode=demo oanda_env=practice "
         "instruments=AUD_USD,GBP_USD session=SOFT aggressive=false "
-        "risk_cap_pct=0.5 cash_risk_cap=0.50 max_positions=1 "
+        f"risk_cap_pct={float(os.environ['MAX_RISK_PER_TRADE_CAP_PCT']):g} "
+        f"cash_risk_cap={float(os.environ['MAX_RISK_PER_TRADE_CCY']):.2f} "
+        f"cash_close_threshold={float(os.environ['HARD_MAX_LOSS_CCY']):.2f} "
+        f"max_positions={os.environ['MAX_CONCURRENT_POSITIONS']} "
+        f"max_entries={os.environ['MAX_TRADES_PER_DAY']} "
         "adaptive_policy=true lifetime_memory=true "
         "shadow_learning=true shadow_auto_apply=false automatic_risk_resets=false",
         flush=True,

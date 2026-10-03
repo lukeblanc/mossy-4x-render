@@ -60,8 +60,9 @@ jobs:
               'key: ALLOW_HIGH_RISK': "high-risk guard",
               'value: "false"': "disabled unsafe toggles",
               'key: SHADOW_AUTO_APPLY': "shadow auto-apply guard",
-              'key: MAX_TRADES_PER_DAY': "daily trade cap",
-              'value: "8"': "eight-trade daily limit",
+              'key: MAX_TRADES_PER_DAY\n        value: "20"': "twenty-trade daily limit",
+              'key: MAX_RISK_PER_TRADE_CCY\n        value: "0.20"': "twenty-cent planned risk limit",
+              'key: HARD_MAX_LOSS_CCY\n        value: "0.20"': "twenty-cent cash close threshold",
           }
           missing = [label for token, label in required.items() if token not in text]
           if missing:

@@ -32,7 +32,7 @@ services:
       - key: MAX_CONCURRENT_POSITIONS
         value: "1"
       - key: MAX_TRADES_PER_DAY
-        value: "8"
+        value: "20"
       - key: AGGRESSIVE_COOLDOWN_CANDLES
         value: "9"
       - key: AGGRESSIVE_DAILY_LOSS_CAP_PCT
@@ -52,9 +52,9 @@ services:
       - key: MAX_RISK_PER_TRADE_CAP_PCT
         value: "0.5"
       - key: MAX_RISK_PER_TRADE_CCY
-        value: "0.50"
+        value: "0.20"
       - key: HARD_MAX_LOSS_CCY
-        value: "0.50"
+        value: "0.20"
       - key: PROFIT_PROTECT_TRIGGER_CCY
         value: "2.00"
       - key: PROFIT_PROTECT_FLOOR_CCY
