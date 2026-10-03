@@ -1,5 +1,31 @@
 # Deployment Notes
 
+## Approved demo limits (3 October 2026)
+
+Luke approved both of these changes for the OANDA practice worker:
+
+| Setting | Value | Meaning |
+| --- | --- | --- |
+| `MAX_TRADES_PER_DAY` | `20` | Maximum successful entries across all instruments per Perth calendar day. |
+| `MAX_RISK_PER_TRADE_CCY` | `0.20` | Planned broker-stop exposure in AUD, including the existing sizing reserve. |
+| `HARD_MAX_LOSS_CCY` | `0.20` | Software close trigger when observed loss reaches A$0.20. |
+
+The daily entry count remains persisted across restarts. Normal entry filters,
+one concurrent position, and the existing daily, weekly, and drawdown stops still
+apply; the bot does not have to take 20 trades. An absent or invalid daily-limit
+environment value retains the conservative fallback of 8 entries.
+
+Merge these three environment values into the active Singapore
+`mossy-4x-render` worker (`srv-d36tphruibrs738iec2g`) and deploy the matching code
+through the standard release flow below. Confirm the account is flat before the
+restart, because the existing broker audit closes positions whose stop exposure
+exceeds the new cap. Verify the new `[EFFECTIVE-RISK]` startup line reports
+`mode=demo`, `oanda_env=practice`, `cash_sizing_cap=0.20`,
+`cash_close_threshold=0.20`, `max_positions=1`, and `max_entries=20`.
+
+The cash limit and close trigger do not guarantee an exact realised loss;
+execution, conversion movement, fees, and polling latency can affect the exit.
+
 ## Standard release flow (recommended)
 
 Use this sequence for normal changes:

@@ -65,11 +65,24 @@ def test_hard_cash_loss_floor_cannot_be_disabled_or_loosened(monkeypatch, config
     assert guard.hard_max_loss_ccy == 0.50
 
 
-def test_hard_cash_loss_floor_preserves_stricter_value(monkeypatch):
-    monkeypatch.setenv("HARD_MAX_LOSS_CCY", "0.25")
+@pytest.mark.parametrize("cash_limit", [0.25, 0.20])
+def test_hard_cash_loss_floor_preserves_stricter_value(monkeypatch, cash_limit):
+    monkeypatch.setenv("HARD_MAX_LOSS_CCY", str(cash_limit))
     guard = SmartExitGuard(DummyBroker([]), aggressive=False)
 
-    assert guard.hard_max_loss_ccy == 0.25
+    assert guard.hard_max_loss_ccy == cash_limit
+
+
+def test_twenty_cent_loss_floor_triggers_at_boundary(monkeypatch):
+    monkeypatch.setenv("HARD_MAX_LOSS_CCY", "0.20")
+    broker = DummyBroker([-0.199, -0.199, -0.20])
+    guard = SmartExitGuard(broker, aggressive=False)
+
+    assert guard.process_open_trades([_trade(-0.199)]) == []
+    assert broker.closed == []
+
+    assert guard.process_open_trades([_trade(-0.20)]) == ["T1"]
+    assert broker.closed == ["AUD_USD"]
 
 
 def test_winner_protection_retains_share_of_early_peak(monkeypatch):

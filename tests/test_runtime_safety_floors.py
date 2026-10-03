@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from src import apply_runtime_safety_floors
 
 
@@ -21,7 +23,7 @@ def test_runtime_safety_floors_override_stale_render_values(monkeypatch) -> None
     assert os.environ["SHADOW_MIN_VALIDATION"] == "30"
     assert float(os.environ["SHADOW_MIN_COVERAGE"]) == 0.50
     assert os.environ["MAX_CONCURRENT_POSITIONS"] == "2"
-    assert os.environ["MAX_TRADES_PER_DAY"] == "8"
+    assert os.environ["MAX_TRADES_PER_DAY"] == "20"
     assert os.environ["SHADOW_AUTO_APPLY"] == "false"
 
 
@@ -41,3 +43,20 @@ def test_runtime_safety_floors_preserve_stricter_values(monkeypatch) -> None:
     assert float(os.environ["SHADOW_MIN_COVERAGE"]) == 0.75
     assert os.environ["MAX_CONCURRENT_POSITIONS"] == "1"
     assert os.environ["MAX_TRADES_PER_DAY"] == "4"
+
+
+@pytest.mark.parametrize(
+    "configured,expected",
+    [("20", "20"), ("21", "20"), (None, "8"), ("invalid", "8"), ("", "8")],
+)
+def test_daily_entry_cap_allows_approved_limit_without_raising_default(
+    monkeypatch, configured, expected
+):
+    if configured is None:
+        monkeypatch.delenv("MAX_TRADES_PER_DAY", raising=False)
+    else:
+        monkeypatch.setenv("MAX_TRADES_PER_DAY", configured)
+
+    apply_runtime_safety_floors()
+
+    assert os.environ["MAX_TRADES_PER_DAY"] == expected

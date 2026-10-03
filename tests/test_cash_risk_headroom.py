@@ -148,10 +148,12 @@ class TradeAuditClient:
         )
 
 
-@pytest.mark.parametrize("cash_cap", [0.50, 0.25])
+@pytest.mark.parametrize(
+    "cash_cap,expected_units", [(0.50, 811), (0.25, 405), (0.20, 324)]
+)
 @pytest.mark.parametrize("direction", [1, -1])
 def test_conversion_headroom_survives_small_drift_but_preserves_hard_audit(
-    monkeypatch, tmp_path, cash_cap, direction
+    monkeypatch, tmp_path, cash_cap, expected_units, direction
 ):
     monkeypatch.setenv("MAX_RISK_PER_TRADE_CCY", str(cash_cap))
     monkeypatch.setenv("MOSSY_STATE_PATH", str(tmp_path))
@@ -163,7 +165,8 @@ def test_conversion_headroom_survives_small_drift_but_preserves_hard_audit(
     conversion = {"rate": 1.4375}
     monkeypatch.setattr(broker, "conversion_rate", lambda *_: conversion["rate"])
     units, diagnostics = _size(broker=broker, stop_distance=0.00042)
-    assert units == (811 if cash_cap == 0.50 else 405)
+    assert units == expected_units
+    assert diagnostics["cash_risk_sizing_limit"] == pytest.approx(cash_cap * 0.98)
     assert diagnostics["planned_stop_risk"] <= cash_cap * 0.98
 
     client = TradeAuditClient(direction * units)
