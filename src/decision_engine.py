@@ -150,6 +150,10 @@ class DecisionEngine:
         completed_observation = self._completed_bar_observation(
             raw_candles,
             granularity=str(granularity),
+            # Keep the observer's completed-candle history stable across the
+            # instant when OANDA begins returning a new forming candle. The
+            # strategy still receives the original raw_candles unchanged.
+            completed_lookback=max(1, candle_count - 1),
         )
         normalized = self._normalize_candles(raw_candles)
         if not normalized:
@@ -188,6 +192,7 @@ class DecisionEngine:
         raw_candles: List[Dict],
         *,
         granularity: str,
+        completed_lookback: Optional[int] = None,
     ) -> Dict[str, object]:
         """Build a learning-only snapshot without changing strategy inputs.
 
@@ -217,6 +222,10 @@ class DecisionEngine:
 
             if not usable:
                 return empty
+
+            if completed_lookback is not None:
+                lookback = max(1, int(completed_lookback))
+                usable = usable[-lookback:]
 
             completed_candles = [item[1] for item in usable]
             bar_open_utc = usable[-1][2]
