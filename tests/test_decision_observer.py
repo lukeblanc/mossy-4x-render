@@ -140,6 +140,52 @@ def test_completed_observer_excludes_forming_candle_without_changing_runtime_inp
     assert evaluation.completed_bar_close_utc == datetime(2026, 9, 8, 6, 0, tzinfo=timezone.utc)
 
 
+def test_completed_observer_uses_stable_lookback_across_new_forming_candle():
+    config = {
+        "instruments": ["AUD_USD"],
+        "candles_to_fetch": 4,
+        "timeframe": "M5",
+        "ema_fast": 2,
+        "ema_slow": 3,
+        "rsi_length": 2,
+        "atr_length": 2,
+        "min_atr": 0.00001,
+    }
+    engine = DecisionEngine(config, candle_fetcher=lambda *args, **kwargs: [])
+
+    completed = [
+        {"time": "2026-09-08T05:45:00Z", "complete": True, "o": 1.0, "h": 1.1, "l": 0.9, "c": 1.0},
+        {"time": "2026-09-08T05:50:00Z", "complete": True, "o": 1.0, "h": 1.2, "l": 1.0, "c": 1.1},
+        {"time": "2026-09-08T05:55:00Z", "complete": True, "o": 1.1, "h": 1.3, "l": 1.1, "c": 1.2},
+        {"time": "2026-09-08T06:00:00Z", "complete": True, "o": 1.2, "h": 1.4, "l": 1.2, "c": 1.3},
+    ]
+    forming = {
+        "time": "2026-09-08T06:05:00Z",
+        "complete": False,
+        "o": 1.3,
+        "h": 9.0,
+        "l": 0.1,
+        "c": 9.0,
+    }
+
+    boundary = engine._completed_bar_observation(
+        completed,
+        granularity="M5",
+        completed_lookback=3,
+    )
+    after_boundary = engine._completed_bar_observation(
+        completed[1:] + [forming],
+        granularity="M5",
+        completed_lookback=3,
+    )
+
+    assert boundary["completed_bar_open_utc"] == after_boundary["completed_bar_open_utc"]
+    assert boundary["completed_bar_close_utc"] == after_boundary["completed_bar_close_utc"]
+    assert boundary["completed_signal"] == after_boundary["completed_signal"]
+    assert boundary["completed_reason"] == after_boundary["completed_reason"]
+    assert boundary["completed_diagnostics"] == after_boundary["completed_diagnostics"]
+
+
 def test_configuration_fingerprint_is_canonical_and_sensitive():
     first = configuration_fingerprint({"timeframe": "M5", "risk": {"cap": 0.01}})
     reordered = configuration_fingerprint({"risk": {"cap": 0.01}, "timeframe": "M5"})
