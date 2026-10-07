@@ -327,21 +327,23 @@ def _capabilities():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_publish_negotiates_new_and_legacy_bridges(heartbeat_transport, legacy):
+@pytest.mark.parametrize("halted", [None, False, True])
+async def test_publish_preserves_bounded_halt_and_health_telemetry(heartbeat_transport, halted):
     requests = heartbeat_transport(lambda request: (
-        httpx.Response(405) if legacy else httpx.Response(200, json=_capabilities())
+        httpx.Response(200, json=_capabilities())
     ) if request.method == "GET" else httpx.Response(202))
-    payload = _halt_heartbeat(broker_entry_halted=True, broker_entry_halt_reason="other")
+    payload = _halt_heartbeat(
+        broker_entry_halted=halted,
+        broker_entry_halt_reason="private account detail" if halted else None,
+    )
 
-    result = await publish_runtime_heartbeat(payload)
-
-    assert result == (True, "sent:legacy-telemetry" if legacy else "sent")
+    assert await publish_runtime_heartbeat(payload) == (True, "sent")
     assert [request.method for request in requests] == ["GET", "POST"]
-    expected = {key: value for key, value in payload.items()
-                if not legacy or key not in mcp_status.BROKER_HALT_TELEMETRY_FIELDS}
-    assert json.loads(requests[1].content) == expected
-    assert payload["broker_entry_halted"] is True  # No in-place downgrade.
+    assert json.loads(requests[1].content) == payload
+    assert payload["broker_entry_halted"] is halted
+    assert payload["broker_entry_halt_reason"] == ("other" if halted else None)
+    assert "private account detail" not in requests[1].content.decode()
+    assert "test-secret" not in requests[1].content.decode()
 
 
 @pytest.mark.anyio
@@ -383,11 +385,10 @@ async def test_invalid_capability_json_never_downgrades_or_posts(heartbeat_trans
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("status", [401, 422, 500])
-async def test_post_failure_never_retries_a_downgrade(heartbeat_transport, legacy, status):
+async def test_post_failure_never_retries_a_downgrade(heartbeat_transport, status):
     requests = heartbeat_transport(lambda request: (
-        httpx.Response(405) if legacy else httpx.Response(200, json=_capabilities())
+        httpx.Response(200, json=_capabilities())
     ) if request.method == "GET" else httpx.Response(status))
     assert await publish_runtime_heartbeat(_halt_heartbeat()) == (
         False, "http-error:HTTPStatusError",
@@ -430,7 +431,8 @@ async def test_throttle_precedes_negotiation_and_halt_change_bypasses_it(
 
 
 @pytest.mark.anyio
-async def test_legacy_bridge_upgrade_is_renegotiated(heartbeat_transport, monkeypatch):
+@pytest.mark.parametrize("halted", [None, False, True])
+async def test_legacy_bridge_fails_closed_and_upgrade_is_retried(heartbeat_transport, monkeypatch, halted):
     legacy = True
 
     def handler(request):
@@ -439,10 +441,20 @@ async def test_legacy_bridge_upgrade_is_renegotiated(heartbeat_transport, monkey
         return httpx.Response(202)
 
     requests = heartbeat_transport(handler)
-    payload = _halt_heartbeat(broker_entry_halted=False)
+    payload = _halt_heartbeat(
+        broker_entry_halted=halted, broker_entry_halt_reason="other" if halted else None,
+    )
+    original = payload.copy()
     monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 100.0)
-    assert await publish_runtime_heartbeat(payload, monitoring_active=True) == (True, "sent:legacy-telemetry")
+    assert await publish_runtime_heartbeat(payload, monitoring_active=True) == (
+        False, "unsupported-heartbeat-capabilities",
+    )
+    assert [request.method for request in requests] == ["GET"]
+    assert payload == original
+    assert mcp_status._last_success_monotonic is None
+    assert mcp_status._last_success_fingerprint is None
     legacy = False
-    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 701.0)
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 101.0)
     assert await publish_runtime_heartbeat(payload, monitoring_active=True) == (True, "sent")
-    assert json.loads(requests[-1].content)["broker_entry_halted"] is False
+    assert [request.method for request in requests] == ["GET", "GET", "POST"]
+    assert json.loads(requests[-1].content) == original
