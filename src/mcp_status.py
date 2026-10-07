@@ -210,39 +210,32 @@ async def publish_runtime_heartbeat(
     try:
         async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
             headers = {"Authorization": f"Bearer {key}"}
-            outbound_payload = payload
-            legacy_telemetry = False
             if BROKER_HALT_TELEMETRY_FIELDS.intersection(payload):
-                # Old bridges reject all extra fields with a generic 422. Only
-                # an unsupported capability route (405) permits a downgrade.
+                # Never strip safety telemetry to satisfy an older bridge.
+                # Unsupported bridges must fail closed until separately upgraded.
                 capability_response = await client.get(url, headers=headers)
                 if capability_response.status_code == 405:
-                    outbound_payload = {
-                        field: value for field, value in payload.items()
-                        if field not in BROKER_HALT_TELEMETRY_FIELDS
-                    }
-                    legacy_telemetry = True
-                else:
-                    capability_response.raise_for_status()
-                    try:
-                        capabilities = capability_response.json()
-                    except ValueError:
-                        return False, "invalid-heartbeat-capabilities"
-                    fields = (
-                        capabilities.get("optional_heartbeat_fields")
-                        if isinstance(capabilities, dict) else None
-                    )
-                    if (
-                        not isinstance(fields, list)
-                        or not all(isinstance(field, str) for field in fields)
-                    ):
-                        return False, "invalid-heartbeat-capabilities"
-                    if not BROKER_HALT_TELEMETRY_FIELDS.issubset(fields):
-                        return False, "unsupported-heartbeat-capabilities"
+                    return False, "unsupported-heartbeat-capabilities"
+                capability_response.raise_for_status()
+                try:
+                    capabilities = capability_response.json()
+                except ValueError:
+                    return False, "invalid-heartbeat-capabilities"
+                fields = (
+                    capabilities.get("optional_heartbeat_fields")
+                    if isinstance(capabilities, dict) else None
+                )
+                if (
+                    not isinstance(fields, list)
+                    or not all(isinstance(field, str) for field in fields)
+                ):
+                    return False, "invalid-heartbeat-capabilities"
+                if not BROKER_HALT_TELEMETRY_FIELDS.issubset(fields):
+                    return False, "unsupported-heartbeat-capabilities"
             response = await client.post(
                 url,
                 headers=headers,
-                json=outbound_payload,
+                json=payload,
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -251,4 +244,4 @@ async def publish_runtime_heartbeat(
         return False, f"error:{type(exc).__name__}"
     _last_success_monotonic = now_monotonic
     _last_success_fingerprint = fingerprint
-    return True, "sent:legacy-telemetry" if legacy_telemetry else "sent"
+    return True, "sent"

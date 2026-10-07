@@ -69,10 +69,13 @@ state as unknown and blocks an all-clear supervisory result.
 
 Before sending these fields, the worker checks an authenticated GET capability
 response on the configured internal heartbeat URL. An older bridge's 405 response
-uses the original payload and reports `sent:legacy-telemetry`. That legacy bridge
-cannot display the halt, so consult the worker's emitted logs until the bridge is
-upgraded. Authentication errors, malformed capability responses, and heartbeat
-validation failures are not downgraded or treated as successful delivery.
+now returns `unsupported-heartbeat-capabilities` without posting or stripping halt
+fields. The legacy payload downgrade has been retired. Failed negotiation does
+not update the successful-delivery throttle, so the next publish attempt can
+retry immediately after an approved bridge upgrade. Consult worker logs while
+monitoring is unavailable; failed publication does not alter trading behavior.
+Authentication errors, malformed capability responses, and heartbeat validation
+failures are not downgraded or treated as successful delivery.
 
 No new credential or status destination is introduced. The capability endpoint
 reports field support only; it cannot clear a latch or submit a trade. Both bridge
