@@ -16,7 +16,7 @@ class ExperimentBlocked(RuntimeError):
 
 
 class PracticeExperiment:
-    """Ten new A$10 entries, then persistently stop entries for review.
+    """Ten new A$10 entries, then restore the unchanged Champion sizing.
 
     A nonempty MOSSY_PRACTICE_EXPERIMENT_ID opts in. Runtime never creates,
     activates, resets or repairs this ledger. Prepare/activate require a
@@ -118,6 +118,12 @@ class PracticeExperiment:
 
     def ready_units(self):
         snapshot = self.status()
+        if snapshot['state'] == 'complete':
+            if snapshot['filled_count'] != 10 or snapshot['pending']:
+                raise ExperimentBlocked("experiment-ledger-inconsistent")
+            # The immutable completed quota stays on disk, but no longer
+            # overrides the normal strategy's already bounded position size.
+            return None
         self._require_ready(snapshot)
         return snapshot['units']
 
