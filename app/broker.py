@@ -500,7 +500,9 @@ class Broker:
             "response": response,
         }
 
-    def _experiment_flat_checkpoint(self, client, previous_trade: str | None) -> str | None:
+    def _experiment_flat_checkpoint(
+        self, client, previous_trade: str | dict | None
+    ) -> str | None:
         """Return a fresh cursor only for a verified flat, account-bound snapshot."""
         try:
             response = client.get(f"/v3/accounts/{self.account}/summary")
@@ -527,8 +529,14 @@ class Broker:
                 return None
             if self._read_open_trade_summaries(client) != []:
                 return None
-            if previous_trade and self._open_trade_protection_status(
-                client, {"id": previous_trade, "instrument": "AUD_USD"}
+            previous_summary = (
+                previous_trade
+                if isinstance(previous_trade, dict)
+                else ({"id": previous_trade, "instrument": "AUD_USD"}
+                      if previous_trade else None)
+            )
+            if previous_summary and self._open_trade_protection_status(
+                client, previous_summary
             ) != "closed":
                 # Even two stale flat lists cannot authorize overlap with our
                 # last known opening: require exact positive closure evidence.
@@ -600,6 +608,8 @@ class Broker:
         experiment = None
         completed_experiment = None
         reservation = None
+        champion_reservation = None
+        watermark = None
         try:
             experiment = PracticeExperiment.configured(self._entry_halt_path.parent, self.account)
             if experiment is not None:
@@ -731,17 +741,18 @@ class Broker:
             with self._client() as client:
                 if completed_experiment is not None:
                     try:
-                        previous_trade = completed_experiment.last_opened_trade()
+                        champion_reservation, previous_trade = (
+                            completed_experiment.reserve_champion_handoff(instrument)
+                        )
+                        watermark = self._experiment_flat_checkpoint(client, previous_trade)
+                        if watermark is None:
+                            completed_experiment.skip_champion_handoff(champion_reservation)
+                            return {
+                                "status": "BLOCKED",
+                                "reason": "experiment-completion-handoff-failed",
+                            }
                     except ExperimentBlocked as exc:
                         return {"status": "BLOCKED", "reason": str(exc)}
-                    if (not previous_trade
-                            or self._experiment_flat_checkpoint(
-                                client, previous_trade
-                            ) is None):
-                        return {
-                            "status": "BLOCKED",
-                            "reason": "experiment-completion-handoff-failed",
-                        }
                 if experiment is not None:
                     try:
                         reservation, reserved_units = experiment.reserve()
@@ -769,14 +780,19 @@ class Broker:
                         return self._halt_unknown_order_state(
                             client, "no-confirmed-trade-opening", data
                         )
-                    if experiment is not None:
+                    if experiment is not None or completed_experiment is not None:
                         if int(filled["trade_id"]) <= int(watermark):
                             return self._halt_unknown_order_state(
                                 client, "no-confirmed-trade-opening", data
                             )
                         try:
                             # Count even a subsequently emergency-closed fill.
-                            experiment.confirm_opening(reservation, filled["trade_id"])
+                            if experiment is not None:
+                                experiment.confirm_opening(reservation, filled["trade_id"])
+                            else:
+                                completed_experiment.confirm_champion_handoff(
+                                    champion_reservation, filled["trade_id"]
+                                )
                         except ExperimentBlocked:
                             return self._halt_and_close_trade(
                                 client, trade_id=filled["trade_id"],
