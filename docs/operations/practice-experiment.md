@@ -33,15 +33,24 @@ sizing across restart and midnight. Exit/stop management continues for the
 final experiment position. The broker also performs a fresh flat-account check
 and requires exact positive closure evidence for that tenth position before it
 allows the first or any later Champion submission through the completed plan.
+Every post-experiment Champion submission first takes a durable one-at-a-time
+SQLite claim. The claim is released only if the fresh flat-account checkpoint
+fails before any POST. A confirmed opening records its trade ID and instrument,
+and the next submission requires exact closure evidence for that latest opening.
+This closes the gap where two concurrent workers could both rely on the same
+flat snapshot and submit together.
 History before this experiment does not consume its slots, but still counts
 toward the normal daily cap. Eleven earlier entries leave at most nine new
 entries that day; the tenth waits for a later permitted day.
 
 No automatic recovery is provided for an uncertain submission, rejected order,
-lost response, interrupted reservation or failed confirmation write. It remains
-reserved and prevents another submission until a separately reviewed recovery.
+lost response, interrupted experiment reservation, interrupted Champion handoff
+claim or failed confirmation write. It remains reserved and prevents another
+submission until a separately reviewed recovery.
 Missing/corrupt/mismatched ledgers fail closed. Existing broker entry halts are
 never cleared by prepare, activate, pause or normal polling.
+Pause also fails closed while any experiment reservation or Champion handoff
+claim is unresolved, so it cannot race past a submission already in progress.
 
 ## Approval and operation
 
