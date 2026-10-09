@@ -500,20 +500,30 @@ class Broker:
             "response": response,
         }
 
-    def _experiment_preflight(self, client, units: int, previous_trade: str | None) -> str | None:
-        """Fresh account-specific checks, after durable reservation, before POST."""
+    def _experiment_flat_checkpoint(self, client, previous_trade: str | None) -> str | None:
+        """Return a fresh cursor only for a verified flat, account-bound snapshot."""
         try:
             response = client.get(f"/v3/accounts/{self.account}/summary")
             if response.status_code != 200:
                 return None
-            account = response.json().get("account")
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return None
+            account = payload.get("account")
             if (not isinstance(account, dict) or account.get("id") != self.account
                     or account.get("currency") != "AUD"
                     or any(type(account.get(key)) is not int or account[key] != 0
                            for key in ("openTradeCount", "openPositionCount", "pendingOrderCount"))):
                 return None
-            watermark = str(account.get("lastTransactionID") or "")
+            # OANDA's account-summary response defines the transaction cursor
+            # at the response root. Do not depend on the optional duplicate in
+            # the nested account object, but reject contradictory evidence.
+            watermark = str(payload.get("lastTransactionID") or "")
             if not _valid_transaction_id(watermark):
+                return None
+            nested_watermark = account.get("lastTransactionID")
+            if (nested_watermark is not None
+                    and str(nested_watermark) != watermark):
                 return None
             if self._read_open_trade_summaries(client) != []:
                 return None
@@ -523,6 +533,16 @@ class Broker:
                 # Even two stale flat lists cannot authorize overlap with our
                 # last known opening: require exact positive closure evidence.
                 return None
+            return watermark
+        except Exception:
+            return None
+
+    def _experiment_preflight(self, client, units: int, previous_trade: str | None) -> str | None:
+        """Fresh account and instrument checks after reservation, before POST."""
+        watermark = self._experiment_flat_checkpoint(client, previous_trade)
+        if watermark is None:
+            return None
+        try:
             response = client.get(f"/v3/accounts/{self.account}/instruments",
                                   params={"instruments": "AUD_USD"})
             if response.status_code != 200:
@@ -578,24 +598,32 @@ class Broker:
             return {"status": "BLOCKED", "reason": "invalid-order-units"}
 
         experiment = None
+        completed_experiment = None
         reservation = None
         try:
             experiment = PracticeExperiment.configured(self._entry_halt_path.parent, self.account)
             if experiment is not None:
-                if (self.mode != "demo" or self.base_url != PRACTICE
-                        or str(settings.OANDA_ENV).lower() != "practice"
-                        or instrument != "AUD_USD"):
-                    raise ExperimentBlocked("experiment-practice-audusd-only")
                 target_units = experiment.ready_units()
-                if units_value < target_units:
-                    raise ExperimentBlocked("experiment-exact-size-exceeds-strategy-budget")
-                hard_loss = Decimal(os.getenv("HARD_MAX_LOSS_CCY", "NaN"))
-                if (not hard_loss.is_finite() or not 0 < hard_loss <= Decimal("0.20")
-                        or not 0 < configured_cash_risk_limit() <= 0.20):
-                    raise ExperimentBlocked("experiment-twenty-cent-limits-required")
-                # AUD is the base AND account currency: these whole units are
-                # exact A$ notional, not margin or the allowed cash loss.
-                units_value = float(target_units)
+                if target_units is None:
+                    # A completed, account-bound ten-fill ledger restores the
+                    # unchanged Champion path after a fresh flat-account check;
+                    # it cannot restart its quota.
+                    completed_experiment = experiment
+                    experiment = None
+                else:
+                    if (self.mode != "demo" or self.base_url != PRACTICE
+                            or str(settings.OANDA_ENV).lower() != "practice"
+                            or instrument != "AUD_USD"):
+                        raise ExperimentBlocked("experiment-practice-audusd-only")
+                    if units_value < target_units:
+                        raise ExperimentBlocked("experiment-exact-size-exceeds-strategy-budget")
+                    hard_loss = Decimal(os.getenv("HARD_MAX_LOSS_CCY", "NaN"))
+                    if (not hard_loss.is_finite() or not 0 < hard_loss <= Decimal("0.20")
+                            or not 0 < configured_cash_risk_limit() <= 0.20):
+                        raise ExperimentBlocked("experiment-twenty-cent-limits-required")
+                    # AUD is the base AND account currency: these whole units are
+                    # exact A$ notional, not margin or the allowed cash loss.
+                    units_value = float(target_units)
         except (ExperimentBlocked, InvalidOperation) as exc:
             reason = str(exc) if isinstance(exc, ExperimentBlocked) else "experiment-limits-invalid"
             return {"status": "BLOCKED", "reason": reason}
@@ -701,6 +729,19 @@ class Broker:
 
         try:
             with self._client() as client:
+                if completed_experiment is not None:
+                    try:
+                        previous_trade = completed_experiment.last_opened_trade()
+                    except ExperimentBlocked as exc:
+                        return {"status": "BLOCKED", "reason": str(exc)}
+                    if (not previous_trade
+                            or self._experiment_flat_checkpoint(
+                                client, previous_trade
+                            ) is None):
+                        return {
+                            "status": "BLOCKED",
+                            "reason": "experiment-completion-handoff-failed",
+                        }
                 if experiment is not None:
                     try:
                         reservation, reserved_units = experiment.reserve()
