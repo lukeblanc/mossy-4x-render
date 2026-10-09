@@ -20,6 +20,15 @@ It does not, by itself, prove that a stop was missing. The cash-risk diagnostic
 includes stop ID, units, entry/stop prices, current loss-side conversion factor,
 calculated stop exposure and the effective cash limit.
 
+An exact-ID `CLOSED` detail with no contradictory instrument/units evidence is
+logged as `trade-closed-during-audit`, without
+attempting to close that trade again. It invalidates the earlier open-trade list:
+the audit refreshes the list once and audits every remaining trade, including
+newly observed exposure. It returns only the refreshed, audited snapshot.
+A failed/malformed refresh, a closed ID still listed, or another closure during
+the second pass returns unavailable and retains an entry halt. Unknown states
+still fail closed. Diagnostics exclude raw state values, errors and responses.
+
 ## Conversion headroom
 
 New positions whose quote currency differs from the account currency use at most
@@ -34,15 +43,14 @@ it is not a guaranteed maximum realized loss or proof of profitability.
 
 ## Recovery is consequential
 
-Normal open-trade polling and confirmation of a closed trade do not clear the
-persisted entry halt. This change intentionally does not add automatic per-cycle
-recovery. A failed deletion of the persisted marker also leaves the in-memory
-halt active.
+Normal open-trade polling, confirmation of a closed trade and startup do not
+clear the persisted entry halt. A clean snapshot does not authorize recovery
+of an earlier incident.
 
-The existing startup `connectivity_check()` is **not read-only**: it can attempt
-to close unsafe trades and can clear a retained halt following a clean protection
-audit. Restarting or redeploying can consequently resume demo entries. Do not use
-that method merely to check status or delete the halt marker to bypass the audit.
+Startup `connectivity_check()` is **not read-only**: it can still attempt to
+close unsafe trades, but automatic clearance of a retained halt is removed.
+Restarting or redeploying preserves that halt. Do not use the method merely to
+check status or delete the halt marker to bypass incident review.
 
 Before approved recovery:
 

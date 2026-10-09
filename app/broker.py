@@ -7,12 +7,13 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 import httpx
 
 from app.config import settings
 from src.cash_risk import configured_cash_risk_limit
+from src.practice_experiment import ExperimentBlocked, PracticeExperiment
 
 PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
@@ -190,15 +191,6 @@ class Broker:
         except OSError as exc:
             print(f"[BROKER][CRITICAL] Could not persist entry halt: {exc}", flush=True)
 
-    def _clear_entry_halt(self) -> bool:
-        try:
-            self._entry_halt_path.unlink(missing_ok=True)
-        except OSError as exc:
-            print(f"[BROKER][WARN] Could not clear reconciled entry halt: {exc}", flush=True)
-            return False
-        self._entry_halted_reason = None
-        return True
-
     def trade_details(self, trade_id: str) -> Optional[Dict]:
         if not self.key or not self.account:
             raise RuntimeError("broker credentials unavailable")
@@ -206,7 +198,7 @@ class Broker:
             return read_trade_details(client, self.account, trade_id)
 
     def connectivity_check(self) -> dict:
-        """Startup reconciliation; may close unsafe trades and clear a clean halt.
+        """Startup reconciliation; may close unsafe trades but never clears a halt.
 
         This is not a read-only health check. Normal monitoring must use the
         side-effect-free entry_halt_reason property to observe the latch.
@@ -240,15 +232,10 @@ class Broker:
                     )
                     if self._entry_halted_reason:
                         trades = self._read_open_trade_summaries(client)
-                        if trades is not None and self._audit_open_trade_protection(
-                            client, trades
-                        ):
-                            old_reason = self._entry_halted_reason
-                            if self._clear_entry_halt():
-                                print(
-                                    f"[BROKER][RECOVERY] persisted halt reconciled reason={old_reason}",
-                                    flush=True,
-                                )
+                        if trades is not None:
+                            self._audit_open_trade_protection(client, trades)
+                        # A clean snapshot cannot authorize recovery of a
+                        # persisted incident; approval is separate from startup.
                     return {"ok": True, "balance": balance, "currency": currency}
                 print(
                     f"[OANDA] Connectivity error {resp.status_code}: {resp.text}",
@@ -279,8 +266,8 @@ class Broker:
 
     def _open_trade_protection_status(
         self, client, summary: dict
-    ) -> Optional[bool]:
-        """Return True for verified protection, False for unsafe, None if unknown.
+    ) -> bool | Literal["closed"] | None:
+        """Return True for protection, "closed" for closure, False/None for failure.
 
         The historical halt category is retained for compatibility. This audit
         logs the specific failed condition so an over-budget stop is never
@@ -305,8 +292,26 @@ class Broker:
             return failure("trade-details-unverified", unknown=True)
         if str(trade.get("id") or "") != trade_id:
             return failure("trade-id-mismatch")
-        if str(trade.get("state") or "").upper() != "OPEN":
-            return failure("trade-not-open")
+        state = str(trade.get("state") or "").upper()
+        if state == "CLOSED":
+            # A terminal state must not override contradictory supplied fields.
+            if ("instrument" in trade
+                    and trade["instrument"] != summary.get("instrument")):
+                return failure("closed-trade-evidence-inconsistent", unknown=True)
+            if "currentUnits" in trade:
+                try:
+                    remaining = Decimal(str(trade["currentUnits"]))
+                except (InvalidOperation, TypeError, ValueError):
+                    return failure("closed-trade-evidence-inconsistent", unknown=True)
+                if not remaining.is_finite() or remaining != 0:
+                    return failure("closed-trade-evidence-inconsistent", unknown=True)
+            print("[BROKER][PROTECTION-AUDIT] " + json.dumps({
+                "trade_id": trade_id, "audit_reason": "trade-closed-during-audit",
+                "status": "closed",
+            }, sort_keys=True), flush=True)
+            return "closed"
+        if state != "OPEN":
+            return failure("trade-state-unverified", unknown=True)
         if str(trade.get("instrument") or "") != str(summary.get("instrument") or ""):
             return failure("trade-instrument-mismatch")
         stop_order = trade.get("stopLossOrder") or trade.get("guaranteedStopLossOrder")
@@ -397,35 +402,66 @@ class Broker:
         except Exception:
             return False
 
-    def _audit_open_trade_protection(self, client, trades: list) -> bool:
-        """Verify every stop and close unsafe trades; unknown evidence blocks entry."""
+    def _audit_open_trade_protection(self, client, trades: list) -> Optional[list]:
+        """Return the audited snapshot, refreshing once after verified closure.
+
+        Unsafe/unknown evidence retains the halt and emergency-close behavior.
+        A closed trade needs no close attempt, but invalidates the list snapshot.
+        Never return that stale list or clear an existing entry halt.
+        """
 
         found_issue = False
-        for trade in trades:
-            status = self._open_trade_protection_status(client, trade)
-            if status is True:
-                continue
-            found_issue = True
-            trade_id = str(trade.get("id") or "")
-            if status is None:
-                self._latch_entry_halt("protective-stop-audit-unavailable")
+        closed_ids: set[str] = set()
+        for attempt in range(2):
+            refresh_needed = False
+            for trade in trades:
+                trade_id = str(trade.get("id") or "")
+                # A confirmed closed ID still in the refreshed list is
+                # inconsistent evidence, even if a later detail says OPEN.
+                if trade_id in closed_ids:
+                    refresh_needed = True
+                    continue
+                status = self._open_trade_protection_status(client, trade)
+                if status == "closed":
+                    closed_ids.add(trade_id)
+                    refresh_needed = True
+                    continue
+                if status is True:
+                    continue
+                found_issue = True
+                if status is None:
+                    self._latch_entry_halt("protective-stop-audit-unavailable")
+                    close_ok = self._close_exact_trade(client, trade_id)
+                    print(
+                        "[BROKER][CRITICAL] protective-stop audit unavailable; "
+                        f"trade_id={trade_id} emergency_close={close_ok} "
+                        "new_entries_halted=true",
+                        flush=True,
+                    )
+                    continue
+                self._latch_entry_halt("unprotected-open-trade")
                 close_ok = self._close_exact_trade(client, trade_id)
                 print(
-                    "[BROKER][CRITICAL] protective-stop audit unavailable; "
+                    "[BROKER][CRITICAL] open-trade protection audit failed; "
                     f"trade_id={trade_id} emergency_close={close_ok} "
                     "new_entries_halted=true",
                     flush=True,
                 )
-                continue
-            self._latch_entry_halt("unprotected-open-trade")
-            close_ok = self._close_exact_trade(client, trade_id)
-            print(
-                "[BROKER][CRITICAL] open-trade protection audit failed; "
-                f"trade_id={trade_id} emergency_close={close_ok} "
-                "new_entries_halted=true",
-                flush=True,
-            )
-        return not found_issue
+            if not refresh_needed:
+                return None if found_issue else trades
+            refreshed = self._read_open_trade_summaries(client) if attempt == 0 else None
+            if refreshed is None:
+                self._latch_entry_halt(
+                    self.entry_halt_reason or "protective-stop-audit-unavailable"
+                )
+                print("[BROKER][PROTECTION-AUDIT] " + json.dumps({
+                    "audit_reason": ("open-trades-refresh-unavailable" if attempt == 0
+                                     else "open-trades-refresh-inconsistent"),
+                    "status": "unknown",
+                }, sort_keys=True), flush=True)
+                return None
+            trades = refreshed
+        return None
 
     def _halt_unknown_order_state(self, client, reason: str, response: dict) -> dict:
         self._latch_entry_halt(reason)
@@ -464,6 +500,49 @@ class Broker:
             "response": response,
         }
 
+    def _experiment_preflight(self, client, units: int, previous_trade: str | None) -> str | None:
+        """Fresh account-specific checks, after durable reservation, before POST."""
+        try:
+            response = client.get(f"/v3/accounts/{self.account}/summary")
+            if response.status_code != 200:
+                return None
+            account = response.json().get("account")
+            if (not isinstance(account, dict) or account.get("id") != self.account
+                    or account.get("currency") != "AUD"
+                    or any(type(account.get(key)) is not int or account[key] != 0
+                           for key in ("openTradeCount", "openPositionCount", "pendingOrderCount"))):
+                return None
+            watermark = str(account.get("lastTransactionID") or "")
+            if not _valid_transaction_id(watermark):
+                return None
+            if self._read_open_trade_summaries(client) != []:
+                return None
+            if previous_trade and self._open_trade_protection_status(
+                client, {"id": previous_trade, "instrument": "AUD_USD"}
+            ) != "closed":
+                # Even two stale flat lists cannot authorize overlap with our
+                # last known opening: require exact positive closure evidence.
+                return None
+            response = client.get(f"/v3/accounts/{self.account}/instruments",
+                                  params={"instruments": "AUD_USD"})
+            if response.status_code != 200:
+                return None
+            instruments = response.json().get("instruments")
+            if not isinstance(instruments, list) or len(instruments) != 1:
+                return None
+            specification = instruments[0]
+            if (not isinstance(specification, dict) or specification.get("name") != "AUD_USD"
+                    or specification.get("type") != "CURRENCY"):
+                return None
+            precision = specification.get("tradeUnitsPrecision")
+            minimum = Decimal(str(specification.get("minimumTradeSize")))
+            if (type(precision) is int and 0 <= precision <= 8
+                    and minimum.is_finite() and 0 < minimum <= units):
+                return watermark
+            return None
+        except Exception:
+            return None
+
     def place_order(
         self,
         instrument: str,
@@ -497,6 +576,29 @@ class Broker:
         ):
             print(f"[BROKER][BLOCK] Invalid order units: {units}", flush=True)
             return {"status": "BLOCKED", "reason": "invalid-order-units"}
+
+        experiment = None
+        reservation = None
+        try:
+            experiment = PracticeExperiment.configured(self._entry_halt_path.parent, self.account)
+            if experiment is not None:
+                if (self.mode != "demo" or self.base_url != PRACTICE
+                        or str(settings.OANDA_ENV).lower() != "practice"
+                        or instrument != "AUD_USD"):
+                    raise ExperimentBlocked("experiment-practice-audusd-only")
+                target_units = experiment.ready_units()
+                if units_value < target_units:
+                    raise ExperimentBlocked("experiment-exact-size-exceeds-strategy-budget")
+                hard_loss = Decimal(os.getenv("HARD_MAX_LOSS_CCY", "NaN"))
+                if (not hard_loss.is_finite() or not 0 < hard_loss <= Decimal("0.20")
+                        or not 0 < configured_cash_risk_limit() <= 0.20):
+                    raise ExperimentBlocked("experiment-twenty-cent-limits-required")
+                # AUD is the base AND account currency: these whole units are
+                # exact A$ notional, not margin or the allowed cash loss.
+                units_value = float(target_units)
+        except (ExperimentBlocked, InvalidOperation) as exc:
+            reason = str(exc) if isinstance(exc, ExperimentBlocked) else "experiment-limits-invalid"
+            return {"status": "BLOCKED", "reason": reason}
 
         try:
             normalized_sl_distance = normalize_distance(instrument, sl_distance)
@@ -599,6 +701,17 @@ class Broker:
 
         try:
             with self._client() as client:
+                if experiment is not None:
+                    try:
+                        reservation, reserved_units = experiment.reserve()
+                        watermark = (self._experiment_preflight(
+                            client, reserved_units, experiment.last_opened_trade()
+                        ) if reserved_units == abs(trade_units) else None)
+                        if watermark is None:
+                            experiment.skip_before_submission(reservation)
+                            return {"status": "BLOCKED", "reason": "experiment-preflight-failed"}
+                    except ExperimentBlocked as exc:
+                        return {"status": "BLOCKED", "reason": str(exc)}
                 resp = client.post(f"/v3/accounts/{self.account}/orders", json=payload)
                 if resp.status_code in (200, 201):
                     data = resp.json()
@@ -615,10 +728,24 @@ class Broker:
                         return self._halt_unknown_order_state(
                             client, "no-confirmed-trade-opening", data
                         )
+                    if experiment is not None:
+                        if int(filled["trade_id"]) <= int(watermark):
+                            return self._halt_unknown_order_state(
+                                client, "no-confirmed-trade-opening", data
+                            )
+                        try:
+                            # Count even a subsequently emergency-closed fill.
+                            experiment.confirm_opening(reservation, filled["trade_id"])
+                        except ExperimentBlocked:
+                            return self._halt_and_close_trade(
+                                client, trade_id=filled["trade_id"],
+                                reason="order-transport-state-uncertain", response=data,
+                            )
                     if (
                         data["orderFillTransaction"].get("instrument") != instrument
                         or filled["units"] * trade_units <= 0
                         or abs(filled["units"]) > abs(trade_units)
+                        or (experiment is not None and abs(filled["units"]) != abs(trade_units))
                     ):
                         return self._halt_and_close_trade(
                             client,
@@ -775,9 +902,7 @@ class Broker:
                 trades = self._read_open_trade_summaries(client)
                 if trades is None:
                     return None
-                if not self._audit_open_trade_protection(client, trades):
-                    return None
-                return trades
+                return self._audit_open_trade_protection(client, trades)
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
         return None
