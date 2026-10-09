@@ -171,20 +171,20 @@ def test_conversion_headroom_survives_small_drift_but_preserves_hard_audit(
 
     client = TradeAuditClient(direction * units)
     summary = {"id": "2", "instrument": "AUD_USD", "stopLossOrderID": "3"}
-    assert broker._audit_open_trade_protection(client, [summary]) is True
+    assert broker._audit_open_trade_protection(client, [summary]) == [summary]
 
     # A later refresh can use the reserved margin; the audit does not enforce
     # the reduced sizing budget against existing trades.
     conversion["rate"] = 1.4375 * 1.02
     assert diagnostics["planned_stop_risk"] * 1.02 > cash_cap * 0.98
-    assert broker._audit_open_trade_protection(client, [summary]) is True
+    assert broker._audit_open_trade_protection(client, [summary]) == [summary]
     assert client.closed == []
     assert broker.entry_halt_reason is None
     assert configured_cash_risk_limit() == cash_cap
 
     # Headroom is finite. A genuine above-cap stop risk still closes and halts.
     conversion["rate"] = 1.4375 * 1.05
-    assert broker._audit_open_trade_protection(client, [summary]) is False
+    assert broker._audit_open_trade_protection(client, [summary]) is None
     assert client.closed == ["2"]
     assert broker.entry_halt_reason == "unprotected-open-trade"
     assert (tmp_path / "broker_entry_halt.txt").read_text().strip() == (
@@ -216,10 +216,10 @@ def test_existing_trade_at_cash_cap_is_allowed_without_above_cap_tolerance(
     monkeypatch.setattr(broker, "conversion_rate", lambda *_: 1.0)
 
     # Existing A$0.50 protection stays valid even though new sizing uses A$0.49.
-    assert broker._audit_open_trade_protection(client, [summary]) is True
+    assert broker._audit_open_trade_protection(client, [summary]) == [summary]
     assert client.closed == []
 
     monkeypatch.setattr(broker, "conversion_rate", lambda *_: 1.00000001)
-    assert broker._audit_open_trade_protection(client, [summary]) is False
+    assert broker._audit_open_trade_protection(client, [summary]) is None
     assert client.closed == ["2"]
     assert broker.entry_halt_reason == "unprotected-open-trade"

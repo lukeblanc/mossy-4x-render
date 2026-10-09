@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-from pathlib import Path
 
 import pytest
 
@@ -63,7 +62,6 @@ def test_conversion_drift_has_specific_reason_and_keeps_cash_cap(audited_broker,
 
 @pytest.mark.parametrize(('field', 'value', 'reason'), [
     ('stopLossOrder', None, 'stop-order-missing'),
-    ('state', 'CLOSED', 'trade-not-open'),
     ('instrument', 'GBP_USD', 'trade-instrument-mismatch'),
     ('currentUnits', 'NaN', 'stop-risk-input-invalid'),
     ('price', 'bad', 'stop-risk-input-invalid'),
@@ -127,19 +125,6 @@ def test_halt_property_is_side_effect_free(audited_broker, monkeypatch):
     assert recorded['closed'] is False
 
 
-def test_recovery_cannot_clear_memory_if_persisted_halt_cannot_be_removed(audited_broker, monkeypatch, capsys):
-    broker, recorded = audited_broker
-    broker._latch_entry_halt('unprotected-open-trade')
-    recorded['closed'] = True
-    def denied(*args, **kwargs):
-        raise PermissionError('test permission failure')
-    monkeypatch.setattr(Path, 'unlink', denied)
-    broker.connectivity_check()  # mocked broker; existing startup recovery flow
-    assert broker.entry_halt_reason == 'unprotected-open-trade'
-    assert broker._entry_halt_path.read_text().strip() == 'unprotected-open-trade'
-    assert '[BROKER][RECOVERY]' not in capsys.readouterr().out
-
-
 def test_failed_close_remains_halted_and_is_not_confirmed(audited_broker, monkeypatch, capsys):
     broker, recorded = audited_broker
     recorded['trade']['stopLossOrder'] = None
@@ -151,13 +136,17 @@ def test_failed_close_remains_halted_and_is_not_confirmed(audited_broker, monkey
     assert recorded['closed'] is False
 
 
-def test_clean_startup_audit_still_recovers_existing_latch(audited_broker):
+@pytest.mark.parametrize('closed', [True, False])
+def test_clean_startup_audit_retains_existing_latch(audited_broker, capsys, closed):
     broker, recorded = audited_broker
     broker._latch_entry_halt('unprotected-open-trade')
-    recorded['closed'] = True
+    recorded['closed'] = closed
     assert broker.connectivity_check()['ok'] is True
-    assert broker.entry_halt_reason is None
-    assert not broker._entry_halt_path.exists()
+    assert broker.entry_halt_reason == 'unprotected-open-trade'
+    assert broker._entry_halt_path.read_text().strip() == broker.entry_halt_reason
+    assert Broker().entry_halt_reason == broker.entry_halt_reason
+    assert broker.place_order('AUD_USD', 'BUY', 1, sl_distance=0.00042)['status'] == 'BLOCKED'
+    assert '[BROKER][RECOVERY]' not in capsys.readouterr().out
 
 
 def test_audit_logs_exclude_raw_response_secrets(audited_broker, capsys):

@@ -513,7 +513,7 @@ def test_unavailable_exact_stop_audit_attempts_close_and_halts(
     assert broker._entry_halted_reason == "protective-stop-audit-unavailable"
 
 
-def test_persisted_halt_clears_only_after_clean_broker_audit(monkeypatch, tmp_path):
+def test_persisted_halt_survives_clean_startup_broker_audit(monkeypatch, tmp_path):
     _configure_settings(monkeypatch)
     monkeypatch.setenv("MOSSY_STATE_PATH", str(tmp_path))
     (tmp_path / "broker_entry_halt.txt").write_text("old-uncertain-order\n")
@@ -523,8 +523,8 @@ def test_persisted_halt_clears_only_after_clean_broker_audit(monkeypatch, tmp_pa
     result = broker.connectivity_check()
 
     assert result["ok"] is True
-    assert broker._entry_halted_reason is None
-    assert not (tmp_path / "broker_entry_halt.txt").exists()
+    assert broker.entry_halt_reason == "old-uncertain-order"
+    assert (tmp_path / "broker_entry_halt.txt").read_text() == "old-uncertain-order\n"
 
 
 class WrongCurrencyClient(DummyClient):
