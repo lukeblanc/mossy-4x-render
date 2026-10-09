@@ -122,13 +122,17 @@ class ExperimentClient(DummyClient):
         self.metadata = {'name': 'AUD_USD', 'type': 'CURRENCY',
                          'minimumTradeSize': '1', 'tradeUnitsPrecision': 0}
         self.account = {'id': 'acct-123', 'currency': 'AUD', 'openTradeCount': 0,
-                        'openPositionCount': 0, 'pendingOrderCount': 0, 'lastTransactionID': '999'}
+                        'openPositionCount': 0, 'pendingOrderCount': 0}
+        self.summary_last_transaction_id = '999'
         self.failure = None
 
     def get(self, path, params=None):
         self.requests.append(('GET', path))
         if path.endswith('/summary'):
-            return DummyResponse(200, {'account': deepcopy(self.account)})
+            return DummyResponse(200, {
+                'account': deepcopy(self.account),
+                'lastTransactionID': self.summary_last_transaction_id,
+            })
         if path.endswith('/instruments'):
             assert params == {'instruments': 'AUD_USD'}
             return DummyResponse(200, {'instruments': [deepcopy(self.metadata)]})
@@ -167,7 +171,7 @@ def experiment_broker(ledger, monkeypatch):
 
 
 @pytest.mark.parametrize('side', ['BUY', 'SELL'])
-def test_exact_orders_stop_at_ten_and_remain_blocked_after_restart(experiment_broker, side):
+def test_exact_ten_then_normal_sizing_returns_after_restart(experiment_broker, side):
     broker, client, plan = experiment_broker
     for number in range(10):
         broker = Broker()
@@ -176,9 +180,68 @@ def test_exact_orders_stop_at_ten_and_remain_blocked_after_restart(experiment_br
         assert result['status'] == 'SENT'
         assert abs(int(client.submitted[-1]['order']['units'])) == 10
     assert plan.status()['filled_count'] == 10
-    assert Broker().place_order('AUD_USD', side, 100, sl_distance=0.001)['status'] == 'BLOCKED'
-    assert len(client.submitted) == 10
+    client.recorder['closed'] = True
+    assert Broker().place_order('AUD_USD', side, 100, sl_distance=0.001)['status'] == 'SENT'
+    assert [abs(int(order['order']['units'])) for order in client.submitted] == [10] * 10 + [100]
     assert plan.status()['state'] == 'complete'
+
+
+def test_open_tenth_trade_blocks_normal_sizing_handoff(experiment_broker):
+    broker, client, plan = experiment_broker
+    for _ in range(10):
+        client.recorder['closed'] = True
+        assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'SENT'
+    assert plan.status()['state'] == 'complete'
+    assert client.recorder['closed'] is False
+    assert Broker().place_order('AUD_USD', 'BUY', 100, sl_distance=0.001) == {
+        'status': 'BLOCKED', 'reason': 'experiment-completion-handoff-failed'}
+    assert len(client.submitted) == 10
+
+
+@pytest.mark.parametrize('damage', ['missing', 'corrupt', 'wrong-account', 'count-mismatch', 'pending'])
+def test_completed_ledger_damage_blocks_champion_handoff(experiment_broker, damage):
+    broker, client, plan = experiment_broker
+    for ticket in range(300, 310):
+        confirm(plan, ticket)
+    if damage == 'missing':
+        plan.path.unlink()
+    elif damage == 'corrupt':
+        plan.path.write_bytes(b'not a database')
+    else:
+        with sqlite3.connect(plan.path) as connection:
+            if damage == 'wrong-account':
+                connection.execute("UPDATE experiments SET account_hash='wrong'")
+            elif damage == 'count-mismatch':
+                connection.execute('UPDATE experiments SET filled_count=9')
+            else:
+                connection.execute(
+                    "INSERT INTO experiment_intents VALUES "
+                    "('pending-token',? ,10,'reserved',NULL,?)",
+                    (plan.id, datetime.now(timezone.utc).isoformat()),
+                )
+    result = broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)
+    assert result['status'] == 'BLOCKED'
+    assert client.submitted == []
+
+
+def test_paused_experiment_does_not_restore_champion_sizing(experiment_broker):
+    broker, client, plan = experiment_broker
+    plan.pause()
+    assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001) == {
+        'status': 'BLOCKED', 'reason': 'experiment-not-active'}
+    assert client.submitted == []
+
+
+def test_completed_experiment_restores_other_champion_instruments(experiment_broker):
+    broker, client, plan = experiment_broker
+    for _ in range(10):
+        client.recorder['closed'] = True
+        assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'SENT'
+    assert plan.status()['state'] == 'complete'
+    client.recorder['closed'] = True
+    assert broker.place_order('GBP_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'SENT'
+    assert client.submitted[-1]['order']['instrument'] == 'GBP_USD'
+    assert client.submitted[-1]['order']['units'] == '100'
 
 
 @pytest.mark.parametrize('instrument,units,reason', [
@@ -212,7 +275,6 @@ def test_bad_or_unsupported_metadata_never_submits(experiment_broker, field, val
 @pytest.mark.parametrize('field,value', [
     ('currency', 'USD'), ('id', 'different-account'), ('openTradeCount', 1),
     ('openPositionCount', 1), ('pendingOrderCount', 1), ('openTradeCount', None),
-    ('lastTransactionID', None), ('lastTransactionID', 'bad'),
 ])
 def test_account_or_exposure_mismatch_blocks(experiment_broker, field, value):
     broker, client, plan = experiment_broker
@@ -220,6 +282,31 @@ def test_account_or_exposure_mismatch_blocks(experiment_broker, field, value):
     assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'BLOCKED'
     assert client.submitted == []
     assert plan.status()['pending'] == 0
+
+
+@pytest.mark.parametrize('value', [None, 'bad'])
+def test_missing_or_invalid_top_level_transaction_cursor_blocks(experiment_broker, value):
+    broker, client, plan = experiment_broker
+    client.summary_last_transaction_id = value
+    assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'BLOCKED'
+    assert client.submitted == []
+    assert plan.status()['pending'] == 0
+
+
+def test_conflicting_nested_transaction_cursor_blocks(experiment_broker):
+    broker, client, plan = experiment_broker
+    client.account['lastTransactionID'] = '998'
+    assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'BLOCKED'
+    assert client.submitted == []
+    assert plan.status()['pending'] == 0
+
+
+def test_matching_nested_transaction_cursor_is_accepted(experiment_broker):
+    broker, client, plan = experiment_broker
+    client.account['lastTransactionID'] = client.summary_last_transaction_id
+    assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'SENT'
+    assert len(client.submitted) == 1
+    assert plan.status()['filled_count'] == 1
 
 
 def test_second_position_blocked_even_when_summary_is_stale_flat(experiment_broker):
@@ -320,11 +407,13 @@ def test_daily_history_is_preserved_while_batch_crosses_day_and_restart(experime
     assert risk.state.daily_entry_count == 1
     assert plan.status()['filled_count'] == 10
     assert [abs(int(order['order']['units'])) for order in client.submitted] == [10] * 10
-    # The normal daily budget is available, but the experiment remains complete.
+    # The immutable experiment remains complete while normal sizing returns.
     now += timedelta(days=1)
     assert risk.should_open(now, 1000, [], 'AUD_USD', 0.1)[0]
-    assert Broker().place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'BLOCKED'
-    assert len(client.submitted) == 10
+    client.recorder['closed'] = True
+    assert Broker().place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'SENT'
+    assert [abs(int(order['order']['units'])) for order in client.submitted] == [10] * 10 + [100]
+    assert plan.status() == {'state': 'complete', 'filled_count': 10, 'pending': 0, 'units': 10}
 
 
 def test_completion_between_sizing_and_reservation_cannot_submit_an_eleventh_trade(

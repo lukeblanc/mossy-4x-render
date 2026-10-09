@@ -2,8 +2,8 @@
 
 Default: disabled. No render.yaml, strategy, learning, cash-risk, daily-limit or
 position-limit setting is changed by this feature. The latest approved plan is
-ten NEW A$10 AUD_USD positions, then stop new entries and review. There is no A$2
-stage or automatic restart of the quota.
+ten NEW A$10 AUD_USD positions, then restore the unchanged Champion sizing. There
+is no A$2 stage or automatic restart of the quota.
 
 MOSSY_PRACTICE_EXPERIMENT_ID opts a worker into a separately prepared ledger at
 MOSSY_STATE_PATH/practice_experiment.sqlite. Merely deploying the code creates
@@ -27,8 +27,12 @@ opening must have a trade ID newer than the preflight transaction watermark.
 An exact new opening consumes a slot, even if later protection verification
 requires emergency closure. Partial/wrong-size fills are closed and halted,
 not accepted as approximate A$10 positions. On the tenth confirmed opening,
-the ledger becomes complete and further entries remain blocked across restart
-and midnight. Exit/stop management continues for the final open position.
+the ledger becomes complete and cannot be reactivated. Once the usual one-open-
+position gate allows another entry, the broker resumes the unchanged Champion
+sizing across restart and midnight. Exit/stop management continues for the
+final experiment position. The broker also performs a fresh flat-account check
+and requires exact positive closure evidence for that tenth position before it
+allows the first or any later Champion submission through the completed plan.
 History before this experiment does not consume its slots, but still counts
 toward the normal daily cap. Eleven earlier entries leave at most nine new
 entries that day; the tenth waits for a later permitted day.
@@ -59,8 +63,10 @@ the approved point. These steps do not bypass a retained broker halt.
 
 After approved activation, use status() for count/state/pending observations
 without broker calls, plus the existing fill/stop logs. At complete, review
-the journal and outcomes; do not create another plan automatically. Do not
-remove the experiment ID merely to stop it: that restores normal entry behavior.
+the journal and outcomes; the immutable ledger does not create another plan and
+normal Champion sizing becomes eligible automatically once the final position
+is confirmed closed and normal gates pass. Pausing before completion remains
+fail-closed; removing the experiment ID is not the approved way to pause it.
 
 Rollback: pause the ledger first through a separately approved operation; let
 existing protection/exit handling finish or use an explicitly approved safe
