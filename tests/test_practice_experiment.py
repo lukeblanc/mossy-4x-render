@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import sqlite3
+from threading import Event
 
 import pytest
 
@@ -27,6 +28,11 @@ def confirm(plan, ticket):
     return units
 
 
+def complete(plan, first_ticket=100):
+    for ticket in range(first_ticket, first_ticket + 10):
+        confirm(plan, ticket)
+
+
 def test_plan_requires_explicit_activation_and_cannot_reinitialize(ledger):
     with pytest.raises(ExperimentBlocked, match='not-active'):
         ledger.reserve()
@@ -35,6 +41,36 @@ def test_plan_requires_explicit_activation_and_cannot_reinitialize(ledger):
     ledger.activate()
     with pytest.raises(ExperimentBlocked, match='cannot-reactivate'):
         ledger.activate()
+
+
+def test_failed_prepare_does_not_silently_migrate_an_old_ledger(tmp_path):
+    plan = PracticeExperiment(tmp_path, 'approved-test-only', 'acct-123')
+    with sqlite3.connect(plan.path) as connection:
+        connection.executescript("""
+            CREATE TABLE experiments (
+                id TEXT PRIMARY KEY, account_hash TEXT NOT NULL,
+                state TEXT NOT NULL, filled_count INTEGER NOT NULL
+            );
+            CREATE TABLE experiment_intents (
+                token TEXT PRIMARY KEY, experiment_id TEXT NOT NULL,
+                units INTEGER NOT NULL, state TEXT NOT NULL,
+                trade_id TEXT UNIQUE, created_at TEXT NOT NULL
+            );
+        """)
+        connection.execute(
+            "INSERT INTO experiments VALUES (?,?,'prepared',0)",
+            (plan.id, plan.account_hash),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        plan.prepare()
+    with sqlite3.connect(plan.path) as connection:
+        names = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','index')"
+            )
+        }
+    assert 'champion_handoff_intents' not in names
+    assert 'one_reserved_champion_handoff' not in names
 
 
 def test_ten_new_fills_then_pause_persists_across_instances(ledger):
@@ -82,6 +118,62 @@ def test_atomic_reservation_allows_only_one_concurrent_submitter(ledger):
         results = list(executor.map(lambda _: reserve(), range(4)))
     assert sum(value is not None for value in results) == 1
     assert ledger.status()['pending'] == 1
+
+
+def test_completed_handoff_allows_only_one_concurrent_submitter(ledger):
+    ledger.activate()
+    complete(ledger)
+
+    def reserve():
+        try:
+            return ledger.reserve_champion_handoff('AUD_USD')
+        except ExperimentBlocked:
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: reserve(), range(4)))
+    assert sum(value is not None for value in results) == 1
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM champion_handoff_intents WHERE state='reserved'"
+        ).fetchone()[0] == 1
+
+
+def test_completed_handoff_claim_survives_restart_and_tracks_latest_trade(ledger):
+    ledger.activate()
+    complete(ledger)
+    token, previous = ledger.reserve_champion_handoff('GBP_USD')
+    assert previous == {'id': '109', 'instrument': 'AUD_USD'}
+    ledger.confirm_champion_handoff(token, '200')
+    ledger.confirm_champion_handoff(token, '200')
+    fresh = PracticeExperiment(ledger.path.parent, ledger.id, 'acct-123')
+    second, previous = fresh.reserve_champion_handoff('EUR_USD')
+    assert previous == {'id': '200', 'instrument': 'GBP_USD'}
+    fresh.skip_champion_handoff(second)
+
+
+def test_unresolved_completed_handoff_claim_survives_restart(ledger):
+    ledger.activate()
+    complete(ledger)
+    ledger.reserve_champion_handoff('AUD_USD')
+    fresh = PracticeExperiment(ledger.path.parent, ledger.id, 'acct-123')
+    with pytest.raises(ExperimentBlocked, match='submission-unresolved'):
+        fresh.reserve_champion_handoff('AUD_USD')
+
+
+def test_pause_cannot_overtake_an_unresolved_submission(ledger):
+    ledger.activate()
+    ledger.reserve()
+    with pytest.raises(ExperimentBlocked, match='submission-unresolved'):
+        ledger.pause()
+
+
+def test_pause_cannot_overtake_an_unresolved_champion_handoff(ledger):
+    ledger.activate()
+    complete(ledger)
+    ledger.reserve_champion_handoff('AUD_USD')
+    with pytest.raises(ExperimentBlocked, match='submission-unresolved'):
+        ledger.pause()
 
 
 def test_only_unsent_skips_release_slots_and_pause_does_not_reset_phase(ledger):
@@ -198,7 +290,9 @@ def test_open_tenth_trade_blocks_normal_sizing_handoff(experiment_broker):
     assert len(client.submitted) == 10
 
 
-@pytest.mark.parametrize('damage', ['missing', 'corrupt', 'wrong-account', 'count-mismatch', 'pending'])
+@pytest.mark.parametrize('damage', [
+    'missing', 'corrupt', 'wrong-account', 'count-mismatch', 'pending', 'handoff-table-missing'
+])
 def test_completed_ledger_damage_blocks_champion_handoff(experiment_broker, damage):
     broker, client, plan = experiment_broker
     for ticket in range(300, 310):
@@ -207,6 +301,9 @@ def test_completed_ledger_damage_blocks_champion_handoff(experiment_broker, dama
         plan.path.unlink()
     elif damage == 'corrupt':
         plan.path.write_bytes(b'not a database')
+    elif damage == 'handoff-table-missing':
+        with sqlite3.connect(plan.path) as connection:
+            connection.execute('DROP TABLE champion_handoff_intents')
     else:
         with sqlite3.connect(plan.path) as connection:
             if damage == 'wrong-account':
@@ -242,6 +339,140 @@ def test_completed_experiment_restores_other_champion_instruments(experiment_bro
     assert broker.place_order('GBP_USD', 'BUY', 100, sl_distance=0.001)['status'] == 'SENT'
     assert client.submitted[-1]['order']['instrument'] == 'GBP_USD'
     assert client.submitted[-1]['order']['units'] == '100'
+
+
+def test_completed_handoff_preflight_failure_releases_only_known_unsent_claim(
+    experiment_broker
+):
+    broker, client, plan = experiment_broker
+    complete(plan, 300)
+    client.recorder.update({'trade_id': '309', 'closed': True})
+    client.account['openTradeCount'] = 1
+    assert broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001) == {
+        'status': 'BLOCKED', 'reason': 'experiment-completion-handoff-failed'}
+    with sqlite3.connect(plan.path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM champion_handoff_intents WHERE state='reserved'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT count(*) FROM champion_handoff_intents WHERE state='skipped'"
+        ).fetchone()[0] == 1
+    client.account['openTradeCount'] = 0
+    assert Broker().place_order(
+        'AUD_USD', 'BUY', 100, sl_distance=0.001
+    )['status'] == 'SENT'
+
+
+def test_forced_concurrent_completed_handoff_posts_exactly_once(
+    experiment_broker, monkeypatch
+):
+    broker, client, plan = experiment_broker
+    complete(plan, 300)
+    client.recorder.update({'trade_id': '309', 'closed': True})
+    checkpoint_claimed = Event()
+    release_checkpoint = Event()
+    original_checkpoint = Broker._experiment_flat_checkpoint
+
+    def gated_checkpoint(self, http_client, previous_trade):
+        checkpoint_claimed.set()
+        assert release_checkpoint.wait(5)
+        return original_checkpoint(self, http_client, previous_trade)
+
+    monkeypatch.setattr(Broker, '_experiment_flat_checkpoint', gated_checkpoint)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            broker.place_order, 'AUD_USD', 'BUY', 100, sl_distance=0.001
+        )
+        assert checkpoint_claimed.wait(5)
+        second = executor.submit(
+            Broker().place_order, 'AUD_USD', 'BUY', 100, sl_distance=0.001
+        )
+        second_result = second.result(timeout=5)
+        release_checkpoint.set()
+        first_result = first.result(timeout=5)
+    assert first_result['status'] == 'SENT'
+    assert second_result == {
+        'status': 'BLOCKED', 'reason': 'experiment-submission-unresolved'}
+    assert len(client.submitted) == 1
+    with sqlite3.connect(plan.path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM champion_handoff_intents WHERE state='filled'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM champion_handoff_intents WHERE state='reserved'"
+        ).fetchone()[0] == 0
+
+
+def test_latest_champion_trade_must_close_even_when_flat_lists_are_stale(
+    experiment_broker, monkeypatch
+):
+    broker, client, plan = experiment_broker
+    complete(plan, 300)
+    client.recorder.update({'trade_id': '309', 'closed': True})
+    assert broker.place_order(
+        'GBP_USD', 'BUY', 100, sl_distance=0.001
+    )['status'] == 'SENT'
+    monkeypatch.setattr(Broker, '_read_open_trade_summaries', lambda *args: [])
+    assert Broker().place_order('AUD_USD', 'BUY', 100, sl_distance=0.001) == {
+        'status': 'BLOCKED', 'reason': 'experiment-completion-handoff-failed'}
+    assert len(client.submitted) == 1
+    client.recorder['closed'] = True
+    assert Broker().place_order(
+        'AUD_USD', 'BUY', 100, sl_distance=0.001
+    )['status'] == 'SENT'
+    assert len(client.submitted) == 2
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'malformed', 'historical'])
+def test_uncertain_completed_handoff_remains_unresolved_across_restart(
+    experiment_broker, failure
+):
+    broker, client, plan = experiment_broker
+    complete(plan, 300)
+    client.recorder.update({'trade_id': '309', 'closed': True})
+    client.failure = failure
+    assert broker.place_order(
+        'AUD_USD', 'BUY', 100, sl_distance=0.001
+    )['status'] != 'SENT'
+    fresh = PracticeExperiment(plan.path.parent, plan.id, 'acct-123')
+    with pytest.raises(ExperimentBlocked, match='submission-unresolved'):
+        fresh.reserve_champion_handoff('AUD_USD')
+    assert len(client.submitted) == 1
+
+
+def test_completed_handoff_confirmation_failure_closes_and_halts(
+    experiment_broker, monkeypatch
+):
+    broker, client, plan = experiment_broker
+    complete(plan, 300)
+    client.recorder.update({'trade_id': '309', 'closed': True})
+
+    def fail(*args):
+        raise ExperimentBlocked('experiment-ledger-unavailable')
+
+    monkeypatch.setattr(PracticeExperiment, 'confirm_champion_handoff', fail)
+    assert broker.place_order(
+        'AUD_USD', 'BUY', 100, sl_distance=0.001
+    )['status'] == 'UNKNOWN'
+    assert client.recorder['closed'] is True
+    assert broker.entry_halt_reason == 'order-transport-state-uncertain'
+    fresh = PracticeExperiment(plan.path.parent, plan.id, 'acct-123')
+    with pytest.raises(ExperimentBlocked, match='submission-unresolved'):
+        fresh.reserve_champion_handoff('AUD_USD')
+
+
+def test_rejected_completed_handoff_is_not_retried_automatically(experiment_broker):
+    broker, client, plan = experiment_broker
+    complete(plan, 300)
+    client.recorder.update({'trade_id': '309', 'closed': True})
+    client.failure = 'rejected'
+    assert broker.place_order(
+        'AUD_USD', 'BUY', 100, sl_distance=0.001
+    )['status'] == 'REJECTED'
+    client.failure = None
+    assert Broker().place_order('AUD_USD', 'BUY', 100, sl_distance=0.001) == {
+        'status': 'BLOCKED', 'reason': 'experiment-submission-unresolved'}
+    assert len(client.submitted) == 1
 
 
 @pytest.mark.parametrize('instrument,units,reason', [
