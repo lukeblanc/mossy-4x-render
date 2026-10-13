@@ -29,6 +29,27 @@ A failed/malformed refresh, a closed ID still listed, or another closure during
 the second pass returns unavailable and retains an entry halt. Unknown states
 still fail closed. Diagnostics exclude raw state values, errors and responses.
 
+A confirmed opening can also close before its initial stop verification. The
+worker accepts that fill for normal journal and entry counting only after an
+exact-ID/instrument `CLOSED` detail with zero units, a fresh AUD account summary
+with zero trades/positions/pending orders and a transaction cursor beyond the
+fill, an empty fresh open list, and another exact closure check. It logs
+`closed-before-stop-verification` with selected fields. Failed or contradictory
+evidence latches a halt and audits both the known filled trade and remaining
+exposure, even when the list omits that fill. Unsafe or unknown exact details
+retain emergency-close behavior; a positively closed trade needs no repeat close.
+No path clears an existing halt or retries the opening order.
+
+The opted-in ten-fill experiment's demo/practice and A$0.20 guards also apply
+after completion, before its existing serialized Champion handoff. This does not
+activate the experiment or change its ledger, quota, daily limits or sizing.
+
+The October 9 trade 7610 had a verified stop at entry, followed by a later
+`trade-details-unavailable` audit and a confirmed emergency close. Those logs do
+not establish a benign pre-audit closure or the reason for the failed detail
+read. That unavailable-audit path still fails closed and cannot justify clearing
+the retained halt.
+
 ## Conversion headroom
 
 New positions whose quote currency differs from the account currency use at most

@@ -143,3 +143,24 @@ def test_uncertain_order_stops_additional_entries_and_does_not_invent_journal_ro
     risk.register_entry.assert_not_called()
     engine.mark_trade.assert_not_called()
     assert not main._ACTIVE_CYCLE_TICKS
+
+
+# Import the local fake fixture, never a remote broker connection.
+from test_closed_fill_reconciliation import closed_fill
+
+
+def test_closed_before_verification_fill_is_journalled_and_counted_once(runtime, closed_fill, monkeypatch):
+    from dataclasses import replace
+    real_broker, client = closed_fill
+    result = real_broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)
+    assert result['status'] == 'SENT' and result['trade_state'] == 'CLOSED'
+    broker, risk, _, engine = prepare_decision(runtime, monkeypatch)
+    engine.evaluate_all.return_value = [replace(engine.evaluate_all.return_value[0], instrument='AUD_USD')]
+    broker.place_order.return_value = result
+    asyncio.run(main.decision_cycle())
+    main.journal.record_entry.assert_called_once()
+    record = main.journal.record_entry.call_args.kwargs
+    assert record['trade_id'] == '2' and record['units'] == 100
+    risk.register_entry.assert_called_once()
+    engine.mark_trade.assert_called_once_with('AUD_USD')
+    assert client.posts == 1 and client.closes == []
