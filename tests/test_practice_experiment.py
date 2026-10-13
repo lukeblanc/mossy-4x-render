@@ -700,3 +700,52 @@ def test_historical_trade_id_cannot_count_as_a_new_experiment_opening(experiment
     assert plan.status()['filled_count'] == 0
     assert plan.status()['pending'] == 1
     assert broker.entry_halt_reason == 'no-confirmed-trade-opening'
+
+
+@pytest.mark.parametrize('stage', ['active', 'complete'])
+@pytest.mark.parametrize('change', ['mode', 'endpoint', 'environment', 'cash-risk', 'cash-close', 'missing-close'])
+def test_lifecycle_safety_guards_apply_before_active_or_completed_submission(experiment_broker, monkeypatch, stage, change):
+    broker, client, plan = experiment_broker
+    if stage == 'complete':
+        complete(plan)
+        client.recorder.update({'trade_id': '109', 'closed': True})
+    if change == 'mode': broker.mode = 'simulation'
+    elif change == 'endpoint': broker.base_url = 'https://invalid.example'
+    elif change == 'environment': monkeypatch.setattr(settings, 'OANDA_ENV', 'live')
+    elif change == 'cash-risk': monkeypatch.setenv('MAX_RISK_PER_TRADE_CCY', '0.50')
+    elif change == 'cash-close': monkeypatch.setenv('HARD_MAX_LOSS_CCY', '0.50')
+    else: monkeypatch.delenv('HARD_MAX_LOSS_CCY', raising=False)
+    before = plan.status()
+    result = broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)
+    assert result['status'] == 'BLOCKED'
+    assert client.requests == [] and client.submitted == []
+    assert plan.status() == before
+
+
+@pytest.mark.parametrize('stage', ['active', 'complete'])
+def test_fast_closed_fill_counts_once_in_existing_experiment_or_handoff(experiment_broker, monkeypatch, stage):
+    broker, client, plan = experiment_broker
+    if stage == 'complete':
+        complete(plan)
+        client.recorder.update({'trade_id': '109', 'closed': True})
+    original_get, original_post = client.get, client.post
+    def post(path, json):
+        result = original_post(path, json)
+        client.summary_last_transaction_id = '1003'
+        return result
+    def get(path, params=None):
+        if client.submitted and path.endswith('/trades/1001'):
+            return DummyResponse(200, {'trade': {'id': '1001', 'instrument': 'AUD_USD',
+                                                'state': 'CLOSED', 'currentUnits': '0'}})
+        if client.submitted and path.endswith('/openTrades'):
+            return DummyResponse(200, {'trades': []})
+        return original_get(path, params)
+    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client, 'get', get)
+    result = broker.place_order('AUD_USD', 'BUY', 100, sl_distance=0.001)
+    assert result['status'] == 'SENT' and result['trade_state'] == 'CLOSED'
+    assert plan.status()['filled_count'] == (1 if stage == 'active' else 10)
+    with sqlite3.connect(plan.path) as connection:
+        table = 'experiment_intents' if stage == 'active' else 'champion_handoff_intents'
+        assert connection.execute(f"SELECT count(*) FROM {table} WHERE trade_id='1001' AND state='filled'").fetchone()[0] == 1
+    assert len(client.submitted) == 1 and broker.entry_halt_reason is None

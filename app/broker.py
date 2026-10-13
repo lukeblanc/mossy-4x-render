@@ -463,10 +463,18 @@ class Broker:
             trades = refreshed
         return None
 
-    def _halt_unknown_order_state(self, client, reason: str, response: dict) -> dict:
+    def _halt_unknown_order_state(
+        self, client, reason: str, response: dict, *, known_trade: dict | None = None
+    ) -> dict:
         self._latch_entry_halt(reason)
         trades = self._read_open_trade_summaries(client)
         audited = trades is not None
+        if known_trade is not None:
+            # A stale/failed list cannot erase the known fill after conflicting
+            # closure evidence. Re-audit it even when the list omits it.
+            trades = list(trades or [])
+            if not any(trade.get("id") == known_trade["id"] for trade in trades):
+                trades.append(known_trade)
         if trades is not None:
             self._audit_open_trade_protection(client, trades)
         return {
@@ -613,6 +621,15 @@ class Broker:
         try:
             experiment = PracticeExperiment.configured(self._entry_halt_path.parent, self.account)
             if experiment is not None:
+                # Account/environment and cash limits bind the entire opted-in
+                # lifecycle, including the completed Champion handoff.
+                if (self.mode != "demo" or self.base_url != PRACTICE
+                        or str(settings.OANDA_ENV).lower() != "practice"):
+                    raise ExperimentBlocked("experiment-practice-audusd-only")
+                hard_loss = Decimal(os.getenv("HARD_MAX_LOSS_CCY", "NaN"))
+                if (not hard_loss.is_finite() or not 0 < hard_loss <= Decimal("0.20")
+                        or not 0 < configured_cash_risk_limit() <= 0.20):
+                    raise ExperimentBlocked("experiment-twenty-cent-limits-required")
                 target_units = experiment.ready_units()
                 if target_units is None:
                     # A completed, account-bound ten-fill ledger restores the
@@ -621,16 +638,10 @@ class Broker:
                     completed_experiment = experiment
                     experiment = None
                 else:
-                    if (self.mode != "demo" or self.base_url != PRACTICE
-                            or str(settings.OANDA_ENV).lower() != "practice"
-                            or instrument != "AUD_USD"):
+                    if instrument != "AUD_USD":
                         raise ExperimentBlocked("experiment-practice-audusd-only")
                     if units_value < target_units:
                         raise ExperimentBlocked("experiment-exact-size-exceeds-strategy-budget")
-                    hard_loss = Decimal(os.getenv("HARD_MAX_LOSS_CCY", "NaN"))
-                    if (not hard_loss.is_finite() or not 0 < hard_loss <= Decimal("0.20")
-                            or not 0 < configured_cash_risk_limit() <= 0.20):
-                        raise ExperimentBlocked("experiment-twenty-cent-limits-required")
                     # AUD is the base AND account currency: these whole units are
                     # exact A$ notional, not margin or the allowed cash loss.
                     units_value = float(target_units)
@@ -816,6 +827,34 @@ class Broker:
                         )
                     except Exception:
                         trade = None
+                    if (isinstance(trade, dict)
+                            and str(trade.get("state") or "").upper() == "CLOSED"):
+                        try:
+                            remaining = Decimal(str(trade.get("currentUnits")))
+                        except (InvalidOperation, TypeError, ValueError):
+                            remaining = Decimal("NaN")
+                        if (str(trade.get("id") or "") == filled["trade_id"]
+                                and trade.get("instrument") == instrument
+                                and remaining.is_finite() and remaining == 0):
+                            # A real opening can close before its stop is read.
+                            # Require fresh account/exposure checks and another
+                            # exact CLOSED read; absence from a list is not proof.
+                            cursor = self._experiment_flat_checkpoint(client, {
+                                "id": filled["trade_id"], "instrument": instrument,
+                            })
+                            if cursor is not None and int(cursor) > int(filled["trade_id"]):
+                                print("[BROKER][FILL-CLOSED] " + json.dumps({
+                                    "trade_id": filled["trade_id"],
+                                    "audit_reason": "closed-before-stop-verification",
+                                    "status": "closed-flat-verified",
+                                }, sort_keys=True), flush=True)
+                                # Keep the original fill: journal, daily count
+                                # and experiment quota must still count once.
+                                return {"status": "SENT", "trade_state": "CLOSED", "response": data}
+                            return self._halt_unknown_order_state(
+                                client, "closed-fill-reconciliation-unavailable", data,
+                                known_trade={"id": filled["trade_id"], "instrument": instrument},
+                            )
                     stop_order = (
                         (
                             trade.get("stopLossOrder")
