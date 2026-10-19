@@ -102,6 +102,77 @@ def test_unavailable_conversion_fails_closed(audited_broker, monkeypatch, capsys
     assert broker.entry_halt_reason == 'protective-stop-audit-unavailable'
 
 
+def test_emergency_close_retries_transient_broker_failure(audited_broker, monkeypatch, capsys):
+    broker, recorded = audited_broker
+    recorded['trade']['stopLossOrder'] = None
+    original_put = AuditClient.put
+    attempts = {'count': 0}
+
+    def flaky_put(self, path, json):
+        attempts['count'] += 1
+        if attempts['count'] < 3:
+            return DummyResponse(status_code=503)
+        return original_put(self, path, json)
+
+    monkeypatch.setattr(AuditClient, 'put', flaky_put)
+    monkeypatch.setattr('app.broker.time.sleep', lambda *_: None)
+
+    assert broker.list_open_trades() is None
+    assert attempts['count'] == 3
+    assert recorded['closed'] is True
+    assert broker.entry_halt_reason == 'unprotected-open-trade'
+    output = capsys.readouterr().out
+    assert '"attempt": 1' in output and '"retrying": true' in output
+    assert '"attempt": 3' in output and '"result": "close-fill-confirmed"' in output
+
+
+def test_emergency_close_does_not_retry_non_transient_rejection(audited_broker, monkeypatch):
+    broker, recorded = audited_broker
+    recorded['trade']['stopLossOrder'] = None
+    attempts = {'count': 0}
+
+    def rejected_put(self, path, json):
+        attempts['count'] += 1
+        return DummyResponse(status_code=400)
+
+    monkeypatch.setattr(AuditClient, 'put', rejected_put)
+    monkeypatch.setattr('app.broker.time.sleep', lambda *_: pytest.fail('must not sleep'))
+
+    assert broker.list_open_trades() is None
+    assert attempts['count'] == 1
+    assert recorded['closed'] is False
+    assert broker.entry_halt_reason == 'unprotected-open-trade'
+
+
+def test_close_fill_remains_positive_evidence_when_detail_reread_fails(
+    audited_broker, monkeypatch, capsys
+):
+    broker, recorded = audited_broker
+    recorded['trade']['stopLossOrder'] = None
+    original_get = AuditClient.get
+    close_seen = {'value': False}
+    original_put = AuditClient.put
+
+    def put(self, path, json):
+        response = original_put(self, path, json)
+        close_seen['value'] = True
+        return response
+
+    def get(self, path, params=None):
+        if close_seen['value'] and path.endswith('/trades/2'):
+            return DummyResponse(status_code=503)
+        return original_get(self, path, params=params)
+
+    monkeypatch.setattr(AuditClient, 'put', put)
+    monkeypatch.setattr(AuditClient, 'get', get)
+
+    assert broker.list_open_trades() is None
+    assert recorded['closed'] is True
+    output = capsys.readouterr().out
+    assert '"result": "close-fill-confirmed"' in output
+    assert '"detail_state": "unavailable"' in output
+
+
 def test_closed_trade_poll_does_not_clear_persisted_halt(audited_broker):
     broker, recorded = audited_broker
     recorded['trade']['stopLossOrder'] = None
