@@ -249,7 +249,7 @@ def test_startup_unavailable_open_trade_snapshot_retains_halt(audited_broker, mo
     assert '[BROKER][RECOVERY]' not in capsys.readouterr().out
 
 
-def test_startup_unavailable_exact_trade_evidence_never_clears_halt(audited_broker, monkeypatch, capsys):
+def test_startup_unavailable_exact_trade_evidence_closes_but_never_clears_halt(audited_broker, monkeypatch, capsys):
     broker, recorded = audited_broker
     broker._latch_entry_halt('unprotected-open-trade')
     original_get = AuditClient.get
@@ -261,7 +261,11 @@ def test_startup_unavailable_exact_trade_evidence_never_clears_halt(audited_brok
     broker.connectivity_check()
     assert broker.entry_halt_reason == 'protective-stop-audit-unavailable'
     assert broker._entry_halt_path.exists()
-    # Emergency close can be attempted, but unavailable details cannot confirm it.
+    # The authenticated close fill can positively confirm this exact trade was
+    # closed even when the immediate detail read remains unavailable. The
+    # persisted incident must still remain latched until explicit recovery.
     output = capsys.readouterr().out
-    assert 'emergency_close=False' in output
+    assert 'emergency_close=True' in output
+    assert '"result": "close-fill-confirmed"' in output
+    assert '"detail_state": "unavailable"' in output
     assert '[BROKER][RECOVERY]' not in output
