@@ -376,31 +376,132 @@ class Broker:
         return True
 
     def _close_exact_trade(self, client, trade_id: str) -> bool:
+        """Emergency-close one exact trade with bounded transient retries.
+
+        A broker-confirmed close fill is terminal evidence for the requested
+        trade. Detail re-reads are still attempted for diagnostics, but a
+        temporary detail outage must not turn a successful close fill into a
+        false failure. Retry only transport errors, HTTP 429, and 5xx responses;
+        never loop on ordinary 4xx rejections.
+        """
+
         if not _valid_transaction_id(trade_id):
             return False
-        try:
-            close_response = client.put(
-                f"/v3/accounts/{self.account}/trades/{trade_id}/close",
-                json={"units": "ALL"},
+
+        path = f"/v3/accounts/{self.account}/trades/{trade_id}/close"
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                close_response = client.put(path, json={"units": "ALL"})
+            except Exception as exc:
+                retryable = attempt < max_attempts
+                print(
+                    "[BROKER][EMERGENCY-CLOSE] " + json.dumps({
+                        "trade_id": trade_id,
+                        "attempt": attempt,
+                        "result": "transport-error",
+                        "error": type(exc).__name__,
+                        "retrying": retryable,
+                    }, sort_keys=True),
+                    flush=True,
+                )
+                if retryable:
+                    time.sleep(0.15)
+                    continue
+                return False
+
+            status_code = getattr(close_response, "status_code", None)
+            if status_code in (200, 201):
+                try:
+                    payload = close_response.json()
+                except Exception:
+                    payload = None
+                fill = payload.get("orderFillTransaction") if isinstance(payload, dict) else None
+                closed = fill.get("tradesClosed") if isinstance(fill, dict) else None
+                fill_confirmed = isinstance(closed, list) and any(
+                    isinstance(item, dict) and str(item.get("tradeID") or "") == trade_id
+                    for item in closed
+                )
+                if not fill_confirmed:
+                    print(
+                        "[BROKER][EMERGENCY-CLOSE] " + json.dumps({
+                            "trade_id": trade_id,
+                            "attempt": attempt,
+                            "http_status": status_code,
+                            "result": "close-fill-unverified",
+                            "retrying": False,
+                        }, sort_keys=True),
+                        flush=True,
+                    )
+                    return False
+
+                detail_state = "unavailable"
+                try:
+                    trade = read_trade_details(client, self.account, trade_id)
+                    if isinstance(trade, dict) and str(trade.get("id") or "") == trade_id:
+                        detail_state = str(trade.get("state") or "").upper() or "unknown"
+                except Exception:
+                    pass
+                confirmed = detail_state == "CLOSED"
+                print(
+                    "[BROKER][EMERGENCY-CLOSE] " + json.dumps({
+                        "trade_id": trade_id,
+                        "attempt": attempt,
+                        "http_status": status_code,
+                        "result": "close-fill-confirmed",
+                        "detail_state": detail_state,
+                        "detail_confirmed_closed": confirmed,
+                        "retrying": False,
+                    }, sort_keys=True),
+                    flush=True,
+                )
+                # The authenticated broker close fill explicitly names this trade
+                # in tradesClosed, so closure is positively confirmed even when
+                # the immediate detail re-read is temporarily unavailable.
+                return True
+
+            retryable_status = status_code == 429 or (
+                isinstance(status_code, int) and 500 <= status_code <= 599
             )
-            if close_response.status_code not in (200, 201):
-                return False
-            payload = close_response.json()
-            fill = payload.get("orderFillTransaction") if isinstance(payload, dict) else None
-            closed = fill.get("tradesClosed") if isinstance(fill, dict) else None
-            if not isinstance(closed, list) or not any(
-                isinstance(item, dict) and str(item.get("tradeID") or "") == trade_id
-                for item in closed
-            ):
-                return False
-            trade = read_trade_details(client, self.account, trade_id)
-            return (
+            retrying = retryable_status and attempt < max_attempts
+            print(
+                "[BROKER][EMERGENCY-CLOSE] " + json.dumps({
+                    "trade_id": trade_id,
+                    "attempt": attempt,
+                    "http_status": status_code,
+                    "result": "close-http-failure",
+                    "retrying": retrying,
+                }, sort_keys=True),
+                flush=True,
+            )
+            if retrying:
+                time.sleep(0.15)
+                continue
+
+            # A non-successful close can race a broker-side close. Confirm that
+            # terminal state once before declaring failure, but never infer it.
+            try:
+                trade = read_trade_details(client, self.account, trade_id)
+            except Exception:
+                trade = None
+            if (
                 isinstance(trade, dict)
                 and str(trade.get("id") or "") == trade_id
                 and str(trade.get("state") or "").upper() == "CLOSED"
-            )
-        except Exception:
+            ):
+                print(
+                    "[BROKER][EMERGENCY-CLOSE] " + json.dumps({
+                        "trade_id": trade_id,
+                        "attempt": attempt,
+                        "http_status": status_code,
+                        "result": "already-closed-confirmed",
+                        "retrying": False,
+                    }, sort_keys=True),
+                    flush=True,
+                )
+                return True
             return False
+        return False
 
     def _audit_open_trade_protection(self, client, trades: list) -> Optional[list]:
         """Return the audited snapshot, refreshing once after verified closure.
