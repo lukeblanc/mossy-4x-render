@@ -15,6 +15,21 @@ A missing stop, a cancelled/mismatched stop, unavailable broker evidence, and a
 valid stop above the cash-risk limit are distinct conditions. Only selected
 fields are logged; account IDs, credentials and raw broker responses are excluded.
 
+If a trade detail read raises, `[BROKER][TRADE-READ-FAILURE]` now records the
+validated trade ID, read stage, a finite failure category, and the numeric HTTP
+status when observed. It distinguishes timeout, transport, HTTP, invalid JSON,
+and unexpected failures without printing exception text or request/response data.
+Stages distinguish the direct detail read, exact-ID list fallback, and transaction
+closure fallback. The transaction fallback does not expose its internal response
+status; a non-transport/non-JSON failure there remains `unexpected` with a null
+HTTP status. Null status always means unavailable, never success.
+
+These diagnostics do not retry reads, accept weaker protection evidence, change
+emergency closure, or clear a halt. They do not retroactively establish why an
+older incident failed. A diagnostic-only deployment cannot resume a retained
+halt; exact incident reconciliation and separately approved recovery are still
+required.
+
 The legacy `unprotected-open-trade` latch category is retained for compatibility.
 It does not, by itself, prove that a stop was missing. The cash-risk diagnostic
 includes stop ID, units, entry/stop prices, current loss-side conversion factor,
