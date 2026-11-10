@@ -26,7 +26,8 @@ STATUS_KEY_ENV = "MOSSY_MCP_STATUS_KEY"
 STATUS_STALE_SECONDS = 900
 LEARNING_STALE_SECONDS = 7_200
 FUTURE_TOLERANCE_SECONDS = 60
-SUPERVISOR_EQUITY_FLOOR_AUD = 5_000.0
+SUPERVISOR_EQUITY_FLOOR_AUD = 500.0
+LEGACY_SUPERVISOR_EQUITY_FLOOR_AUD = 5_000.0
 LEARNING_SCHEMA_VERSION = "mossy.learning-review.v1"
 LEARNING_REGISTRY_VERSION = "mossy-shadow-registry.v1"
 LEARNING_DEFINITION_VERSION = "shadow-filter.v1"
@@ -177,6 +178,12 @@ class RuntimeHeartbeat(BaseModel):
         "order-transport-state-uncertain",
         "other",
     ] | None = None
+    # Legacy workers omit these fields. Their advisory floor remains 5,000;
+    # a new worker reports its actual enforced demo floor and persistent latch.
+    demo_equity_floor_aud: float | None = Field(
+        default=None, ge=500.0, strict=True, allow_inf_nan=False
+    )
+    demo_equity_floor_halted: bool | None = Field(default=None, strict=True)
     revision: str = Field(min_length=1, max_length=120)
 
     @model_validator(mode="after")
@@ -186,6 +193,13 @@ class RuntimeHeartbeat(BaseModel):
                 raise ValueError("a confirmed broker halt requires a bounded reason")
         elif self.broker_entry_halt_reason is not None:
             raise ValueError("a broker halt reason requires a confirmed halt")
+        if self.demo_equity_floor_aud is not None or self.demo_equity_floor_halted is not None:
+            if self.demo_equity_floor_aud is None or self.demo_equity_floor_halted is None:
+                raise ValueError("demo equity floor and halt flag must be supplied together")
+            if self.mode.lower() != "demo" or self.oanda_environment.lower() != "practice":
+                raise ValueError("demo equity floor requires demo/practice mode")
+            if self.demo_equity_floor_halted and not self.supervisor_floor_breached:
+                raise ValueError("a latched demo equity floor must block supervision")
         return self
 
 
@@ -599,9 +613,17 @@ def _runtime_supervision(snapshot: dict | None) -> dict:
             f"Broker entries are halted: {payload['broker_entry_halt_reason']}."
         )
     if payload["supervisor_floor_breached"]:
-        blockers.append(
-            f"The AUD {SUPERVISOR_EQUITY_FLOOR_AUD:,.0f} supervisory equity floor is breached."
-        )
+        floor = payload["demo_equity_floor_aud"]
+        if payload["demo_equity_floor_halted"] is True:
+            blockers.append(
+                f"The AUD {floor:,.0f} demo equity floor stop is latched; "
+                "entries remain blocked until an authorised reset."
+            )
+        else:
+            floor = floor if floor is not None else LEGACY_SUPERVISOR_EQUITY_FLOOR_AUD
+            blockers.append(
+                f"The AUD {floor:,.0f} supervisory equity floor is breached."
+            )
 
     return {
         "bridge_status": "ok",
@@ -1219,6 +1241,7 @@ async def runtime_heartbeat_capabilities(request: Request) -> Response:
     return JSONResponse({
         "optional_heartbeat_fields": [
             "broker_entry_halted", "broker_entry_halt_reason",
+            "demo_equity_floor_aud", "demo_equity_floor_halted",
         ],
     })
 

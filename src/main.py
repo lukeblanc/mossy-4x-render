@@ -53,7 +53,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.broker import Broker, normalize_distance, opened_trade_fill
+from app.broker import PRACTICE, Broker, normalize_distance, opened_trade_fill
 from app.health import watchdog
 from src.decision_engine import DEFAULT_INSTRUMENTS, DecisionEngine, Evaluation
 from src.risk_manager import RiskManager
@@ -645,6 +645,13 @@ risk = build_risk_manager(
     demo_mode=(mode_env == "demo"),
     state_dir=DATA_DIR,
 )
+if mode_env == "demo":
+    print(
+        f"[DEMO-EQUITY-STOP] floor_aud={risk.demo_equity_floor_aud:.2f} "
+        f"latched={risk.state.demo_halted_on_equity_floor}; "
+        "new entries stop at the floor and the halt survives restarts",
+        flush=True,
+    )
 
 
 def _entry_window_state(now_utc: datetime) -> str:
@@ -666,6 +673,12 @@ async def heartbeat() -> None:
 
     ts_local = now_utc.astimezone().isoformat()
     equity = broker.account_equity()
+    # The equity stop protects existing exposure even outside entry sessions.
+    # A latched stop must keep retrying verified flattening if NAV is unavailable.
+    if mode_env == "demo" and risk.demo_mode:
+        risk.enforce_equity_floor(
+            now_utc, equity, close_all_cb=_close_demo_positions_and_verify
+        )
     open_snapshot = _open_trades_state(force_refresh=False)
     open_count = len(open_snapshot) if open_snapshot is not None else None
 
@@ -770,6 +783,16 @@ async def heartbeat() -> None:
         last_verified_entry_age_bucket=last_verified_entry_age_bucket,
         broker_entry_halted=health["broker_entry_halted"],
         broker_entry_halt_reason=health["broker_entry_halt_reason"],
+        demo_equity_floor_aud=(
+            risk.demo_equity_floor_aud
+            if mode_env == "demo" and oanda_env == "practice" and risk.demo_mode
+            else None
+        ),
+        demo_equity_floor_halted=(
+            risk.state.demo_halted_on_equity_floor
+            if mode_env == "demo" and oanda_env == "practice" and risk.demo_mode
+            else None
+        ),
         observed_at=now_utc,
     )
     configured_session_active = entry_window_state == "in_configured_session"
@@ -1000,7 +1023,12 @@ def _startup_checks() -> None:
         equity = broker.account_equity()
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[STARTUP-RESET][WARN] Unable to fetch equity for reset: {exc}", flush=True)
-        return
+        equity = None
+
+    if mode_env == "demo" and risk.demo_mode:
+        risk.enforce_equity_floor(
+            _utc_now(), equity, close_all_cb=_close_demo_positions_and_verify
+        )
 
     if equity is None:
         print("[STARTUP-RESET][WARN] Equity unavailable; startup resets skipped.", flush=True)
@@ -1088,6 +1116,37 @@ def _open_trades_state(*, force_refresh: bool = True) -> List[Dict] | None:
         _LAST_OPEN_TRADES_TS = None
         print(f"[TRADE][WARN] Unable to refresh open trades: {exc}", flush=True)
         return None
+
+
+def _close_demo_positions_and_verify() -> bool:
+    """Flatten only the explicit practice account, then require a fresh flat read.
+
+    close_all_positions is best effort. Its return alone is never confirmation;
+    failures keep the independent demo equity stop latched for the next check.
+    """
+    if (
+        mode_env != "demo"
+        or oanda_env != "practice"
+        or getattr(broker, "mode", None) != "demo"
+        or getattr(broker, "base_url", None) != PRACTICE
+    ):
+        print("[DEMO-EQUITY-STOP][ERROR] Practice/demo execution context unverified; stop retained.", flush=True)
+        return False
+    try:
+        broker.close_all_positions()
+        remaining = _open_trades_state(force_refresh=True)
+    except Exception as exc:
+        print(
+            f"[DEMO-EQUITY-STOP][WARN] Flatten verification failed: {type(exc).__name__}; stop retained.",
+            flush=True,
+        )
+        return False
+    confirmed_flat = isinstance(remaining, list) and not remaining
+    print(
+        f"[DEMO-EQUITY-STOP] flat_confirmed={confirmed_flat}; new entries remain halted",
+        flush=True,
+    )
+    return confirmed_flat
 
 
 def _trade_identifier(trade: Dict) -> str | None:
@@ -1468,14 +1527,19 @@ async def decision_cycle() -> None:
     pending_observation_reason = "cycle-ended-before-evaluation"
     try:
         equity = broker.account_equity()
+        try:
+            close_all_cb = (
+                _close_demo_positions_and_verify
+                if mode_env == "demo" and risk.demo_mode
+                else broker.close_all_positions
+            )
+            risk.enforce_equity_floor(now_utc, equity, close_all_cb=close_all_cb)
+        except AttributeError:
+            pass
         if equity is None:
             watchdog.record_error()
             print("[TRADE][WARN] Broker equity unavailable; trading cycle skipped.", flush=True)
             return
-        try:
-            risk.enforce_equity_floor(now_utc, equity, close_all_cb=broker.close_all_positions)
-        except AttributeError:
-            pass
         evaluations = engine.evaluate_all()
         observation_drafts = [
             _new_decision_observation_draft(evaluation, now_utc)

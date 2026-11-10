@@ -405,6 +405,7 @@ def test_heartbeat_capability_route_is_authenticated_and_read_only(bridge, monke
         assert response.status_code == 200
         assert response.json() == {"optional_heartbeat_fields": [
             "broker_entry_halted", "broker_entry_halt_reason",
+            "demo_equity_floor_aud", "demo_equity_floor_halted",
         ]}
         assert bridge.load_runtime_heartbeat() is None
         monkeypatch.delenv("MOSSY_MCP_STATUS_KEY")
@@ -457,6 +458,87 @@ def test_bridge_rejects_ambiguous_or_unbounded_halt_telemetry(bridge, halt_field
             "/internal/runtime-heartbeat",
             headers={"Authorization": "Bearer unit-test-secret"},
             json={**_heartbeat(), **halt_fields},
+        )
+    assert response.status_code == 422
+    assert bridge.load_runtime_heartbeat() is None
+
+
+def _demo_stop_heartbeat(**overrides):
+    payload = {
+        **_heartbeat(), "broker_entry_halted": False,
+        "demo_equity_floor_aud": 500.0, "demo_equity_floor_halted": False,
+        "supervisor_floor_breached": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize("halted,breached,expected", [
+    (False, False, None),
+    (False, True, "The AUD 500 supervisory equity floor is breached."),
+    (True, True, "The AUD 500 demo equity floor stop is latched"),
+])
+def test_demo_stop_reports_configured_floor_and_persistent_latch(bridge, halted, breached, expected):
+    payload = _demo_stop_heartbeat(
+        demo_equity_floor_halted=halted, supervisor_floor_breached=breached,
+    )
+    with TestClient(bridge.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/internal/runtime-heartbeat",
+            headers={"Authorization": "Bearer unit-test-secret"}, json=payload,
+        )
+    assert response.status_code == 202
+    result = bridge.get_runtime_health()
+    assert result["runtime"]["demo_equity_floor_aud"] == 500.0
+    assert result["runtime"]["demo_equity_floor_halted"] is halted
+    if expected:
+        assert result["supervisor_status"] == "BLOCKED"
+        assert any(expected in blocker for blocker in result["blockers"])
+    else:
+        assert result["supervisor_status"] == "READY_FOR_REVIEW"
+        assert result["blockers"] == []
+    assert "equity" not in result["runtime"]
+
+
+def test_legacy_supervisor_warning_keeps_its_original_floor(bridge):
+    payload = {**_heartbeat(), "broker_entry_halted": False}
+    bridge.save_runtime_heartbeat(payload)
+    result = bridge.get_runtime_health()
+    assert "The AUD 5,000 supervisory equity floor is breached." in result["blockers"]
+    assert result["runtime"]["demo_equity_floor_aud"] is None
+    assert result["runtime"]["demo_equity_floor_halted"] is None
+    assert bridge.get_algo_guardrails()["supervisor_equity_floor_aud"] == 500.0
+
+
+@pytest.mark.parametrize("overrides", [
+    {"demo_equity_floor_aud": 499.99},
+    {"demo_equity_floor_aud": 0},
+    {"demo_equity_floor_aud": True},
+    {"demo_equity_floor_aud": "500"},
+    {"demo_equity_floor_aud": float("nan")},
+    {"demo_equity_floor_aud": float("inf")},
+    {"demo_equity_floor_aud": None},
+    {"demo_equity_floor_halted": None},
+    {"demo_equity_floor_halted": 0},
+    {"demo_equity_floor_halted": 1},
+    {"demo_equity_floor_halted": "false"},
+    {"demo_equity_floor_halted": True, "supervisor_floor_breached": False},
+    {"mode": "live"},
+    {"oanda_environment": "live"},
+])
+def test_bridge_rejects_ambiguous_or_unapproved_demo_stop_telemetry(bridge, overrides):
+    with pytest.raises(ValueError):
+        bridge.RuntimeHeartbeat.model_validate(_demo_stop_heartbeat(**overrides))
+
+
+@pytest.mark.parametrize("missing", ["demo_equity_floor_aud", "demo_equity_floor_halted"])
+def test_bridge_rejects_incomplete_new_demo_stop_pair(bridge, missing):
+    payload = _demo_stop_heartbeat()
+    payload.pop(missing)
+    with TestClient(bridge.app, base_url="http://localhost") as client:
+        response = client.post(
+            "/internal/runtime-heartbeat",
+            headers={"Authorization": "Bearer unit-test-secret"}, json=payload,
         )
     assert response.status_code == 422
     assert bridge.load_runtime_heartbeat() is None

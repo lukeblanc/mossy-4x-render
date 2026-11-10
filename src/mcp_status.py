@@ -47,6 +47,9 @@ BROKER_ENTRY_HALT_REASONS = frozenset(
 BROKER_HALT_TELEMETRY_FIELDS = frozenset(
     {"broker_entry_halted", "broker_entry_halt_reason"}
 )
+DEMO_EQUITY_TELEMETRY_FIELDS = frozenset(
+    {"demo_equity_floor_aud", "demo_equity_floor_halted"}
+)
 
 _last_success_monotonic: float | None = None
 _last_success_fingerprint: str | None = None
@@ -110,6 +113,8 @@ def build_runtime_heartbeat(
     last_verified_entry_age_bucket: str,
     broker_entry_halted: bool | None = None,
     broker_entry_halt_reason: str | None = None,
+    demo_equity_floor_aud: float | None = None,
+    demo_equity_floor_halted: bool | None = None,
     observed_at: datetime | None = None,
     supervisor_equity_floor_aud: float = DEFAULT_SUPERVISOR_EQUITY_FLOOR_AUD,
     freshness_seconds: float = DEFAULT_FRESHNESS_SECONDS,
@@ -117,7 +122,8 @@ def build_runtime_heartbeat(
     """Build a deliberately sanitised monitoring payload.
 
     Exact equity, account identifiers, orders, signals, and credentials are never
-    included. The equity floor is represented only as a boolean safety condition.
+    included. Only a configured demo floor and its bounded halt flag may be
+    included; neither discloses the account's exact equity.
     """
 
     timestamp = observed_at or datetime.now(timezone.utc)
@@ -127,10 +133,31 @@ def build_runtime_heartbeat(
         equity_value = float(equity) if equity is not None else None
     except (TypeError, ValueError):
         equity_value = None
+    demo_floor_fields = {}
+    if demo_equity_floor_aud is not None or demo_equity_floor_halted is not None:
+        if (
+            type(demo_equity_floor_aud) not in {int, float}
+            or not math.isfinite(demo_equity_floor_aud)
+            or demo_equity_floor_aud < 500.0
+        ):
+            raise ValueError("invalid demo equity floor")
+        if type(demo_equity_floor_halted) is not bool:
+            raise ValueError("invalid demo equity floor halt flag")
+        if mode.strip().lower() != "demo" or oanda_environment.strip().lower() != "practice":
+            raise ValueError("demo equity floor requires demo/practice mode")
+        demo_floor_fields = {
+            "demo_equity_floor_aud": float(demo_equity_floor_aud),
+            "demo_equity_floor_halted": demo_equity_floor_halted,
+        }
     floor_breached = (
         equity_value is None
         or not math.isfinite(equity_value)
-        or equity_value < float(supervisor_equity_floor_aud)
+        or (
+            equity_value <= demo_equity_floor_aud
+            if demo_floor_fields
+            else equity_value < float(supervisor_equity_floor_aud)
+        )
+        or demo_equity_floor_halted is True
     )
     normalized_entry_window = str(entry_window_state).strip().lower()
     if normalized_entry_window not in ENTRY_WINDOW_STATES:
@@ -169,6 +196,7 @@ def build_runtime_heartbeat(
         "broker_entry_halted": broker_entry_halted,
         "broker_entry_halt_reason": bounded_halt_reason,
         "revision": revision,
+        **demo_floor_fields,
     }
 
 
@@ -211,7 +239,12 @@ async def publish_runtime_heartbeat(
     try:
         async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
             headers = {"Authorization": f"Bearer {key}"}
+            required_fields = set()
             if BROKER_HALT_TELEMETRY_FIELDS.intersection(payload):
+                required_fields.update(BROKER_HALT_TELEMETRY_FIELDS)
+            if DEMO_EQUITY_TELEMETRY_FIELDS.intersection(payload):
+                required_fields.update(DEMO_EQUITY_TELEMETRY_FIELDS)
+            if required_fields:
                 # Never strip safety telemetry to satisfy an older bridge.
                 # Unsupported bridges must fail closed until separately upgraded.
                 capability_response = await client.get(url, headers=headers)
@@ -231,7 +264,7 @@ async def publish_runtime_heartbeat(
                     or not all(isinstance(field, str) for field in fields)
                 ):
                     return False, "invalid-heartbeat-capabilities"
-                if not BROKER_HALT_TELEMETRY_FIELDS.issubset(fields):
+                if not required_fields.issubset(fields):
                     return False, "unsupported-heartbeat-capabilities"
             response = await client.post(
                 url,
