@@ -77,6 +77,7 @@ class RiskState:
     last_trades: list = field(default_factory=list)
     has_hit_weekly_target: bool = False
     live_halted_on_equity_floor: bool = False
+    demo_halted_on_equity_floor: bool = False
     max_drawdown_halt: bool = False
     daily_profit_cap_hit: bool = False
     daily_loss_cap_hit: bool = False
@@ -104,6 +105,7 @@ class RiskState:
             "last_trades": list(self.last_trades),
             "has_hit_weekly_target": self.has_hit_weekly_target,
             "live_halted_on_equity_floor": self.live_halted_on_equity_floor,
+            "demo_halted_on_equity_floor": self.demo_halted_on_equity_floor,
             "max_drawdown_halt": self.max_drawdown_halt,
             "daily_profit_cap_hit": self.daily_profit_cap_hit,
             "daily_loss_cap_hit": self.daily_loss_cap_hit,
@@ -134,6 +136,9 @@ class RiskState:
             has_hit_weekly_target=bool(data.get("has_hit_weekly_target", False)),
             live_halted_on_equity_floor=bool(
                 data.get("live_halted_on_equity_floor", False)
+            ),
+            demo_halted_on_equity_floor=bool(
+                data.get("demo_halted_on_equity_floor", False)
             ),
             max_drawdown_halt=bool(data.get("max_drawdown_halt", False)),
             daily_profit_cap_hit=bool(data.get("daily_profit_cap_hit", False)),
@@ -182,6 +187,18 @@ class RiskManager:
             self.config.get("allow_trading_above_target", True)
         )
         self.equity_floor = float(self.config.get("equity_floor", 1000.0))
+        self.demo_equity_floor_aud = 500.0
+        if self.demo_mode and self.mode != "live":
+            configured_demo_floor = os.getenv(
+                "DEMO_EQUITY_FLOOR_AUD",
+                self.config.get("demo_equity_floor_aud", 500.0),
+            )
+            try:
+                self.demo_equity_floor_aud = float(configured_demo_floor)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Demo equity floor must be finite and at least AUD 500") from exc
+            if not math.isfinite(self.demo_equity_floor_aud) or self.demo_equity_floor_aud < 500.0:
+                raise ValueError("Demo equity floor must be finite and at least AUD 500")
         self.risk_per_trade_pct = float(
             self.config.get("risk_per_trade_pct", 0.005)
         )
@@ -307,12 +324,42 @@ class RiskManager:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _demo_equity_floor_halted(self, equity: Optional[float]) -> bool:
+        """Latch the separately approved demo floor without clearing any halt."""
+        if not self.demo_mode or self.mode == "live":
+            return False
+        valid_equity = _sanitize_equity(equity)
+        if (
+            valid_equity is not None
+            and valid_equity <= self.demo_equity_floor_aud
+            and not self.state.demo_halted_on_equity_floor
+        ):
+            self.state.demo_halted_on_equity_floor = True
+            self._save_state()
+        return self.state.demo_halted_on_equity_floor
+
     def enforce_equity_floor(
         self,
         now_utc: datetime,
-        equity: float,
-        close_all_cb: Callable[[], None],
+        equity: Optional[float],
+        close_all_cb: Callable[[], object],
     ) -> None:
+        if self._demo_equity_floor_halted(equity):
+            # Persist before attempting protection. A failed disk write must
+            # block entries, but must not keep existing demo exposure open.
+            if self._state_save_failed:
+                self._save_state()
+            try:
+                if close_all_cb() is not True:
+                    print("[RISK][DEMO-FLOOR] Flat account unconfirmed; entries remain halted.", flush=True)
+            except Exception as exc:
+                print(
+                    f"[RISK][DEMO-FLOOR] Protective close failed: {type(exc).__name__}; entries remain halted.",
+                    flush=True,
+                )
+            # Even verified flat does not authorize clearing this durable halt.
+            # The callback is safe to repeat and must independently verify flat.
+            return
         if _sanitize_equity(equity) is None:
             return
         self._rollover(now_utc, equity)
@@ -359,6 +406,10 @@ class RiskManager:
             self._save_state()
             if self._state_save_failed:
                 return False, "risk-state-unwritable"
+        if self._demo_equity_floor_halted(equity):
+            if self._state_save_failed:
+                return False, "risk-state-unwritable"
+            return False, "demo-equity-floor"
         if _sanitize_equity(equity) is None:
             return False, "equity-unavailable"
         if open_positions is None:

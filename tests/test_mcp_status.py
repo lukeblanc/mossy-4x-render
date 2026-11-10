@@ -326,6 +326,107 @@ def _capabilities():
     return {"optional_heartbeat_fields": sorted(mcp_status.BROKER_HALT_TELEMETRY_FIELDS)}
 
 
+def _demo_floor_heartbeat(**overrides):
+    kwargs = {
+        "service_status": "running", "mode": "demo", "oanda_environment": "practice",
+        "scheduler_alive": True, "last_cycle_age_sec": 1.0,
+        "last_broker_sync_age_sec": 1.0, "open_trades_count": 0, "equity": 1_000.0,
+        "revision": "test", "entry_window_state": "off_session",
+        "last_verified_entry_age_bucket": "never", "broker_entry_halted": False,
+        "demo_equity_floor_aud": 500.0, "demo_equity_floor_halted": False,
+    }
+    kwargs.update(overrides)
+    return build_runtime_heartbeat(**kwargs)
+
+
+@pytest.mark.parametrize("equity,halted,expected", [
+    (501.0, False, False),
+    (500.0, False, True),
+    (499.0, False, True),
+    (1_000.0, True, True),
+    (None, False, True),
+])
+def test_demo_floor_reports_actual_boundary_and_persistent_halt(equity, halted, expected):
+    payload = _demo_floor_heartbeat(equity=equity, demo_equity_floor_halted=halted)
+    assert payload["supervisor_floor_breached"] is expected
+    assert payload["demo_equity_floor_aud"] == 500.0
+    assert payload["demo_equity_floor_halted"] is halted
+    assert "equity" not in payload
+    assert "account" not in payload
+
+
+def test_legacy_heartbeat_omits_new_demo_floor_fields():
+    payload = _halt_heartbeat()
+    assert not mcp_status.DEMO_EQUITY_TELEMETRY_FIELDS.intersection(payload)
+
+
+@pytest.mark.parametrize("floor", [None, 0, 499.99, -1, True, "500", float("nan"), float("inf")])
+def test_demo_floor_rejects_invalid_or_unapproved_threshold(floor):
+    with pytest.raises(ValueError, match="demo equity floor"):
+        _demo_floor_heartbeat(demo_equity_floor_aud=floor)
+
+
+@pytest.mark.parametrize("halted", [None, 0, 1, "false", "true"])
+def test_demo_floor_halt_requires_strict_boolean(halted):
+    with pytest.raises(ValueError, match="halt flag"):
+        _demo_floor_heartbeat(demo_equity_floor_halted=halted)
+
+
+@pytest.mark.parametrize("mode,environment", [("live", "practice"), ("demo", "live")])
+def test_demo_floor_is_not_reused_for_a_live_account(mode, environment):
+    with pytest.raises(ValueError, match="demo/practice"):
+        _demo_floor_heartbeat(mode=mode, oanda_environment=environment)
+
+
+def test_demo_floor_threshold_and_latch_changes_are_part_of_fingerprint():
+    baseline = _demo_floor_heartbeat()
+    for changed in (
+        _demo_floor_heartbeat(demo_equity_floor_halted=True),
+        _demo_floor_heartbeat(demo_equity_floor_aud=700.0),
+    ):
+        assert mcp_status._safety_fingerprint(changed) != mcp_status._safety_fingerprint(baseline)
+
+
+@pytest.mark.anyio
+async def test_new_demo_stop_telemetry_never_downgrades_for_an_old_bridge(heartbeat_transport):
+    upgraded = False
+
+    def handler(request):
+        if request.method == "GET":
+            fields = set(mcp_status.BROKER_HALT_TELEMETRY_FIELDS)
+            if upgraded:
+                fields.update(mcp_status.DEMO_EQUITY_TELEMETRY_FIELDS)
+            return httpx.Response(200, json={"optional_heartbeat_fields": sorted(fields)})
+        return httpx.Response(202)
+
+    requests = heartbeat_transport(handler)
+    payload = _demo_floor_heartbeat(demo_equity_floor_halted=True)
+    original = payload.copy()
+    assert await publish_runtime_heartbeat(payload) == (False, "unsupported-heartbeat-capabilities")
+    assert [request.method for request in requests] == ["GET"]
+    assert payload == original
+    assert mcp_status._last_success_monotonic is None
+
+    upgraded = True
+    assert await publish_runtime_heartbeat(payload) == (True, "sent")
+    assert [request.method for request in requests] == ["GET", "GET", "POST"]
+    assert json.loads(requests[-1].content) == original
+    assert "equity" not in json.loads(requests[-1].content)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("missing", sorted(mcp_status.DEMO_EQUITY_TELEMETRY_FIELDS))
+async def test_bridge_must_advertise_both_demo_stop_fields(heartbeat_transport, missing):
+    fields = (mcp_status.BROKER_HALT_TELEMETRY_FIELDS | mcp_status.DEMO_EQUITY_TELEMETRY_FIELDS) - {missing}
+    requests = heartbeat_transport(lambda request: httpx.Response(
+        200, json={"optional_heartbeat_fields": sorted(fields)}
+    ))
+    assert await publish_runtime_heartbeat(_demo_floor_heartbeat()) == (
+        False, "unsupported-heartbeat-capabilities",
+    )
+    assert len(requests) == 1
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("monitoring_active", [False, True])
 async def test_unchanged_halt_is_refreshed_before_bridge_expires(
