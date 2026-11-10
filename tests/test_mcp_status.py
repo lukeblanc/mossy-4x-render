@@ -327,6 +327,38 @@ def _capabilities():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("monitoring_active", [False, True])
+async def test_unchanged_halt_is_refreshed_before_bridge_expires(
+    heartbeat_transport, monkeypatch, monitoring_active
+):
+    requests = heartbeat_transport(lambda request: (
+        httpx.Response(200, json=_capabilities())
+    ) if request.method == "GET" else httpx.Response(202))
+    payload = _halt_heartbeat(
+        broker_entry_halted=True,
+        broker_entry_halt_reason="protective-stop-audit-unavailable",
+    )
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 100.0)
+    assert await publish_runtime_heartbeat(
+        payload, monitoring_active=monitoring_active
+    ) == (True, "sent")
+
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 699.0)
+    assert await publish_runtime_heartbeat(
+        payload, monitoring_active=monitoring_active
+    ) == (False, "throttled")
+    assert len(requests) == 2
+
+    monkeypatch.setattr(mcp_status.time, "monotonic", lambda: 700.0)
+    updated = {**payload, "observed_at": "2026-11-10T06:10:00+00:00"}
+    assert await publish_runtime_heartbeat(
+        updated, monitoring_active=monitoring_active
+    ) == (True, "sent")
+    assert [request.method for request in requests] == ["GET", "POST", "GET", "POST"]
+    assert json.loads(requests[-1].content) == updated
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("halted", [None, False, True])
 async def test_publish_preserves_bounded_halt_and_health_telemetry(heartbeat_transport, halted):
     requests = heartbeat_transport(lambda request: (

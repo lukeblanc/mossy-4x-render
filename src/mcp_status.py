@@ -11,10 +11,11 @@ import httpx
 
 DEFAULT_SUPERVISOR_EQUITY_FLOOR_AUD = 5_000.0
 DEFAULT_FRESHNESS_SECONDS = 180.0
-# Keep the free bridge warm only while Mossy can act (or has an open trade).
-# Outside those periods the bridge may sleep; missing telemetry fails closed.
+# Both intervals must stay below the bridge's 15-minute freshness limit.
+# Off-session monitoring still needs a current halt state and revision for
+# read-only learning review. Stale/missing delivery continues to fail closed.
 ACTIVE_PUBLISH_INTERVAL_SECONDS = 600.0
-IDLE_PUBLISH_INTERVAL_SECONDS = 14_400.0
+IDLE_PUBLISH_INTERVAL_SECONDS = 600.0
 
 ENTRY_WINDOW_STATES = frozenset(
     {"weekend_locked", "in_configured_session", "off_session"}

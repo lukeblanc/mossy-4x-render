@@ -109,3 +109,11 @@ failures are not downgraded or treated as successful delivery.
 No new credential or status destination is introduced. The capability endpoint
 reports field support only; it cannot clear a latch or submit a trade. Both bridge
 and worker changes require their own approved rollout; this patch deploys neither.
+
+The worker publishes unchanged runtime state every ten minutes, including when
+off-session or halted. Previously its four-hour idle interval exceeded the
+bridge's fifteen-minute freshness limit, making a healthy transport appear stale
+and preventing revision validation for learning reviews. State changes still
+publish immediately; failed delivery is never marked successful. This changes
+monitoring traffic only: sessions, entry halts, risk limits and evidence freshness
+requirements remain unchanged. A fresh heartbeat is not clearance to trade.
