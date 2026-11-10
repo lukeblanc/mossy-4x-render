@@ -82,6 +82,7 @@ from src.mcp_status import (
 )
 from src.learning_review import build_learning_review, publish_learning_review
 from src.learning_cohort import DEFAULT_LEARNING_COHORT_START_UTC
+from src.demo_trade_handoff import build_demo_trade_handoff
 from src.risk_setup import (
     build_profit_protection,
     build_risk_manager,
@@ -679,7 +680,9 @@ async def heartbeat() -> None:
         risk.enforce_equity_floor(
             now_utc, equity, close_all_cb=_close_demo_positions_and_verify
         )
-    open_snapshot = _open_trades_state(force_refresh=False)
+    # This one read supplies both health and the private, identity-bound handoff.
+    # Do not stamp a cached aggregate snapshot as fresh per-trade evidence.
+    open_snapshot = _open_trades_state(force_refresh=True)
     open_count = len(open_snapshot) if open_snapshot is not None else None
 
     journal_path = journal.path
@@ -729,6 +732,9 @@ async def heartbeat() -> None:
         "broker_entry_halted": health["broker_entry_halted"],
         "broker_entry_halt_reason": health["broker_entry_halt_reason"],
     })
+    _log_private_demo_trade_handoff(
+        open_snapshot, _utc_now(), broker_entry_halted=health["broker_entry_halted"]
+    )
 
     log_cycle_event(
         "INFO",
@@ -1147,6 +1153,49 @@ def _close_demo_positions_and_verify() -> bool:
         flush=True,
     )
     return confirmed_flat
+
+
+def _log_private_demo_trade_handoff(
+    open_snapshot: list | None,
+    observed_at: datetime,
+    *,
+    broker_entry_halted: bool | None,
+) -> dict | None:
+    """Log only allowlisted demo evidence to authenticated Render service logs.
+
+    This object must never enter BOT_STATE, the public status route or the
+    aggregate MCP publisher. Reading it cannot create a destination order.
+    """
+    if mode_env != "demo" or oanda_env != "practice":
+        return None
+    evidence = None
+    try:
+        getter = getattr(broker, "demo_trade_handoff_evidence", None)
+        candidate = getter() if callable(getter) else None
+        if isinstance(candidate, dict):
+            evidence = candidate
+    except Exception as exc:
+        print(
+            f"[DEMO_TRADE_HANDOFF_READ][WARN] error_type={type(exc).__name__}; evidence unavailable",
+            flush=True,
+        )
+    source = evidence or {}
+    payload = build_demo_trade_handoff(
+        open_trades=open_snapshot,
+        trade_details=source.get("trade_details"),
+        protection_audited=evidence is not None,
+        mode=mode_env,
+        oanda_environment=oanda_env,
+        account_currency=source.get("account_currency"),
+        revision=_runtime_revision(),
+        demo_equity_floor_aud=getattr(risk, "demo_equity_floor_aud", None),
+        snapshot_observed_at=source.get("broker_observed_at_utc"),
+        observed_at=observed_at,
+        broker_entry_halted=broker_entry_halted,
+        demo_equity_floor_halted=getattr(getattr(risk, "state", None), "demo_halted_on_equity_floor", None),
+    )
+    print("[DEMO_TRADE_HANDOFF] " + json.dumps(payload, sort_keys=True, allow_nan=False), flush=True)
+    return payload
 
 
 def _trade_identifier(trade: Dict) -> str | None:
