@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from datetime import datetime, timezone
+from copy import deepcopy
 import math
 import json
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Dict, Literal, Optional
 
@@ -172,9 +174,78 @@ class Broker:
         self._entry_halted_reason: Optional[str] = persisted_halt or None
         self._account_currency: Optional[str] = None
         self._loss_conversion_cache: dict[tuple[str, str], tuple[float, float]] = {}
+        self._demo_trade_evidence_lock = threading.RLock()
+        self._demo_trade_evidence_local = threading.local()
+        self._demo_trade_evidence_generation = 0
+        self._demo_trade_evidence = None
+        self._demo_trade_evidence_scope = None
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=15.0)
+
+    def _demo_evidence_lock(self):
+        # Some diagnostic/test brokers are constructed without __init__.
+        return self.__dict__.setdefault("_demo_trade_evidence_lock", threading.RLock())
+
+    def _demo_evidence_scope(self) -> tuple:
+        # Kept internally only; the account identifier is never part of evidence.
+        return (getattr(self, "account", None), getattr(self, "mode", None),
+                getattr(self, "base_url", None))
+
+    def _invalidate_demo_trade_evidence(self) -> int:
+        with self._demo_evidence_lock():
+            generation = getattr(self, "_demo_trade_evidence_generation", 0) + 1
+            self._demo_trade_evidence_generation = generation
+            self._demo_trade_evidence = None
+            self._demo_trade_evidence_scope = None
+            return generation
+
+    def _active_demo_evidence_read(self) -> Optional[dict]:
+        local = getattr(self, "_demo_trade_evidence_local", None)
+        return getattr(local, "read", None)
+
+    @staticmethod
+    def _allowlisted_demo_trade_detail(trade: dict) -> dict:
+        """Keep exact scalar fields needed by a private, read-only handoff.
+
+        Presence is preserved, including invalid/null values for the consumer to
+        reject. Unrelated broker fields and nested data are never retained.
+        """
+        def scalar(value):
+            return value if value is None or type(value) in (str, int, float, bool) else None
+
+        detail = {
+            key: scalar(trade[key])
+            for key in ("id", "instrument", "state", "currentUnits", "price", "openTime")
+            if key in trade
+        }
+        for key in ("stopLossOrder", "guaranteedStopLossOrder", "takeProfitOrder"):
+            if key not in trade:
+                continue
+            order = trade[key]
+            detail[key] = (
+                {name: scalar(order[name])
+                 for name in ("id", "state", "type", "tradeID", "price")
+                 if name in order}
+                if isinstance(order, dict) else scalar(order)
+            )
+        return deepcopy(detail)
+
+    def demo_trade_handoff_evidence(self) -> Optional[dict]:
+        """Copy the last complete list-read evidence without any broker calls.
+
+        A successful flat read has an empty trade_details mapping. None means
+        unverified/unavailable; neither an old snapshot nor an audit performed
+        by an order/close path can stand in for a fresh list_open_trades read.
+        """
+        with self._demo_evidence_lock():
+            if (
+                getattr(self, "mode", None) != "demo"
+                or getattr(self, "base_url", None) != PRACTICE
+                or getattr(self, "_demo_trade_evidence_scope", None) != self._demo_evidence_scope()
+            ):
+                return None
+            return deepcopy(getattr(self, "_demo_trade_evidence", None))
 
     @property
     def entry_halt_reason(self) -> Optional[str]:
@@ -275,6 +346,9 @@ class Broker:
         Only whitelisted diagnostic fields are logged, never raw responses.
         """
 
+        capture = self._active_demo_evidence_read()
+        if capture is None:
+            self._invalidate_demo_trade_evidence()
         trade_id = str(summary.get("id") or "")
 
         def failure(reason: str, *, unknown: bool = False, **evidence):
@@ -373,6 +447,8 @@ class Broker:
                 loss_conversion=str(conversion), planned_stop_risk=str(risk),
                 cash_limit=str(cash_limit), currency="AUD",
             )
+        if capture is not None:
+            capture["trade_details"][trade_id] = self._allowlisted_demo_trade_detail(trade)
         return True
 
     def _close_exact_trade(self, client, trade_id: str) -> bool:
@@ -513,7 +589,13 @@ class Broker:
 
         found_issue = False
         closed_ids: set[str] = set()
+        capture = self._active_demo_evidence_read()
+        if capture is None:
+            self._invalidate_demo_trade_evidence()
         for attempt in range(2):
+            if capture is not None:
+                capture["trade_details"].clear()
+                capture["audit_completed"] = False
             refresh_needed = False
             for trade in trades:
                 trade_id = str(trade.get("id") or "")
@@ -549,6 +631,8 @@ class Broker:
                     flush=True,
                 )
             if not refresh_needed:
+                if capture is not None and not found_issue:
+                    capture["audit_completed"] = True
                 return None if found_issue else trades
             refreshed = self._read_open_trade_summaries(client) if attempt == 0 else None
             if refreshed is None:
@@ -1090,18 +1174,41 @@ class Broker:
         An empty list is a valid broker answer.  It must not also be used as the
         error value because callers use this result to prevent duplicate exposure.
         """
-        if self.mode == "simulation":
-            return []
-        if not (self.key and self.account):
-            return None
+        generation = self._invalidate_demo_trade_evidence()
+        local = self.__dict__.setdefault("_demo_trade_evidence_local", threading.local())
+        previous = getattr(local, "read", None)
+        capture = {"trade_details": {}, "audit_completed": False}
+        scope = self._demo_evidence_scope()
+        local.read = capture if self.mode == "demo" and getattr(self, "base_url", None) == PRACTICE else None
         try:
+            if self.mode == "simulation":
+                return []
+            if not (self.key and self.account):
+                return None
             with self._client() as client:
                 trades = self._read_open_trade_summaries(client)
                 if trades is None:
                     return None
-                return self._audit_open_trade_protection(client, trades)
+                audited = self._audit_open_trade_protection(client, trades)
+                if audited is not None and local.read is capture and capture["audit_completed"]:
+                    ids = [str(trade.get("id") or "") for trade in audited]
+                    if len(ids) == len(set(ids)) and set(ids) == set(capture["trade_details"]):
+                        evidence = {
+                            "broker_observed_at_utc": datetime.now(timezone.utc).isoformat(),
+                            "account_currency": "AUD" if getattr(self, "_account_currency", None) == "AUD" else None,
+                            "trade_details": deepcopy(capture["trade_details"]),
+                        }
+                        with self._demo_evidence_lock():
+                            # A later read, a changed scope, or an execution-path
+                            # audit must not be replaced by this older result.
+                            if generation == self._demo_trade_evidence_generation and scope == self._demo_evidence_scope():
+                                self._demo_trade_evidence = evidence
+                                self._demo_trade_evidence_scope = scope
+                return audited
         except Exception as exc:
             print(f"[OANDA] Exception fetching open trades: {exc}", flush=True)
+        finally:
+            local.read = previous
         return None
 
     def get_unrealized_profit(self, instrument: str) -> Optional[float]:
