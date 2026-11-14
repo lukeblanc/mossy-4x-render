@@ -1,4 +1,4 @@
-"""Record practice gold quotes and measure the first profitable delayed entry."""
+"""Record practice forex and gold quotes and measure the first profitable delayed entry."""
 
 import argparse
 import json
@@ -13,6 +13,9 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
+DEFAULT_INSTRUMENTS = ("AUD_USD", "GBP_USD", "EUR_USD", "XAU_USD")
+
+
 def utc(value):
     timestamp = datetime.fromisoformat(value)
     if timestamp.utcoffset() is None:
@@ -23,36 +26,48 @@ def utc(value):
 def database(path):
     connection = sqlite3.connect(path)
     connection.execute("""
-        CREATE TABLE IF NOT EXISTS gold_quotes (
-            broker_at TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS practice_quotes (
+            instrument TEXT NOT NULL,
+            broker_at TEXT NOT NULL,
             received_at TEXT NOT NULL,
             bid REAL NOT NULL,
-            ask REAL NOT NULL
+            ask REAL NOT NULL,
+            PRIMARY KEY (instrument, broker_at)
         )
     """)
+    legacy = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='gold_quotes'"
+    ).fetchone()
+    if legacy:
+        with connection:
+            connection.execute("""
+                INSERT OR IGNORE INTO practice_quotes
+                SELECT 'XAU_USD', broker_at, received_at, bid, ask FROM gold_quotes
+            """)
     return connection
 
 
-def record(connection, payload, received_at):
+def record(connection, payload, received_at, instruments=DEFAULT_INSTRUMENTS):
     for price in payload["prices"]:
-        if price["instrument"] != "XAU_USD" or not price.get("tradeable"):
+        instrument = price["instrument"]
+        if instrument not in instruments or not price.get("tradeable"):
             continue
         broker_at = utc(price["time"])
         received_at = utc(received_at)
         bid = float(price["bids"][0]["price"])
         ask = float(price["asks"][0]["price"])
         if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask):
-            raise ValueError("Invalid gold bid/ask")
+            raise ValueError("Invalid bid/ask")
         if broker_at > received_at:
-            raise ValueError("Gold quote timestamp is in the future")
+            raise ValueError("Quote timestamp is in the future")
         with connection:
             connection.execute(
-                "INSERT OR IGNORE INTO gold_quotes VALUES (?, ?, ?, ?)",
-                (broker_at, received_at, bid, ask),
+                "INSERT OR IGNORE INTO practice_quotes VALUES (?, ?, ?, ?, ?)",
+                (instrument, broker_at, received_at, bid, ask),
             )
 
 
-def delayed_entry(connection, *, side, fill, opened, closed, costs, target):
+def delayed_entry(connection, *, side, fill, opened, closed, costs, target, instrument="XAU_USD"):
     if side not in ("BUY", "SELL"):
         raise ValueError("Expected BUY or SELL")
     if not all(math.isfinite(x) for x in (fill, costs, target)) or fill <= 0 or costs < 0:
@@ -61,10 +76,10 @@ def delayed_entry(connection, *, side, fill, opened, closed, costs, target):
     if closed <= opened:
         raise ValueError("Close must follow entry")
     rows = connection.execute(
-        """SELECT broker_at, received_at, bid, ask FROM gold_quotes
-           WHERE broker_at >= ? AND received_at < ?
+        """SELECT broker_at, received_at, bid, ask FROM practice_quotes
+           WHERE instrument = ? AND broker_at >= ? AND received_at < ?
            ORDER BY received_at, broker_at""",
-        (opened, closed),
+        (instrument, opened, closed),
     )
     observed = 0
     for broker_at, received_at, bid, ask in rows:
@@ -90,20 +105,20 @@ def delayed_entry(connection, *, side, fill, opened, closed, costs, target):
             "observations_checked": observed}
 
 
-def collect(connection, seconds):
+def collect(connection, seconds, instruments):
     account = quote(os.environ["OANDA_ACCOUNT_ID"], safe="")
     key = os.environ["OANDA_API_KEY"]
     request = Request(
-        f"https://api-fxpractice.oanda.com/v3/accounts/{account}/pricing?instruments=XAU_USD",
+        f"https://api-fxpractice.oanda.com/v3/accounts/{account}/pricing?instruments={quote(','.join(instruments))}",
         headers={"Authorization": f"Bearer {key}"},
     )
     while True:
         try:
             with urlopen(request, timeout=10) as response:
                 payload = json.load(response)
-            record(connection, payload, datetime.now(timezone.utc).isoformat())
+            record(connection, payload, datetime.now(timezone.utc).isoformat(), instruments)
         except (URLError, ValueError, KeyError, IndexError, TypeError) as exc:
-            print(f"Gold quote unavailable ({type(exc).__name__})", flush=True)
+            print(f"Practice quote unavailable ({type(exc).__name__})", flush=True)
         time.sleep(seconds)
 
 
@@ -113,7 +128,9 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     capture = commands.add_parser("collect")
     capture.add_argument("--seconds", type=int, default=5)
+    capture.add_argument("--instruments", nargs="+", choices=DEFAULT_INSTRUMENTS, default=DEFAULT_INSTRUMENTS)
     replay = commands.add_parser("replay")
+    replay.add_argument("--instrument", choices=DEFAULT_INSTRUMENTS, default="XAU_USD")
     replay.add_argument("--side", choices=["BUY", "SELL"], required=True)
     replay.add_argument("--fill", type=float, required=True)
     replay.add_argument("--opened", required=True)
@@ -125,11 +142,11 @@ def main():
         parser.error("--seconds must be positive")
     with database(args.database) as connection:
         if args.command == "collect":
-            collect(connection, args.seconds)
+            collect(connection, args.seconds, args.instruments)
         else:
             print(json.dumps(delayed_entry(
                 connection, side=args.side, fill=args.fill, opened=args.opened,
-                closed=args.closed, costs=args.costs, target=args.target,
+                closed=args.closed, costs=args.costs, target=args.target, instrument=args.instrument,
             ), indent=2))
 
 
