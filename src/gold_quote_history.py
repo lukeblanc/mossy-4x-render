@@ -105,21 +105,40 @@ def delayed_entry(connection, *, side, fill, opened, closed, costs, target, inst
             "observations_checked": observed}
 
 
-def collect(connection, seconds, instruments):
-    account = quote(os.environ["OANDA_ACCOUNT_ID"], safe="")
-    key = os.environ["OANDA_API_KEY"]
+def collect(connection, seconds, instruments, *, account, key):
+    account = quote(account, safe="")
     request = Request(
         f"https://api-fxpractice.oanda.com/v3/accounts/{account}/pricing?instruments={quote(','.join(instruments))}",
         headers={"Authorization": f"Bearer {key}"},
     )
+    recorded = set()
     while True:
         try:
             with urlopen(request, timeout=10) as response:
                 payload = json.load(response)
             record(connection, payload, datetime.now(timezone.utc).isoformat(), instruments)
+            available = {
+                instrument for instrument, in connection.execute(
+                    "SELECT DISTINCT instrument FROM practice_quotes"
+                )
+            }
+            if available != recorded:
+                print(f"[PRACTICE_QUOTES] stored={','.join(sorted(available))}", flush=True)
+                recorded = available
         except (URLError, ValueError, KeyError, IndexError, TypeError) as exc:
             print(f"Practice quote unavailable ({type(exc).__name__})", flush=True)
         time.sleep(seconds)
+
+
+def collect_for_worker(path, account, key):
+    """Keep network and SQLite work off the trading event loop."""
+    try:
+        with database(path) as connection:
+            print("[PRACTICE_QUOTES] collector started", flush=True)
+            collect(connection, 5, DEFAULT_INSTRUMENTS, account=account, key=key)
+    except (OSError, sqlite3.Error) as exc:
+        print(f"[PRACTICE_QUOTES] collector stopped ({type(exc).__name__})", flush=True)
+
 
 
 def main():
@@ -142,7 +161,8 @@ def main():
         parser.error("--seconds must be positive")
     with database(args.database) as connection:
         if args.command == "collect":
-            collect(connection, args.seconds, args.instruments)
+            collect(connection, args.seconds, args.instruments,
+                    account=os.environ["OANDA_ACCOUNT_ID"], key=os.environ["OANDA_API_KEY"])
         else:
             print(json.dumps(delayed_entry(
                 connection, side=args.side, fill=args.fill, opened=args.opened,
