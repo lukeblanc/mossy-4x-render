@@ -97,6 +97,7 @@ from src.decision_observer import (
 from src.trade_journal import TradeJournal, default_journal_path, run_performance_analysis
 from src.scheduler_policy import install_runtime_jobs
 from src.execution_quality import summarize_fill_execution
+from src.gold_quote_history import collect_for_worker
 
 VERSION = "v1.6.1"
 
@@ -2261,6 +2262,13 @@ async def runner() -> None:
     _SCHEDULER_REF = scheduler
     BOT_STATE["scheduler_alive"] = True
     asyncio.create_task(watchdog.run())
+    if broker.mode == "demo" and broker.base_url == PRACTICE and broker.account and broker.key:
+        threading.Thread(
+            target=collect_for_worker,
+            args=(DATA_DIR / "practice_quotes.sqlite", broker.account, broker.key),
+            name="practice-quote-recorder",
+            daemon=True,
+        ).start()
     await heartbeat()
     await decision_cycle()
     while True:
