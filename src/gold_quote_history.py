@@ -125,7 +125,9 @@ def collect(connection, seconds, instruments, *, account, key):
             if available != recorded:
                 print(f"[PRACTICE_QUOTES] stored={','.join(sorted(available))}", flush=True)
                 recorded = available
-        except (URLError, ValueError, KeyError, IndexError, TypeError) as exc:
+        # Reading an opened response can raise TimeoutError directly rather
+        # than URLError. Keep it in the normal retry loop and retain its delay.
+        except (URLError, TimeoutError, ValueError, KeyError, IndexError, TypeError) as exc:
             print(f"Practice quote unavailable ({type(exc).__name__})", flush=True)
         time.sleep(seconds)
 
