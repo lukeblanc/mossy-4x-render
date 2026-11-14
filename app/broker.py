@@ -21,15 +21,63 @@ PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
 
 
+class _TradeReadDiagnostics:
+    """Observe a failed read without changing its exception or retry policy."""
+
+    def __init__(self, trade_id: str):
+        self.trade_id = trade_id
+        self.stage = "trade-detail"
+        self.http_status = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc is None:
+            return False
+        if isinstance(exc, httpx.TimeoutException):
+            kind = "timeout"
+        elif isinstance(exc, httpx.TransportError):
+            kind = "transport"
+        elif isinstance(exc, json.JSONDecodeError):
+            kind = "invalid-json"
+        elif self.http_status is not None and self.http_status != 200:
+            kind = "http"
+        else:
+            kind = "unexpected"
+        print("[BROKER][TRADE-READ-FAILURE] " + json.dumps({
+            "trade_id": self.trade_id, "read_stage": self.stage,
+            "failure_kind": kind, "http_status": self.http_status,
+        }, sort_keys=True), flush=True)
+        # Never log the exception text, request URL, headers or response body.
+        # Propagate the original failure to the existing fail-closed callers.
+        return False
+
+    def get(self, client, path, *, stage: str, **kwargs):
+        self.stage = stage
+        self.http_status = None
+        response = client.get(path, **kwargs)
+        status = response.status_code
+        if type(status) is int and 100 <= status <= 599:
+            self.http_status = status
+        return response
+
+
 def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
     """Read one exact trade, with a bounded list fallback for detail 404s."""
     ticket = str(trade_id)
     if not ticket.isascii() or not ticket.isdigit() or int(ticket) <= 0:
         return None
-    response = client.get(f"/v3/accounts/{account}/trades/{ticket}")
+    with _TradeReadDiagnostics(ticket) as diagnostic:
+        return _read_trade_details(client, account, ticket, diagnostic)
+
+
+def _read_trade_details(client, account: str, ticket: str, diagnostic) -> Optional[Dict]:
+    response = diagnostic.get(client, f"/v3/accounts/{account}/trades/{ticket}",
+                              stage="trade-detail")
     if response.status_code == 404:
         # Explicit IDs and ALL include closed trades without scanning history.
-        response = client.get(f"/v3/accounts/{account}/trades",
+        response = diagnostic.get(client, f"/v3/accounts/{account}/trades", stage="exact-trade-list",
                               params={"ids": ticket, "state": "ALL", "count": 1})
         if response.status_code != 200:
             raise RuntimeError(f"broker trade list unavailable: HTTP {response.status_code}")
@@ -37,6 +85,8 @@ def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
         candidates = payload.get("trades") if isinstance(payload, dict) else None
         if candidates == []:
             from app.trade_transactions import read_full_close
+            diagnostic.stage = "transaction-close-evidence"
+            diagnostic.http_status = None
             return read_full_close(client, account, ticket)
         if not isinstance(candidates, list) or len(candidates) != 1:
             print(f"[JOURNAL][LOOKUP] trade_id={ticket} exact_list_match=False", flush=True)

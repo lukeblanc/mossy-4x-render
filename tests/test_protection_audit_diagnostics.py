@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 
+import httpx
 import pytest
 
 from app.broker import Broker
@@ -268,4 +269,67 @@ def test_startup_unavailable_exact_trade_evidence_closes_but_never_clears_halt(a
     assert 'emergency_close=True' in output
     assert '"result": "close-fill-confirmed"' in output
     assert '"detail_state": "unavailable"' in output
+    assert '[BROKER][RECOVERY]' not in output
+
+
+@pytest.mark.parametrize(('failure', 'stage', 'kind', 'status', 'read_count'), [
+    ('unauthorized', 'trade-detail', 'http', 401, 1),
+    ('rate-limit', 'trade-detail', 'http', 429, 1),
+    ('server-error', 'trade-detail', 'http', 503, 1),
+    ('list-server-error', 'exact-trade-list', 'http', 503, 2),
+    ('timeout', 'trade-detail', 'timeout', None, 1),
+    ('transport', 'trade-detail', 'transport', None, 1),
+    ('list-timeout', 'exact-trade-list', 'timeout', None, 2),
+    ('invalid-json', 'trade-detail', 'invalid-json', 200, 1),
+    ('list-invalid-json', 'exact-trade-list', 'invalid-json', 200, 2),
+    ('transaction-timeout', 'transaction-close-evidence', 'timeout', None, 3),
+    ('unexpected', 'trade-detail', 'unexpected', None, 1),
+])
+def test_failed_read_evidence_preserves_halt_and_emergency_close(
+    audited_broker, monkeypatch, capsys, failure, stage, kind, status, read_count
+):
+    broker, recorded = audited_broker
+    secret = 'private-account-and-bearer-token'
+    calls = []
+    closes = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1 and failure.startswith(('list-', 'transaction-')):
+            return httpx.Response(404, json={})
+        if len(calls) == 2 and failure.startswith('transaction-'):
+            return httpx.Response(200, json={'trades': []})
+        if failure.endswith('timeout'):
+            raise httpx.ReadTimeout(secret, request=request)
+        if failure == 'transport':
+            raise httpx.ConnectError(secret, request=request)
+        if failure == 'unexpected':
+            raise ValueError(secret)
+        if failure.endswith('invalid-json'):
+            return httpx.Response(200, text=secret)
+        return httpx.Response(status, json={'errorMessage': secret})
+
+    # The separate emergency-close behavior is already covered above. Isolate
+    # the failed audit read here so its exact GET count cannot hide retries.
+    monkeypatch.setattr(broker, '_close_exact_trade', lambda client, ticket: closes.append(ticket) or False)
+    with httpx.Client(base_url='https://broker.invalid',
+                      transport=httpx.MockTransport(handler)) as client:
+        result = broker._audit_open_trade_protection(
+            client, [{'id': '2', 'instrument': 'AUD_USD', 'stopLossOrderID': '3'}]
+        )
+    assert result is None
+    assert len(calls) == read_count
+    assert all(request.method == 'GET' for request in calls)
+    assert closes == ['2']
+    assert broker.entry_halt_reason == 'protective-stop-audit-unavailable'
+    assert broker._entry_halt_path.read_text().strip() == broker.entry_halt_reason
+    output = capsys.readouterr().out
+    event = json.loads(next(line.split('] ', 1)[1] for line in output.splitlines()
+                            if line.startswith('[BROKER][TRADE-READ-FAILURE] ')))
+    assert event == {'trade_id': '2', 'read_stage': stage,
+                     'failure_kind': kind, 'http_status': status}
+    assert 'trade-details-unavailable' in output
+    assert secret not in output
+    assert broker.account not in output
+    assert broker.key not in output
     assert '[BROKER][RECOVERY]' not in output

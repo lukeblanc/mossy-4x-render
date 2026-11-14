@@ -56,3 +56,23 @@ def test_successful_details_need_no_fallback_and_must_match_id():
     assert len(requests) == 1
     with client_for([(200, {"trade": {"id": "999"}})], []) as client:
         assert read_trade_details(client, "account", "6515") is None
+
+
+def test_read_diagnostics_preserve_original_transport_exception(capsys):
+    error = httpx.ReadTimeout('private-request-url-and-key')
+    def handler(request):
+        raise error
+    with httpx.Client(base_url='https://broker.invalid',
+                      transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.ReadTimeout) as raised:
+            read_trade_details(client, 'private-account', '6515')
+    assert raised.value is error
+    output = capsys.readouterr().out
+    assert 'private-request-url-and-key' not in output
+    assert 'private-account' not in output
+
+
+def test_successful_read_does_not_emit_failure_event(capsys):
+    with client_for([(200, {'trade': {'id': '6515', 'state': 'OPEN'}})], []) as client:
+        assert read_trade_details(client, 'account', '6515')['id'] == '6515'
+    assert 'TRADE-READ-FAILURE' not in capsys.readouterr().out
