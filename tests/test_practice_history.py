@@ -94,6 +94,8 @@ def test_journal_context_requires_exact_trade_identity_and_time():
         timestamp_utc="2026-11-01T00:00:03+00:00", run_tag="MINI_RUN",
         gating_flags={"runtime_revision": "known-revision"})])
     assert report["journal_context_matches"] == 1
+    assert report["by_run_tag"]["MINI_RUN"]["trades"] == 1
+    assert Decimal(report["by_run_tag"]["MINI_RUN"]["net_pl_ccy"]) == trades[0]["closed_net_pl"]
     assert trades[0]["journal_context"]["gating_flags"]["runtime_revision"] == "known-revision"
     report, trades, _ = review(journal_rows=[dict(trade_id="3", instrument="AUD_USD",
         timestamp_utc="2026-11-02T00:00:03+00:00", run_tag="MINI_RUN")])
