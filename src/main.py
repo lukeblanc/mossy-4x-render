@@ -2268,6 +2268,9 @@ async def runner() -> None:
     if broker.mode == "demo" and broker.base_url == PRACTICE and broker.account and broker.key:
         from src.practice_history import start_history_monitor
         start_history_monitor(DATA_DIR, journal.path)
+        from src.research_registry import publish_registry
+        threading.Thread(target=publish_registry, args=(DATA_DIR,),
+                         name="research-catalogue-import", daemon=True).start()
         threading.Thread(
             target=collect_for_worker,
             args=(DATA_DIR / "practice_quotes.sqlite", broker.account, broker.key),

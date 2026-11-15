@@ -207,6 +207,9 @@ def build_review(transactions, *, account, cursor, balance, journal_rows=()):
         "recent_80_closed": metrics(closed[-80:]), "open_trade_count": len(rows) - len(closed),
         "open_trades_realized_charges_and_pl_ccy": str(sum((t["realized_net_to_date"] for t in rows if not t["close_timestamp_utc"]), ZERO)),
         "by_instrument": {i: metrics([t for t in closed if t["instrument"] == i]) for i in instruments},
+        "by_run_tag": {tag: metrics([t for t in closed if (t.get("journal_context") or {}).get("run_tag") == tag])
+                       for tag in sorted({(t.get("journal_context") or {}).get("run_tag") for t in closed
+                                          if isinstance((t.get("journal_context") or {}).get("run_tag"), str)})},
         "execution_by_instrument": {i: aggregate_execution_quality([f for f in fills if f["instrument"] == i]) for i in instruments},
         "journal_context_matches": sum(t["journal_context"] is not None for t in rows),
         "limitations": ["Multi-trade commission is allocated by absolute filled units; trade results and win counts using that allocation are estimates.",
@@ -357,6 +360,12 @@ def run_once(data_dir, journal_path):
         print("[PRACTICE-HISTORY] " + _json({k: review[k] for k in (
             "ledger_status", "last_transaction_id", "transaction_count", "new_transactions",
             "account_net_excluding_transfers_ccy", "closed", "journal_context_matches", "generated_at_utc")}), flush=True)
+        # Fixed allowlisted cohort only; arbitrary journal tags never enter logs.
+        if "MINI_RUN" in review["by_run_tag"]:
+            print("[PRACTICE-HISTORY-COHORT] " + _json({"run_tag": "MINI_RUN",
+                  "account_currency": "AUD", "metrics": review["by_run_tag"]["MINI_RUN"],
+                  "generated_at_utc": review["generated_at_utc"],
+                  "basis": "after-cost broker ledger; not adaptive learner input"}), flush=True)
         return review
     except Exception as exc:
         reason = str(exc) if isinstance(exc, EvidenceError) else type(exc).__name__

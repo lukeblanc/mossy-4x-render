@@ -1,0 +1,62 @@
+{
+  "schema": "mossy.research-catalogue.v1",
+  "source_title": "Mossy 4X market research — 14 November 2026 (Perth)",
+  "import_scope": "Research hypotheses only; historical price/news claims have not been independently reverified and are excluded.",
+  "execution_policy": "Research only. No strategy, sizing, trading universe or promotion changes.",
+  "experiments": [
+    {
+      "id": "gold-dollar-yield-confirmation-v1",
+      "market": "XAU_USD",
+      "status": "PROPOSED",
+      "hypothesis": "Compare existing signals with longs allowed only after both the dollar index and US two-year yield fell over the previous completed hour, and shorts only after both rose.",
+      "required_data": ["Timestamped original gold opportunities and their strategy version", "Gold bid/ask history", "Dollar index and US two-year yield observations available before each decision", "Costs and AUD conversion"],
+      "validation": "Freeze rules before chronological holdout; report original opportunities, kept and skipped trades, after-cost expectancy, drawdown, coverage and forward-paper results.",
+      "results": null
+    },
+    {
+      "id": "fx-dollar-confirmation-v1",
+      "market": "GBP_USD,EUR_USD,USD_JPY",
+      "status": "PROPOSED",
+      "hypothesis": "Compare GBP/USD and EUR/USD signals with prior completed-hour dollar-index confirmation. Separately tag documented yen intervention events; fixed historical price thresholds require revalidation.",
+      "required_data": ["Original signal and blocked-opportunity timestamps", "FX bid/ask and costs", "Timestamped dollar-index observations", "Authoritative intervention-event timestamps"],
+      "validation": "Freeze candidate definition and chronological holdout; report net results per original opportunity and session; do not merge different currency pairs' price units.",
+      "results": null
+    },
+    {
+      "id": "oil-weekend-gap-v1",
+      "market": "WTI,Brent",
+      "status": "PROPOSED",
+      "hypothesis": "Compare continuation and reversal after the first completed 30-minute range following a weekend reopen.",
+      "required_data": ["Venue-specific futures bid/ask and trading calendar", "Weekend/reopen gaps", "Fees, rolls and slippage assumptions", "Separate CFD dataset if analysed"],
+      "validation": "Treat futures and weekend CFDs separately; freeze gap/range rules before later-period holdout and include contract rolls and costs.",
+      "results": null
+    },
+    {
+      "id": "bitcoin-close-retest-v1",
+      "market": "BTC",
+      "status": "PROPOSED",
+      "hypothesis": "Compare immediate range breakouts with waiting for a completed 15-minute close outside a predefined range and a retest within four bars.",
+      "required_data": ["Venue-specific BTC bid/ask history", "Predefined range and trigger timestamps", "Venue fees and funding", "Completed 15-minute bars"],
+      "validation": "Freeze range definition before holdout; avoid intrabar lookahead; include missed trades and costs per original opportunity.",
+      "results": null
+    },
+    {
+      "id": "shib-btc-relative-performance-v1",
+      "market": "SHIB,BTC",
+      "status": "PROPOSED",
+      "hypothesis": "Compare simulated SHIB returns with BTC over identical hours after venue-specific AUD conversion and fees.",
+      "required_data": ["Actual venue-specific AUD bid/ask for both assets", "Fee schedules", "Matched timestamps and conversion quotes"],
+      "validation": "Use the same holding periods and costs; no assumption that FOREX.com lists SHIB; report missing coverage and later-period holdout.",
+      "results": null
+    },
+    {
+      "id": "delayed-entry-after-positive-move-v1",
+      "market": "XAU_USD,AUD_USD,GBP_USD,EUR_USD",
+      "status": "PROPOSED",
+      "hypothesis": "Measure the first observed quote where an existing entry would show a positive move after costs, and the worse entry price and remaining target distance if entering then.",
+      "required_data": ["Original entry/exit timestamps, fill, side and target", "Fresh bid/ask observations received before original close", "Full interval coverage and quote-gap audit", "Round-trip charges excluding spread"],
+      "validation": "The current replay describes historical timing only. A profitable original position at trigger time is not profit for the new entry. A strategy comparison also needs subsequent exits, stop ordering, missed trades, after-cost P&L and untouched chronological holdout.",
+      "results": null
+    }
+  ]
+}
