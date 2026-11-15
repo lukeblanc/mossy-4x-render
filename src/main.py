@@ -2069,6 +2069,9 @@ async def decision_cycle() -> None:
                     "ema_slow": diagnostics.get("ema_slow"),
                 }
                 gating_flags = {
+                    "runtime_revision": _runtime_revision(),
+                    "entry_signal": evaluation.signal,
+                    "decision_reason": evaluation.reason,
                     "session_ok": session_decision.allowed,
                     "session_risk_scale": session_risk_scale,
                     "spread_ok": risk_reason != "spread-too-wide",
@@ -2263,6 +2266,8 @@ async def runner() -> None:
     BOT_STATE["scheduler_alive"] = True
     asyncio.create_task(watchdog.run())
     if broker.mode == "demo" and broker.base_url == PRACTICE and broker.account and broker.key:
+        from src.practice_history import start_history_monitor
+        start_history_monitor(DATA_DIR, journal.path)
         threading.Thread(
             target=collect_for_worker,
             args=(DATA_DIR / "practice_quotes.sqlite", broker.account, broker.key),
