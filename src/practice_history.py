@@ -225,7 +225,14 @@ def read_context(path):
     try:
         with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = [dict(r) for r in conn.execute("SELECT * FROM trades WHERE broker_confirmed=1")]
+            resolutions = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                       "AND name='journal_entry_resolutions'").fetchone()
+            exclude = (" WHERE NOT EXISTS (SELECT 1 FROM journal_entry_resolutions r "
+                       "WHERE r.trade_id=trades.trade_id)" if resolutions else "")
+            # broker_confirmed verifies an EXIT, not an entry. Open rows leave
+            # it NULL. The broker ID/instrument/time join in build_review is
+            # the authority for attaching entry context to open or closed trades.
+            rows = [dict(r) for r in conn.execute("SELECT * FROM trades" + exclude)]
         for row in rows:
             for key in ("gating_flags", "indicators_snapshot"):
                 row[key] = json.loads(row[key]) if row.get(key) else None

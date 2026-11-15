@@ -70,12 +70,14 @@ OANDA and the original journal/seed archive.
 After deploy, check the running revision, a VERIFIED history log with zero
 allocation residual, unchanged risk limits, and healthy ordinary cycles.
 
-Implementation validation: 1,004 tests passed and one skipped locally, including
+Implementation validation: 1,005 tests passed and one skipped locally, including
 cost allocation, financing reconciliation, partial closes, gap/duplicate rejection,
 incremental restart, no-op retry, preservation after failed sync and live-mode
 blocking. A private one-off run against the saved archive reconciled successfully;
 its second run reproduced the same totals without modifying the original archive
-or journal. Publishing and deployment remain pending approval.
+or journal. Open entry context is joined independently of exit confirmation;
+resolved duplicate/cancelled journal rows are excluded. Verify the deployed
+revision and current sync status in private Render logs.
 
 Primary specifications:
 https://developer.oanda.com/rest-live-v20/transaction-df/

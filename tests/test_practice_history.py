@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from src.account_reconciliation import EvidenceError
-from src.practice_history import build_review, sync_history, start_history_monitor
+from src.practice_history import build_review, sync_history, start_history_monitor, read_context
 
 ACCOUNT = "101-001-123-001"
 
@@ -99,6 +99,26 @@ def test_journal_context_requires_exact_trade_identity_and_time():
         timestamp_utc="2026-11-02T00:00:03+00:00", run_tag="MINI_RUN")])
     assert report["journal_context_matches"] == 0
     assert trades[0]["journal_context"] is None
+
+
+def test_open_entry_context_does_not_require_exit_confirmation(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE trades (trade_id TEXT, instrument TEXT, timestamp_utc TEXT, "
+                     "broker_confirmed INTEGER, gating_flags TEXT, indicators_snapshot TEXT)")
+        conn.execute("CREATE TABLE journal_entry_resolutions (trade_id TEXT)")
+        conn.executemany("INSERT INTO trades VALUES (?, 'AUD_USD', ?, NULL, ?, '{}')", [
+            ("3", "2026-11-01T00:00:03Z", json.dumps({"runtime_revision": "entry-revision", "decision_reason": "trend"})),
+            ("4", "2026-11-01T00:00:04Z", "{}")])
+        conn.execute("INSERT INTO journal_entry_resolutions VALUES ('4')")
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    context = read_context(path)
+    assert [r["trade_id"] for r in context] == ["3"]
+    report, trades, _ = review(history()[:4], balance="99.6", journal_rows=context)
+    assert report["journal_context_matches"] == 1
+    assert trades[0]["closed_net_pl"] is None
+    assert trades[0]["journal_context"]["gating_flags"]["decision_reason"] == "trend"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
 
 
 @pytest.fixture
