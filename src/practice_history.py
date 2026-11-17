@@ -354,6 +354,16 @@ def sync_history(data_dir, journal_path, *, transport=None):
             return review
 
 
+def _refresh_research_digest(data_dir, journal_path, review):
+    # Optional research output must never turn a successful accounting sync into
+    # a failure or reach the order/risk-control path.
+    try:
+        from src.research_digest import publish_digest
+        publish_digest(data_dir, journal_path, review)
+    except Exception:
+        print('[RESEARCH_DIGEST] {"status":"UNAVAILABLE","reason":"digest-refresh-failed","promotion_allowed":false}', flush=True)
+
+
 def run_once(data_dir, journal_path):
     try:
         review = sync_history(data_dir, journal_path)
@@ -366,6 +376,7 @@ def run_once(data_dir, journal_path):
                   "account_currency": "AUD", "metrics": review["by_run_tag"]["MINI_RUN"],
                   "generated_at_utc": review["generated_at_utc"],
                   "basis": "after-cost broker ledger; not adaptive learner input"}), flush=True)
+        _refresh_research_digest(data_dir, journal_path, review)
         return review
     except Exception as exc:
         reason = str(exc) if isinstance(exc, EvidenceError) else type(exc).__name__
@@ -380,6 +391,7 @@ def run_once(data_dir, journal_path):
                     _atomic(output / "status.json", _json(status))
                 except OSError:
                     pass
+        _refresh_research_digest(data_dir, journal_path, None)
         return None
 
 
