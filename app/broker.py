@@ -21,6 +21,14 @@ PRACTICE = "https://api-fxpractice.oanda.com"
 LIVE = "https://api-fxtrade.oanda.com"
 
 
+class TradeReadError(RuntimeError):
+    """Expose only a safe status code, never a broker body or account URL."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"broker trade read unavailable: HTTP {status_code}")
+
+
 def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
     """Read one exact trade, with a bounded list fallback for detail 404s."""
     ticket = str(trade_id)
@@ -32,7 +40,7 @@ def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
         response = client.get(f"/v3/accounts/{account}/trades",
                               params={"ids": ticket, "state": "ALL", "count": 1})
         if response.status_code != 200:
-            raise RuntimeError(f"broker trade list unavailable: HTTP {response.status_code}")
+            raise TradeReadError(response.status_code)
         payload = response.json()
         candidates = payload.get("trades") if isinstance(payload, dict) else None
         if candidates == []:
@@ -45,7 +53,7 @@ def read_trade_details(client, account: str, trade_id: str) -> Optional[Dict]:
         source = "exact-list"
     else:
         if response.status_code != 200:
-            raise RuntimeError(f"broker trade details unavailable: HTTP {response.status_code}")
+            raise TradeReadError(response.status_code)
         payload = response.json()
         trade = payload.get("trade") if isinstance(payload, dict) else None
         source = "detail"
@@ -360,8 +368,15 @@ class Broker:
 
         try:
             trade = read_trade_details(client, self.account, trade_id)
-        except Exception:
-            return failure("trade-details-unavailable", unknown=True)
+        except Exception as exc:
+            # Error text/URLs can contain credentials or account identifiers.
+            kind = ("http-status" if isinstance(exc, TradeReadError) else
+                    "transport" if isinstance(exc, httpx.TransportError) else
+                    "invalid-response" if isinstance(exc, (ValueError, TypeError)) else
+                    "unexpected")
+            return failure("trade-details-unavailable", unknown=True,
+                           error_kind=kind,
+                           http_status=exc.status_code if isinstance(exc, TradeReadError) else None)
         if not isinstance(trade, dict):
             return failure("trade-details-unverified", unknown=True)
         if str(trade.get("id") or "") != trade_id:
