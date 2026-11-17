@@ -38,7 +38,7 @@ fill, an empty fresh open list, and another exact closure check. It logs
 evidence latches a halt and audits both the known filled trade and remaining
 exposure, even when the list omits that fill. Unsafe or unknown exact details
 retain emergency-close behavior; a positively closed trade needs no repeat close.
-No path clears an existing halt or retries the opening order.
+No normal audit path clears an existing halt or retries the opening order.
 
 The opted-in ten-fill experiment's demo/practice and A$0.20 guards also apply
 after completion, before its existing serialized Champion handoff. This does not
@@ -84,6 +84,35 @@ Before approved recovery:
 4. Obtain approval for the controlled deployment/restart or other recovery action
 5. After recovery, verify the audit/recovery log and halt field, journal consistency,
    intended sizing and confirmed broker stop before claiming entries are healthy
+
+### Explicit incident recovery
+
+`MOSSY_PROTECTION_RECOVERY` is an optional operator-request JSON object containing
+`trade_id`, `stop_order_id`, `incident_at_utc` and `expires_at_utc`. Do not set it
+until the incident and the consequential resumption of demo entries are reviewed
+and authorized. It is evaluated once before status and scheduler threads start.
+It is not a general reset flag. Remove/empty it after the controlled rollout.
+
+Recovery requires demo/practice, a cash limit and hard-loss limit of at most
+A$0.20, one-position limits, the exact unavailable-audit halt, and a marker
+modification time within ten seconds of the reviewed incident. The request must
+expire within the next hour. Two fresh summary/open-trades/open-positions/pending-
+orders checks must agree on a single transaction cursor and show a flat AUD
+account. Exact opening and full-close transactions must identify the incident
+trade, its historical stop must be terminal and correctly bound, and existing
+journal direction, quantity, prices, closure time and realized P/L must agree.
+The journal's optional exit price is verified when present; exact broker close
+transactions supply that evidence when the profit guard recorded no exit price.
+
+Only after these checks does recovery write a durable one-use receipt and archive
+the unchanged halt marker. It makes no broker writes, does not alter journal or
+risk state, and cannot replay against a later halt. Failed/missing/contradictory
+evidence retains the halt. A successful recovery permits the existing strategy
+to evaluate demo entries; it does not force a trade or certify future profits.
+
+Audit read failures now include an allowlisted error category and an HTTP status
+when available. Raw error messages, bodies, account URLs and credentials remain
+excluded. Authentication failures still fail closed without a retry or clearance.
 
 The September 28 incident had a verified stop at entry and a later generic audit
 failure. Conversion drift is a plausible explanation, not a confirmed root cause

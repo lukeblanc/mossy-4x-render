@@ -269,3 +269,20 @@ def test_startup_unavailable_exact_trade_evidence_closes_but_never_clears_halt(a
     assert '"result": "close-fill-confirmed"' in output
     assert '"detail_state": "unavailable"' in output
     assert '[BROKER][RECOVERY]' not in output
+
+
+@pytest.mark.parametrize('status', [401, 403, 429, 500, 503])
+def test_detail_failure_reports_safe_status_without_weakening_halt(audited_broker, monkeypatch, capsys, status):
+    broker, _ = audited_broker
+    original_get = AuditClient.get
+    def unavailable(self, path, params=None):
+        if path.endswith('/trades/2'):
+            return DummyResponse(status_code=status, payload={'errorMessage': 'private-secret'})
+        return original_get(self, path, params=params)
+    monkeypatch.setattr(AuditClient, 'get', unavailable)
+    assert broker.list_open_trades() is None
+    output = capsys.readouterr().out
+    assert f'"http_status": {status}' in output
+    assert '"error_kind": "http-status"' in output
+    assert 'private-secret' not in output
+    assert broker.entry_halt_reason == 'protective-stop-audit-unavailable'

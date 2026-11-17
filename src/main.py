@@ -2372,6 +2372,10 @@ if __name__ == "__main__":
         if _as_bool(os.getenv("RUN_PERFORMANCE_ANALYSIS_ONLY", False)):
             sys.exit(0)
 
+    # Explicit reviewed-incident recovery must precede status/scheduler threads.
+    # Ordinary startup and clean broker polls never clear a retained safety halt.
+    from src.protection_recovery import recover_reviewed_incident
+    recover_reviewed_incident(broker, journal.path, os.getenv("MOSSY_PROTECTION_RECOVERY", ""))
     launch_status_server_thread()
     try:
         asyncio.run(runner())
